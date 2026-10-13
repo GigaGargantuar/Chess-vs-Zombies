@@ -1,0 +1,400 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace ChessVsZombies.Core;
+
+public sealed class SavedUpgradeProgress
+{
+    [JsonRequired]
+    public int PullCount { get; set; }
+    [JsonRequired]
+    public int Available { get; set; }
+}
+
+public sealed class EconomyState
+{
+    [JsonRequired]
+    public int Currency { get; set; }
+    [JsonRequired]
+    public ulong RandomState { get; set; }
+    [JsonRequired]
+    public Dictionary<UpgradeKind, SavedUpgradeProgress> Upgrades { get; set; } = [];
+}
+
+public sealed class SavedTurret
+{
+    [JsonRequired]
+    public int Id { get; set; }
+    [JsonRequired]
+    public PieceKind Kind { get; set; }
+    [JsonRequired]
+    public Cell Cell { get; set; }
+    [JsonRequired]
+    public float Hp { get; set; }
+    // Both shapes are accepted during deserialization; version-specific validation
+    // requires exactly the representation belonging to that checkpoint version.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<UpgradeKind, int>? UpgradePoints { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<UpgradeKind>? Upgrades { get; set; }
+    [JsonRequired]
+    public List<Cell> JumpPattern { get; set; } = [];
+}
+
+public sealed class SavedBarrier
+{
+    [JsonRequired]
+    public Cell Cell { get; set; }
+    [JsonRequired]
+    public float Hp { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Material? Content { get; set; }
+}
+
+public sealed class BlockInventoryState
+{
+    [JsonRequired]
+    public int DirtCount { get; set; }
+    [JsonRequired]
+    public int StoneCount { get; set; }
+    [JsonRequired]
+    public bool HasShovel { get; set; }
+    [JsonRequired]
+    public bool HasPickaxe { get; set; }
+}
+
+/// <summary>A preparation-phase checkpoint. Active waves restart from this snapshot.</summary>
+public sealed class CampaignState
+{
+    [JsonRequired]
+    public int Version { get; set; } = 3;
+    [JsonRequired]
+    public EconomyState Economy { get; set; } = new();
+    [JsonRequired]
+    public int LevelNumber { get; set; } = 1;
+    [JsonRequired]
+    public float CoreHp { get; set; } = Balance.CoreHp;
+    [JsonRequired]
+    public List<SavedTurret> Turrets { get; set; } = [];
+    [JsonRequired]
+    public List<SavedBarrier> Barriers { get; set; } = [];
+    [JsonRequired]
+    public List<Cell> Excavated { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BlockInventoryState? Inventory { get; set; }
+}
+
+public static class SaveStore
+{
+    private const int LegacyBarrierHp = 40;
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter(allowIntegerValues: false), new CellConverter() }
+    };
+
+    public static void Save(GameSession session, string path)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (session.Phase != GamePhase.Building)
+            throw new InvalidOperationException("Campaign checkpoints can only be saved while building.");
+        var state = session.ExportState();
+        Validate(state);
+        var fullPath = Path.GetFullPath(path);
+        var directory = Path.GetDirectoryName(fullPath)!;
+        Directory.CreateDirectory(directory);
+        var temporaryPath = Path.Combine(directory, $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(stream, state, JsonOptions);
+                stream.Flush(flushToDisk: true);
+            }
+            // The temporary file lives on the same volume. Existing checkpoints are replaced
+            // only after the complete new checkpoint has been written and flushed.
+            if (File.Exists(fullPath))
+            {
+                PreserveLegacyBackup(fullPath);
+                File.Replace(temporaryPath, fullPath, destinationBackupFileName: null);
+            }
+            else File.Move(temporaryPath, fullPath);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+        }
+    }
+
+    public static bool TrySave(GameSession session, string path, out string error)
+    {
+        try
+        {
+            Save(session, path);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception) when (IsSaveException(exception))
+        {
+            error = $"Could not save campaign: {exception.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>A missing file returns false with no error. Failed loads never modify the file.</summary>
+    public static bool TryLoad(string path, out GameSession? session, out string error, LevelCatalog? levels = null)
+    {
+        session = null;
+        error = string.Empty;
+        try
+        {
+            if (!File.Exists(path)) return false;
+            using var stream = File.OpenRead(path);
+            var state = JsonSerializer.Deserialize<CampaignState>(stream, JsonOptions)
+                ?? throw new InvalidDataException("The checkpoint does not contain a campaign.");
+            Validate(state);
+            var originalVersion = state.Version;
+            var migrationNotice = state.Version == 1 ? MigrateLegacy(state) : string.Empty;
+            if (state.Version < 3)
+                migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateBlockInventory(state, originalVersion) }.Where(text => text.Length > 0));
+            Validate(state);
+            var restored = new GameSession(levels: levels);
+            restored.RestoreCheckpoint(state);
+            restored.MigrationNotice = migrationNotice;
+            LevelCatalog.Validate(restored.Level);
+            session = restored;
+            return true;
+        }
+        catch (Exception exception) when (IsSaveException(exception))
+        {
+            error = $"Could not load campaign; the original file was preserved. {exception.Message}";
+            return false;
+        }
+    }
+
+    private static bool IsSaveException(Exception exception) => exception is IOException or InvalidDataException or UnauthorizedAccessException
+        or JsonException or ArgumentException or InvalidOperationException or NotSupportedException or OverflowException;
+
+    private static void Validate(CampaignState state)
+    {
+        if (state.Version is not (1 or 2 or 3)) throw new InvalidDataException($"Unsupported checkpoint version {state.Version}.");
+        var legacy = state.Version == 1;
+        var legacyBlocks = state.Version < 3;
+        if (state.LevelNumber < 1 || !float.IsFinite(state.CoreHp) || state.CoreHp <= 0 || state.CoreHp > Balance.CoreHp)
+            throw new InvalidDataException("The saved level or objective HP is invalid.");
+        if (state.Economy is null || state.Turrets is null || state.Barriers is null || state.Excavated is null)
+            throw new InvalidDataException("The checkpoint is missing its economy or battlefield collections.");
+        if (legacyBlocks ? state.Inventory != null : state.Inventory == null)
+            throw new InvalidDataException("The block inventory does not match the checkpoint version.");
+        if (state.Inventory != null && (state.Inventory.DirtCount < 0 || state.Inventory.StoneCount < 0))
+            throw new InvalidDataException("Saved block inventory counts must be nonnegative.");
+        if (state.Excavated.Count > 16 * WorldGrid.Size * WorldGrid.Size ||
+            state.Barriers.Count > 8 * 8 * 8 || state.Turrets.Count > 30 * 30 * 30)
+            throw new InvalidDataException("A saved collection exceeds the battlefield's capacity.");
+
+        var economy = new Economy();
+        economy.ImportState(state.Economy);
+        var world = new WorldGrid();
+        var dug = new HashSet<Cell>();
+        foreach (var cell in state.Excavated)
+        {
+            if (!WorldGrid.IsInside(cell) || cell.Y >= 16 || WorldGrid.IsCore(cell) || !dug.Add(cell) || !world.Dig(cell))
+                throw new InvalidDataException($"Invalid or duplicate excavated cell: {cell}.");
+        }
+
+        foreach (var barrier in state.Barriers)
+        {
+            if (barrier is null || !WorldGrid.IsBuildZone(barrier.Cell) || WorldGrid.IsCore(barrier.Cell) ||
+                !float.IsFinite(barrier.Hp) || barrier.Hp <= 0)
+                throw new InvalidDataException("A saved defensive block has invalid placement or HP.");
+            if (legacyBlocks ? barrier.Content != null : barrier.Content is not (Material.Dirt or Material.Stone))
+                throw new InvalidDataException("A saved defensive block has invalid material data.");
+            var material = barrier.Content ?? Material.Dirt;
+            var maxHp = legacyBlocks ? LegacyBarrierHp : Balance.BlockHp(material);
+            if (barrier.Hp > maxHp || !world.AddBarrier(barrier.Cell, material, barrier.Hp))
+                throw new InvalidDataException("A saved defensive block has invalid placement or HP.");
+        }
+
+        var cells = new HashSet<Cell>();
+        var ids = new HashSet<int>();
+        var equippedCounts = Enum.GetValues<UpgradeKind>().ToDictionary(kind => kind, _ => 0L);
+        foreach (var saved in state.Turrets)
+        {
+            if (saved is null || saved.Id <= 0 || saved.Id == int.MaxValue || !ids.Add(saved.Id) ||
+                !Enum.IsDefined(saved.Kind) || !IsValidTurretCell(saved.Cell, legacy) || WorldGrid.IsCore(saved.Cell) ||
+                !cells.Add(saved.Cell) || world.GetMaterial(saved.Cell) != Material.Air ||
+                saved.JumpPattern is null || !float.IsFinite(saved.Hp) || saved.Hp <= 0)
+                throw new InvalidDataException("A saved piece has invalid identity, placement, HP, or component data.");
+            var turret = new Turret { Id = saved.Id, Kind = saved.Kind, Cell = saved.Cell, Hp = saved.Hp };
+            if (legacy)
+            {
+                if (saved.Upgrades is null || saved.UpgradePoints != null || saved.Upgrades.Distinct().Count() != saved.Upgrades.Count)
+                    throw new InvalidDataException("A legacy piece needs its original, unique component list.");
+                foreach (var kind in saved.Upgrades)
+                {
+                    if (!Enum.IsDefined(kind)) throw new InvalidDataException("A legacy piece has an unknown component.");
+                    equippedCounts[kind]++;
+                }
+                if (saved.Hp > LegacyMaxHp(saved, economy))
+                    throw new InvalidDataException("A legacy piece has more HP than its upgraded maximum.");
+                var jumpEquipped = saved.Upgrades.Contains(UpgradeKind.Jump);
+                var jumpRank = economy.GetProgress(UpgradeKind.Jump).Rank;
+                var range = jumpEquipped ? checked(jumpRank + 1) : 2;
+                var budget = jumpEquipped ? checked(8 + 4 * (jumpRank - 1)) : 8;
+                ValidateJumpPattern(saved.JumpPattern, range, budget);
+            }
+            else
+            {
+                if (saved.UpgradePoints == null || saved.Upgrades != null)
+                    throw new InvalidDataException("This checkpoint version requires allocated upgrade points.");
+                foreach (var (kind, points) in saved.UpgradePoints)
+                {
+                    if (!Enum.IsDefined(kind) || points <= 0 || points > economy.GetAllocationCap(kind) || IsInnatelyInfinite(saved.Kind, kind))
+                        throw new InvalidDataException("A saved piece has invalid upgrade points or exceeds its collection cap.");
+                    turret.UpgradePoints.Add(kind, points);
+                    equippedCounts[kind] += points;
+                }
+                if (saved.Hp > economy.GetMaxHp(turret))
+                    throw new InvalidDataException("A saved piece has more HP than its upgraded maximum.");
+                _ = economy.GetAttack(turret);
+                ValidateJumpPattern(saved.JumpPattern, economy.HasJump(turret) ? economy.GetRange(turret, UpgradeKind.Jump) : 2,
+                    economy.HasJump(turret) ? economy.GetJumpBudget(turret) : 8);
+            }
+        }
+
+        foreach (var (kind, equipped) in equippedCounts)
+        {
+            var progress = economy.GetProgress(kind);
+            if (equipped > progress.PullCount - progress.Available)
+                throw new InvalidDataException($"The saved field has more {kind} points than were consumed.");
+        }
+    }
+
+    private static bool IsValidTurretCell(Cell cell, bool legacy) => legacy
+        ? cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30
+        : WorldGrid.IsTurretZone(cell);
+
+    private static bool IsInnatelyInfinite(PieceKind piece, UpgradeKind kind) =>
+        (piece == PieceKind.Rook && kind == UpgradeKind.Orthogonal) ||
+        (piece == PieceKind.Bishop && kind == UpgradeKind.PlaneDiagonal);
+
+    private static int LegacyMaxHp(SavedTurret saved, Economy economy) => checked(Balance.TurretHp +
+        (saved.Upgrades!.Contains(UpgradeKind.HP) ? economy.GetProgress(UpgradeKind.HP).Rank * Balance.HpUpgradePerPoint : 0));
+
+    private static string MigrateLegacy(CampaignState state)
+    {
+        var economy = new Economy();
+        economy.ImportState(state.Economy);
+        var migrated = new List<SavedTurret>();
+        int removed = 0, refundedCurrency = 0, refundedPoints = 0, adjustedPatterns = 0, rebalanced = 0;
+        foreach (var saved in state.Turrets)
+        {
+            if (WorldGrid.IsBuildZone(saved.Cell))
+            {
+                removed++;
+                refundedCurrency = checked(refundedCurrency + Balance.PieceCost(saved.Kind));
+                foreach (var kind in saved.Upgrades!)
+                {
+                    state.Economy.Upgrades[kind].Available++;
+                    refundedPoints++;
+                }
+                continue;
+            }
+            var previousMaxHp = LegacyMaxHp(saved, economy);
+            var turret = new Turret { Id = saved.Id, Kind = saved.Kind, Cell = saved.Cell, Hp = saved.Hp };
+            foreach (var kind in saved.Upgrades!)
+            {
+                if (IsInnatelyInfinite(saved.Kind, kind))
+                {
+                    state.Economy.Upgrades[kind].Available++;
+                    refundedPoints++;
+                }
+                else turret.UpgradePoints.Add(kind, 1);
+            }
+            if (saved.Upgrades!.Count > 0) rebalanced++;
+            saved.Hp = Math.Max(1, economy.GetMaxHp(turret) - (previousMaxHp - saved.Hp));
+            saved.UpgradePoints = new Dictionary<UpgradeKind, int>(turret.UpgradePoints);
+            saved.Upgrades = null;
+            var jumpRange = economy.HasJump(turret) ? economy.GetRange(turret, UpgradeKind.Jump) : 2;
+            var jumpBudget = economy.HasJump(turret) ? economy.GetJumpBudget(turret) : 8;
+            var pattern = saved.JumpPattern.Where(offset => JumpDistance(offset) <= jumpRange).Take(jumpBudget).ToList();
+            if (pattern.Count == 0) pattern = new Turret().JumpPattern.ToList();
+            if (!saved.JumpPattern.SequenceEqual(pattern)) adjustedPatterns++;
+            saved.JumpPattern = pattern;
+            migrated.Add(saved);
+        }
+        state.Turrets = migrated;
+        state.Economy.Currency = checked(state.Economy.Currency + refundedCurrency);
+        state.Version = 2;
+        return $"Checkpoint updated to allocated points: {removed} pieces from the block enclosure refunded ({refundedCurrency} currency); " +
+            $"{refundedPoints} points returned; {rebalanced} pieces rebalanced with existing HP damage preserved (minimum 1 HP); " +
+            $"{adjustedPatterns} jump patterns adjusted.";
+    }
+
+    private static string MigrateBlockInventory(CampaignState state, int originalVersion)
+    {
+        var dirt = state.Excavated.Count(cell => cell.Y >= 12);
+        var stone = state.Excavated.Count - dirt;
+        state.Inventory = new BlockInventoryState { DirtCount = dirt, StoneCount = stone };
+        foreach (var barrier in state.Barriers)
+        {
+            barrier.Content = Material.Dirt;
+            barrier.Hp = Balance.BlockHp(Material.Dirt) - (LegacyBarrierHp - barrier.Hp);
+        }
+        state.Version = 3;
+        return $"Block inventory restored: {dirt} dirt and {stone} stone from past excavation; " +
+            $"{state.Barriers.Count} old fortifications converted to dirt with damage preserved. Excavation tools must be purchased. " +
+            $"The original version {originalVersion} file is backed up on the next save.";
+    }
+
+    private static long JumpDistance(Cell offset) => Math.Max(Math.Abs((long)offset.X), Math.Max(Math.Abs((long)offset.Y), Math.Abs((long)offset.Z)));
+
+    private static void PreserveLegacyBackup(string path)
+    {
+        using var existing = File.OpenRead(path);
+        using var document = JsonDocument.Parse(existing);
+        if (document.RootElement.ValueKind != JsonValueKind.Object) return;
+        var version = document.RootElement.EnumerateObject().FirstOrDefault(property => property.Name.Equals("Version", StringComparison.OrdinalIgnoreCase));
+        if (version.Value.ValueKind != JsonValueKind.Number || !version.Value.TryGetInt32(out var number) || number is not (1 or 2)) return;
+        var backup = path + $".v{number}.bak";
+        if (File.Exists(backup)) backup = path + $".v{number}.{Guid.NewGuid():N}.bak";
+        File.Copy(path, backup);
+    }
+
+    private static void ValidateJumpPattern(List<Cell> pattern, int range, int budget)
+    {
+        if (pattern.Count < 1 || pattern.Count > budget || pattern.Distinct().Count() != pattern.Count)
+            throw new InvalidDataException("A saved jump pattern is empty, duplicated, or over its construction budget.");
+        foreach (var offset in pattern)
+        {
+            long distance = JumpDistance(offset);
+            if (distance < 2 || distance > range)
+                throw new InvalidDataException("A saved jump destination is outside the piece's jump range.");
+        }
+    }
+
+    private sealed class CellConverter : JsonConverter<Cell>
+    {
+        public override Cell Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            using var document = JsonDocument.ParseValue(ref reader);
+            var element = document.RootElement;
+            if (element.ValueKind != JsonValueKind.Object ||
+                !element.TryGetProperty("X", out var x) || !x.TryGetInt32(out int ix) ||
+                !element.TryGetProperty("Y", out var y) || !y.TryGetInt32(out int iy) ||
+                !element.TryGetProperty("Z", out var z) || !z.TryGetInt32(out int iz))
+                throw new JsonException("A cell needs integer X, Y, and Z coordinates.");
+            return new Cell(ix, iy, iz);
+        }
+
+        public override void Write(Utf8JsonWriter writer, Cell value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("X", value.X);
+            writer.WriteNumber("Y", value.Y);
+            writer.WriteNumber("Z", value.Z);
+            writer.WriteEndObject();
+        }
+    }
+}

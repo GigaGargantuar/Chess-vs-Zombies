@@ -1,0 +1,12 @@
+{
+  "number": 1,
+  "name": "First contact",
+  "waves": [
+    {
+      "spawnInterval": 1.4,
+      "groups": [
+        { "kind": "Basic", "tier": "Wood", "count": 8 }
+      ]
+    }
+  ]
+}
