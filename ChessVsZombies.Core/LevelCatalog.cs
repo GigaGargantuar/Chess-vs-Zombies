@@ -84,6 +84,21 @@ public sealed class LevelCatalog
         if (number >= 2) groups.Add(new() { Kind = ZombieKind.Armed, Tier = tier, Count = 1 + number / 3 });
         if (number >= 3) groups.Add(new() { Kind = ZombieKind.Armored, Tier = tier, Count = 1 + number / 4 });
         if (number >= 5) groups.Add(new() { Kind = ZombieKind.ArmedArmored, Tier = tier, Count = 1 + number / 5 });
+        if (number >= 3)
+        {
+            // Keep the generated spawn budget while targeting four unarmored bodies per armored body.
+            int total = groups.Sum(group => group.Count);
+            int armored = Math.Max(1, (total + 2) / 5);
+            int fodder = total - armored;
+            int armed = Math.Min(groups.First(group => group.Kind == ZombieKind.Armed).Count, fodder - 1);
+            groups =
+            [
+                new() { Kind = ZombieKind.Basic, Tier = tier, Count = fodder - armed },
+                new() { Kind = ZombieKind.Armed, Tier = tier, Count = armed },
+                new() { Kind = ZombieKind.Armored, Tier = tier, Count = number >= 5 ? (armored + 1) / 2 : armored }
+            ];
+            if (number >= 5) groups.Add(new() { Kind = ZombieKind.ArmedArmored, Tier = tier, Count = armored / 2 });
+        }
         return new LevelDefinition
         {
             Number = number,

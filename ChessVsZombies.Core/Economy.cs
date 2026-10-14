@@ -140,25 +140,53 @@ public sealed class Economy
             return Reject("Upgrade counts must be nonnegative and use known component types.", out error);
         if (turret.UpgradePoints.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value < 0))
             return Reject("This piece has invalid allocated upgrade data.", out error);
+        foreach (var kind in UpgradeKinds)
+        {
+            var progress = _progress[kind];
+            if (progress.PullCount < 0 || progress.Available < 0 || progress.Available > progress.PullCount)
+                return Reject($"The {kind} component collection has invalid counts.", out error);
+            var existing = GetAllocated(turret, kind);
+            if (existing > GetAllocationCap(kind) || existing > SupportedAllocationLimit(turret.Kind, kind) ||
+                (existing > 0 && IsInnatelyInfinite(turret.Kind, kind)))
+                return Reject("This piece has allocated upgrade data outside its supported limits.", out error);
+        }
 
         var projected = new Turret { Id = turret.Id, Kind = turret.Kind, Cell = turret.Cell, Hp = turret.Hp };
+        var additions = new Dictionary<UpgradeKind, int>();
+        var applied = new List<string>();
+        var skipped = new List<string>();
         long spent = 0;
         foreach (var kind in UpgradeKinds)
         {
-            int added = template.Points.GetValueOrDefault(kind);
+            int requested = template.Points.GetValueOrDefault(kind);
             int existing = GetAllocated(turret, kind);
-            long total = (long)existing + added;
-            if (added > _progress[kind].Available)
-                return Reject($"Need {added} {kind} points; only {_progress[kind].Available} are available.", out error);
-            if (total > GetAllocationCap(kind))
-                return Reject($"{kind} would total {total} points; this collection currently permits {GetAllocationCap(kind)} per tower.", out error);
-            if (added > 0 && IsInnatelyInfinite(turret.Kind, kind))
-                return Reject($"{turret.Kind} already has unlimited {kind} range; remove those points from the template.", out error);
-            if (total > 0) projected.UpgradePoints[kind] = (int)total;
+            if (existing > 0) projected.UpgradePoints[kind] = existing;
+            if (requested == 0) continue;
+            if (IsInnatelyInfinite(turret.Kind, kind))
+            {
+                skipped.Add($"{kind}: {requested} skipped (already unlimited)");
+                continue;
+            }
+            int available = _progress[kind].Available;
+            int capSpace = GetAllocationCap(kind) - existing;
+            int statSpace = SupportedAllocationLimit(turret.Kind, kind) - existing;
+            int added = Math.Min(requested, Math.Min(available, Math.Min(capSpace, statSpace)));
+            if (added > 0)
+            {
+                projected.UpgradePoints[kind] = existing + added;
+                additions[kind] = added;
+                applied.Add($"{kind} +{added}");
+            }
+            if (added < requested)
+            {
+                var reasons = new List<string>();
+                if (available < requested) reasons.Add("inventory");
+                if (capSpace < requested) reasons.Add("tower cap");
+                if (statSpace < requested) reasons.Add("stat limit");
+                skipped.Add($"{kind}: {requested - added} skipped ({string.Join(", ", reasons)})");
+            }
             spent += added;
         }
-        if (spent == 0 && !template.UseJumpPattern)
-            return Reject("Choose at least one upgrade point or enable a jump pattern in the template.", out error);
 
         int previousMaxHp, nextMaxHp;
         try
@@ -180,17 +208,21 @@ public sealed class Economy
         if (template.UseJumpPattern)
         {
             if (template.JumpPattern is null)
-                return Reject("The template needs a jump pattern.", out error);
-            if (!ValidateJumpPattern(projected, template.JumpPattern, out nextPattern, out error)) return false;
+                skipped.Add("Jump pattern skipped: no pattern was provided");
+            else if (!ValidateJumpPattern(projected, template.JumpPattern, out var candidate, out var patternError))
+                skipped.Add($"Jump pattern skipped: {patternError}");
+            else nextPattern = candidate;
         }
-        else if (HasJump(projected) &&
-                 !ValidateJumpPattern(projected, turret.JumpPattern, out _, out error)) return false;
+        if (nextPattern is null && HasJump(projected) &&
+            !ValidateJumpPattern(projected, turret.JumpPattern, out _, out error)) return false;
+        if (spent == 0 && nextPattern is null)
+            return Reject(skipped.Count > 0 ? $"No upgrades applied. {string.Join("; ", skipped)}."
+                : "Choose at least one upgrade point or enable a jump pattern in the template.", out error);
 
-        // All counts, caps, stats, and offsets have passed validation. Commit together.
-        foreach (var kind in UpgradeKinds)
+        // Compute the achievable projection first, then commit only those allocations.
+        // Missing components remain unspent; an unusable pattern leaves the old offsets intact.
+        foreach (var (kind, added) in additions)
         {
-            int added = template.Points.GetValueOrDefault(kind);
-            if (added == 0) continue;
             turret.UpgradePoints[kind] = projected.UpgradePoints[kind];
             _progress[kind].Available -= added;
         }
@@ -201,9 +233,20 @@ public sealed class Economy
             turret.JumpPattern.AddRange(nextPattern);
         }
         error = string.Empty;
-        LastMessage = $"Applied template to {turret.Kind} #{turret.Id}: {spent} points spent.";
+        if (nextPattern is not null) applied.Add("jump pattern updated");
+        LastMessage = $"Applied to {turret.Kind} #{turret.Id}: {string.Join(", ", applied)}. {spent} points spent." +
+            (skipped.Count > 0 ? $" {string.Join("; ", skipped)}." : string.Empty);
         return true;
     }
+
+    private static int SupportedAllocationLimit(PieceKind piece, UpgradeKind kind) => kind switch
+    {
+        UpgradeKind.HP => (int.MaxValue - Balance.TurretHp) / Balance.HpUpgradePerPoint,
+        UpgradeKind.ATK => (int.MaxValue - Balance.BaseAttack) / Balance.AtkUpgradePerPoint,
+        UpgradeKind.Jump => (int.MaxValue - 8) / 4 + (piece == PieceKind.Knight ? 0 : 1),
+        UpgradeKind.Orthogonal when piece == PieceKind.Pawn => int.MaxValue - 1,
+        _ => int.MaxValue
+    };
 
     public int GetMaxHp(Turret turret) => checked(Balance.TurretHp + GetAllocated(turret, UpgradeKind.HP) * Balance.HpUpgradePerPoint);
 

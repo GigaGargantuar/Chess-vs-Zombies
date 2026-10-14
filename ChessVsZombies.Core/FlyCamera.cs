@@ -21,6 +21,9 @@ public sealed class FlyCamera
         Pitch = Math.Clamp(Pitch - verticalPixels * .0025f, -1.48f, 1.48f);
     }
     public void Move(Vector3 localInput, float distance, Func<Cell, bool> solid)
+        => MovePrecise(localInput, distance, point => solid(new Cell((int)MathF.Floor(point.X), (int)MathF.Floor(point.Y), (int)MathF.Floor(point.Z))));
+
+    public void MovePrecise(Vector3 localInput, float distance, Func<Vector3, bool> solid)
     {
         if (localInput.LengthSquared() <= 0 || distance <= 0) return;
         localInput = Vector3.Normalize(localInput);
@@ -38,7 +41,7 @@ public sealed class FlyCamera
                 for (int x = -1; x <= 1; x += 2) for (int y = -1; y <= 1; y += 2) for (int z = -1; z <= 1; z += 2)
                         {
                             var p = trial + new Vector3(x, y, z) * Radius;
-                            if (solid(new Cell((int)MathF.Floor(p.X), (int)MathF.Floor(p.Y), (int)MathF.Floor(p.Z)))) blocked = true;
+                            if (solid(p)) blocked = true;
                         }
                 if (!blocked) Position = trial;
             }

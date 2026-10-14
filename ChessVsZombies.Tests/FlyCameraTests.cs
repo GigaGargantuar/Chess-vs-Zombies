@@ -6,6 +6,24 @@ namespace ChessVsZombies.Tests;
 
 public class FlyCameraTests
 {
+    [Fact]
+    public void ThinObsidianCrustBlocksOnlyItsPhysicalSlab()
+    {
+        var world = new WorldGrid();
+        var liquids = new LiquidSystem(world);
+        liquids.RestoreState(new LiquidState
+        {
+            Obsidian = [new ObsidianCell(new Cell(7, 16, 7), 2, CrustFace.West, 100)]
+        });
+        var clearSide = new FlyCamera(new Vector3(7.7f, 16.5f, 7.2f), 0, 0);
+        clearSide.MovePrecise(Vector3.UnitZ, .5f, world.IsSolidAt);
+        AssertNear(new Vector3(7.7f, 16.5f, 7.7f), clearSide.Position);
+
+        var intoCrust = new FlyCamera(new Vector3(6.5f, 16.5f, 7.5f), 0, 0);
+        intoCrust.MovePrecise(-Vector3.UnitX, 2, world.IsSolidAt);
+        Assert.InRange(intoCrust.Position.X, 6.5f, 6.8f);
+    }
+
     [Theory]
     [InlineData(1.2f)]
     [InlineData(-1.2f)]

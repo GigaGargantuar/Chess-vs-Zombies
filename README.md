@@ -26,6 +26,8 @@ The native renderer also supports short smoke runs that exit automatically after
 ```powershell
 dotnet run --project ChessVsZombies/ChessVsZombies.csproj -- --smoke --capture artifacts/build-mode.png
 dotnet run --project ChessVsZombies/ChessVsZombies.csproj -- --smoke-combat --capture artifacts/combat-mode.png
+dotnet run --project ChessVsZombies/ChessVsZombies.csproj -- --smoke-liquids --capture artifacts/liquid-shop.png
+dotnet run --project ChessVsZombies/ChessVsZombies.csproj -- --smoke-armor --capture artifacts/armor-facing.png
 ```
 
 ## Controls
@@ -40,8 +42,10 @@ dotnet run --project ChessVsZombies/ChessVsZombies.csproj -- --smoke-combat --ca
 | Left Ctrl | Move faster |
 | 1 / 2 / 3 / 4 | Select Pawn / Knight / Bishop / Rook |
 | 5 / 6 / 7 | Select dirt fortification / stone fortification / excavation |
+| 8 / 9 / 0 | Select water / mercury / lava to pour |
+| L | Open the liquid shop and choose 1–10 units per pour |
 | Left mouse | Remove the aimed defense; with tool 7, excavate aimed terrain |
-| Right mouse | Place the selected piece or defensive block at the crosshair |
+| Right mouse | Place the selected piece, defensive block, or liquid at the crosshair |
 | Middle mouse | Apply the chosen upgrade template to the aimed tower |
 | Enter | Start the next level |
 | G | Open the component gacha |
@@ -59,9 +63,31 @@ The crosshair and placement preview identify the aimed cell. The camera flies fr
 
 The playable volume contains 32 × 32 × 32 cells, indexed 0 through 31 on every axis. The objective occupies the central 2 × 2 × 2 cells, coordinates 15–16. Defensive blocks belong inside the centered 8 × 8 × 8 volume, coordinates 12–19 on all three axes. This entire inner cube is reserved for blocks and the objective: turrets cannot be placed there. Turrets belong inside the centered 30 × 30 × 30 volume, coordinates 1–30, excluding that inner cube. The remaining one-cell outer shell is the zombie spawn zone.
 
-The bottom half starts solid: stone at Y=0–11 and dirt at Y=12–15. The core takes precedence over terrain, so its lower four cells replace dirt and its upper four cells sit above the surface. Turrets and new blocks need an empty cell with solid support immediately below. Digging opens terrain cells for construction and changes zombie routes.
+The bottom half starts solid: stone at Y=0–11 and dirt at Y=12–15. The core takes precedence over terrain, so its lower four cells replace dirt and its upper four cells sit above the surface. Turrets need an empty cell with a block or living tower directly below, so towers can be stacked. New blocks can attach to a block in any of the six orthogonally adjacent cells. Digging opens terrain cells for construction and changes zombie routes.
+
+Removing or destroying a tower's support settles the remaining stack downward, bottom first, preserving each survivor's HP and upgrades. Natural terrain and fortifications keep holes, overhangs, and ceilings whenever at least one orthogonally adjacent block remains; diagonal neighbors do not count. Only isolated blocks fall, stopping at another block or tower, or the bottom of the grid. Adjacent blocks can hold each other in place without a connection to the ground. Blocks and towers settle in whole grid cells; an obsidian cell counts as a block for this support rule, while zombie, camera, and projectile collision still use the crust's exact thickness. Falling solids displace liquid into their vacated cells without deleting liquid units.
 
 Excavating dirt requires a shovel, bought once for 100 currency. Excavating stone requires a separate pickaxe, bought once for 1,000 currency. Each successfully excavated cell adds one block of that material to inventory. A dirt fortification uses one dirt block and has 100 HP; a stone fortification uses one stone block and has 500 HP. Placement consumes blocks rather than currency. Removing a fortification returns one block of its material to inventory.
+
+Natural dirt also has 100 HP and natural stone has 500 HP. Zombies can attack and destroy terrain to open a route to the objective; destroyed terrain does not add blocks to the player's inventory. Blocks remain solid and stop bullets until their HP reaches zero. The crosshair displays the remaining HP of aimed terrain and fortifications.
+
+Zombies navigate one-block climbs and drops, including shallow holes and low obstacles. They clear blocked headroom before stepping through it, and can choose an open detour instead of breaking a block. Destroyed towers immediately leave the live occupancy map; routes and interrupted steps are refreshed so their former cells are traversable. Terrain destruction opens new routes and causes unsupported defenses and zombies to fall.
+
+## Liquids and reactions
+
+The liquid shop is a separate section under Deploy, also opened with L. Purchases give ten units (one block); choose a pour amount from one to ten units and right-click a surface or existing liquid. Water costs 100 currency per block, mercury 800, and lava 1,000. Liquids flow downward and spread to neighboring cells during preparation and combat. Excavated basins contain them; water floats above mercury without reacting. Solid terrain, defenses, and obsidian contain or redirect the flow.
+
+Water makes all zombies sink. Iron, Gold, Diamond, and Osmium armor make zombies sink in lava; only Osmium armor makes them sink in mercury. A surviving qualifying piece is sufficient. Losing the last heavy piece immediately cancels any old descent and restores buoyancy in that liquid; the zombie rises toward the surface at two tiles per second, subject to solid collision. Fully submerged zombies have ten seconds of air, then die immediately regardless of their remaining health or armor; reaching air restores their breath.
+
+Mercury contact deals 2 chemical damage per second and lava deals 5 thermal damage per second. These rates are prototype balance constants. Each surviving Osmium armor piece contributes ten seconds of heat protection: a full set starts with thirty seconds. Protection is consumed during exposure and does not refill on leaving the liquid; breaking a piece removes its unused protection. Sinking Osmium zombies can still suffocate while protected from heat.
+
+| Contact | Reaction |
+| --- | --- |
+| Mercury + water | No reaction; denser mercury settles beneath water. |
+| Mercury + lava | Two lava units form two obsidian units, a 0.2-block crust at the interface, while one mercury unit becomes chemical vapor in a 5×5×5 volume. Continued contact thickens the crust; ten lava units can vaporize five mercury units and form one obsidian block. More vapor increases fume strength and lifetime. |
+| Water + lava | Equal units react: ten lava units become one obsidian block and ten water units become thermal vapor in a 3×3×3 volume. Smaller amounts react proportionally. |
+
+Obsidian crusts have their actual thickness for collision and rendering. They obstruct fluid transfer at the interface while continued heat contact can grow the crust. Their prototype durability is 50 HP per unit, or 500 HP for a full block. Zombies can break obsidian to reopen a route. Flow advances every 0.1 seconds in whole tenth-block units. Reactions account for consumed liquid as obsidian or vapor; vapor eventually dissipates into the atmosphere. Buying another block replenishes spent supply.
 
 ## Pieces and components
 
@@ -74,19 +100,21 @@ You begin with 1,000 currency and no excavation tools or stored blocks. Each gac
 | Bishop | 4 | Unlimited reach along the twelve plane diagonals |
 | Rook | 4 | Unlimited reach along the six orthogonal directions |
 
-Pawns strike physically at adjacent directional targets. Rooks and bishops fire pellets and begin with unlimited reach in their innate direction family. Solid terrain, defensive blocks, and other pieces block their line of fire. Longer directional attacks from other pieces also use pellets. Jump destinations produce lobbed projectiles whose arcs can clear low obstacles.
+Pawns strike physically at adjacent directional targets. Rooks and bishops fire pellets and begin with unlimited reach in their innate direction family. Solid terrain, defensive blocks, and obsidian stop shots. Friendly pieces do not block targeting or projectiles: pellets and lobbed shots pass through them. Longer directional attacks from other pieces also use pellets. Jump destinations produce lobbed projectiles whose arcs can clear low obstacles.
 
-The six component types are HP, ATK, orthogonal, plane diagonal, space diagonal, and jump. Each roll grants exactly one available point of its type. Choose how many points of each type to allocate in the upgrade template, then aim at an existing tower and middle-click. The entire template must fit the inventory, the tower's remaining per-type allocation caps, and its jump-pattern rules; an invalid template spends nothing.
+The six component types are HP, ATK, orthogonal, plane diagonal, space diagonal, and jump. Each roll grants exactly one available point of its type. Choose how many points of each type to allocate in the upgrade template, then aim at an existing tower and middle-click. Each type applies as many requested points as the inventory and tower's remaining cap permit. Unavailable or excess points do not block other upgrades; unused inventory stays banked and the reusable template stays unchanged. Already-unlimited range types are skipped. If the requested jump pattern does not fit the tower's achieved range or construction budget, its previous pattern remains while valid point upgrades still apply. The result message reports applied points and skipped requests.
 
 The first copy establishes a per-tower allocation cap of 1 for that type; every ten additional copies raise that cap by 1. The 11th, 21st, and 31st copies therefore allow up to 2, 3, and 4 allocated points of that type on each tower. Pulls and cap increases never change deployed towers automatically. Each point explicitly applied to a tower adds +10 maximum/current HP, +1 ATK, or one tile of its chosen finite directional reach. HP allocation preserves existing damage. A pawn starts with orthogonal range 1; new directional families start at range 1 after their first point. Rooks and bishops cannot spend points on their already unlimited innate family.
 
 The first jump point gives a non-jumping piece range 2, and further allocated points each add one tile. A knight already starts at range 2, so its first allocated jump point raises it to range 3. Jump patterns contain explicit three-dimensional destination offsets. Each destination costs one construction point; range 2 has a budget of 8, with 4 more construction points per additional tile of reach. Destinations must be distinct and have a longest-axis distance from 2 through the resulting range. The template can carry a custom pattern, applied together with its points. Jump attacks skip intermediate cells.
 
-Removing a turret during preparation refunds its purchase price; removing a fortification returns its material to inventory. Upgrade points already allocated to a removed turret remain consumed; their collection progress still contributes toward permanent allocation caps. A turret whose support collapses into the reserved block cube is destroyed without a refund.
+Removing a turret during preparation refunds its purchase price; removing a fortification returns its material to inventory. Upgrade points already allocated to a removed turret remain consumed; their collection progress still contributes toward permanent allocation caps. Gravity can carry a surviving tower into the reserved block cube or onto the bottom grid layer, although direct deployment there remains forbidden.
 
 ## Zombies and levels
 
-Basic zombies have 10 HP and 1 attack. Armed zombies add a weapon; armored zombies carry a helmet, chestplate, and shield; the combined type carries both. The three armor items add their durability to the zombie's HP pool. Weapons add their damage to the base attack.
+Basic zombies have 10 body HP and 1 attack. Armed zombies add a weapon; armored zombies carry a helmet, chestplate, and shield; the combined type carries both. Zombies turn to face their travel or attack direction, and their visible equipment turns with them. Purely vertical movement preserves their horizontal heading.
+
+Armor pieces have separate durability and coverage. The shield absorbs frontal physical hits within a total 90-degree horizontal arc (45 degrees left/right) and 60-degree vertical arc (30 degrees up/down). Coverage uses the incoming projectile's direction at impact, including a lob's descending arc. After any shield absorption, helmets absorb only lobbed attacks and chestplates absorb only pellet attacks. Melee bypasses helmets and chestplates. Excess damage reaches the next eligible layer, then body HP; ineligible armor stays intact. Broken pieces fall away in the zombie's current orientation. Chemical and thermal damage bypass armor and damage the body, except where a piece supplies resistance, such as Osmium's heat protection. Weapons add their damage to the base attack.
 
 | Tier | HP per armor item | Weapon bonus | Fully armored HP | Armed attack |
 | --- | ---: | ---: | ---: | ---: |
@@ -100,17 +128,19 @@ Basic zombies have 10 HP and 1 attack. Armed zombies add a weapon; armored zombi
 
 Every wave has a fixed spawn roster and HP budget, including zombies that have not spawned yet. When damage removes at least 50% of a wave's original HP budget, the next available wave starts spawning. Completion still requires all waves to finish spawning and all zombies to be defeated. Each surviving turret pays 2 currency once between levels.
 
+Armored enemies are interleaved with unarmored cannon fodder throughout each wave. Generated waves from level 3 target roughly four unarmored zombies per armored zombie, with three to five between armored spawns, while retaining their total spawn counts. Authored waves retain their exact counts and tiers and are interleaved proportionally. A body death or drowning removes that zombie's remaining armor from the wave's live HP pool as well.
+
 Zombies can change lanes after losing 50% of their maximum HP. The threshold decreases by five percentage points after every five completed levels: 45% on level 6, 40% on level 11, and so on, with a minimum of zero. Generated levels have one wave by default, introduce the four zombie kinds over the opening levels, and progress through gear tiers.
 
 ## Campaign checkpoints
 
-Preparation changes and successful level completion save a checkpoint under `%LOCALAPPDATA%/ChessVsZombies/campaign.json`. Currency, collected point inventory and caps, each tower's allocated points, custom jump patterns, surviving defenses and their materials, stored dirt/stone, purchased tools, excavated terrain, objective health, and the next level persist between launches. Gacha random state is saved too.
+Preparation changes, exiting during preparation, and successful level completion save a checkpoint under `%LOCALAPPDATA%/ChessVsZombies/campaign.json`. Currency, collected point inventory and caps, each tower's allocated points, custom jump patterns, surviving defenses and their materials, stored dirt/stone, purchased tools, removed terrain and remaining terrain HP, liquid inventory and flow state, obsidian crusts, remaining vapor clouds, objective health, and the next level persist between launches. Gacha random state is saved too.
 
 Active combat resumes from the latest preparation checkpoint when you relaunch or retry after defeat. Mid-wave progress is not saved. Checkpoints are validated before loading. A failed load preserves the original file and disables automatic overwriting so the damaged checkpoint remains available for recovery.
 
 Version 1 checkpoints migrate to allocated points: each previously equipped component becomes one allocated point; towers inside the now-reserved block cube are removed with their purchase price and equipped components refunded. Components on a rook's innate orthogonal family or a bishop's innate plane-diagonal family are refunded because those families are unlimited. Existing HP damage is preserved against the corrected maximum, with at least 1 HP retained, and jump patterns are reduced to their corrected reach and budget.
 
-Version 1 and 2 checkpoints also migrate to material inventories: previously excavated cells are credited as dirt or stone, and old fortifications become dirt with existing damage preserved against the new 100 HP maximum. Tools remain unowned until purchased. Loading leaves the original file intact; the first subsequent save keeps an original `.v1.bak` or `.v2.bak` copy before writing version 3.
+Version 1 and 2 checkpoints also migrate to material inventories: previously excavated cells are credited as dirt or stone, and old fortifications become dirt with existing damage preserved against the new 100 HP maximum. Tools remain unowned until purchased. Version 3 inventories migrate without crediting excavated cells again. Version 4 adds remaining terrain HP. Version 5 adds liquids and reaction products, with empty supplies for older campaigns. Version 6 preserves fallen natural terrain's material, location, and damage, as well as settled tower stacks and suspended blocks. Loading leaves the original file intact; the first subsequent save keeps an original `.v1.bak` through `.v5.bak` copy before writing version 6.
 
 To keep a separate campaign for experiments, launch with `--save-path`, for example:
 

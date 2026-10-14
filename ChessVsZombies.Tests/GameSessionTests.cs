@@ -6,7 +6,7 @@ namespace ChessVsZombies.Tests;
 public class GameSessionTests
 {
     [Fact]
-    public void InvalidPlacementDoesNotSpendCurrencyAndPlacedDefensesCannotLoseSupportByDigging()
+    public void InvalidPlacementDoesNotSpendCurrencyAndRemovingSupportSettlesDefenses()
     {
         var game = new GameSession();
         Assert.False(game.Deploy(PieceKind.Pawn, new Cell(0, 16, 5)));
@@ -23,16 +23,17 @@ public class GameSessionTests
         Assert.Equal(996, game.Economy.Currency);
         Assert.False(game.Deploy(PieceKind.Pawn, new Cell(5, 16, 5)));
         Assert.True(game.BuyTool(ToolKind.Shovel));
-        Assert.False(game.Dig(new Cell(5, 15, 5)));
-        Assert.True(game.Remove(new Cell(5, 16, 5)));
         Assert.True(game.Dig(new Cell(5, 15, 5)));
+        Assert.Equal(new Cell(5, 15, 5), Assert.Single(game.Turrets).Cell);
+        Assert.True(game.Remove(new Cell(5, 15, 5)));
         Assert.True(game.Dig(new Cell(5, 15, 6)));
         Assert.Equal(900, game.Economy.Currency);
 
         Assert.True(game.BuildBarrier(new Cell(12, 16, 12)));
         Assert.False(game.Deploy(PieceKind.Knight, new Cell(12, 17, 12)));
         Assert.True(game.BuildBarrier(new Cell(12, 17, 12)));
-        Assert.False(game.Remove(new Cell(12, 16, 12)));
+        Assert.True(game.Remove(new Cell(12, 16, 12)));
+        Assert.Equal(new Cell(12, 16, 12), Assert.Single(game.World.Barriers).Cell);
         Assert.Equal(900, game.Economy.Currency);
     }
 
@@ -237,7 +238,7 @@ public class GameSessionTests
     }
 
     [Fact]
-    public void ACollapsingTowerCannotSettleInsideTheReservedBlockVolumeOrEarnARefund()
+    public void AttachedBlocksKeepAnOverheadTowerSupportedAfterTheBottomBlockIsDestroyed()
     {
         var game = NewSession(new WaveDefinition
         {
@@ -257,12 +258,13 @@ public class GameSessionTests
 
         game.Update(.1f);
 
-        Assert.Empty(game.Turrets);
+        Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(14, 16, 15)));
+        Assert.Equal(new Cell(14, 20, 15), Assert.Single(game.Turrets).Cell);
         Assert.Equal(currency, game.Economy.Currency);
         game.DamageZombie(zombie, 1000);
         game.Update(.01f);
         Assert.Equal(GamePhase.Building, game.Phase);
-        Assert.Equal(currency, game.Economy.Currency);
+        Assert.Equal(currency + 2, game.Economy.Currency);
     }
 
     private static GameSession NewSession(params WaveDefinition[] waves)

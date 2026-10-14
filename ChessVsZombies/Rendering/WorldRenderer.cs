@@ -12,6 +12,11 @@ public sealed class WorldRenderer : IDisposable
     private int revision = -1;
     private WorldGrid? previousWorld;
     private readonly MeshBuilder dynamic = new();
+    private readonly Dictionary<int, Dictionary<ArmorSlot, GearTier>> armorSeen = [];
+    private readonly List<FallenArmor> fallenArmor = [];
+    private const float ZombieHeightScale = .78f;
+    private readonly record struct FallenArmor(Vector3 Origin, Vector3 Drift, float Floor, Vector3 HalfSize,
+        Matrix Orientation, Vector3 Spin, GearTier Tier, double Started);
     private static readonly Color Teal = new(97, 225, 193);
     public WorldRenderer(GraphicsDevice device)
     {
@@ -20,6 +25,7 @@ public sealed class WorldRenderer : IDisposable
     }
     public void Draw(GameSession session, Matrix view, Matrix projection, Cell? hover, Cell? placement, bool placementValid, Turret? selected, bool showZones, double time)
     {
+        if (previousWorld != session.World) { armorSeen.Clear(); fallenArmor.Clear(); }
         if (revision != session.World.Revision || previousWorld != session.World) RebuildTerrain(session.World);
         device.DepthStencilState = DepthStencilState.Default;
         device.BlendState = BlendState.Opaque;
@@ -31,13 +37,52 @@ public sealed class WorldRenderer : IDisposable
             if (terrain is not null) { device.SetVertexBuffer(terrain); device.DrawPrimitives(PrimitiveType.TriangleList, 0, terrain.VertexCount / 3); }
         }
         dynamic.Vertices.Clear();
+        foreach (var crust in session.World.ObsidianCells)
+        {
+            dynamic.Box(ToXna(crust.Min), ToXna(crust.Max), new Color(49, 35, 66));
+            dynamic.Outline(ToXna(crust.Min) + new Vector3(.003f), ToXna(crust.Max) - new Vector3(.003f), new Color(104, 72, 127), .008f);
+        }
         // A raised crown marks the two-by-two-by-two objective.
         dynamic.Cylinder(new Vector3(16, 17.035f, 16), .54f, .54f, .10f, new Color(225, 244, 226), 8);
         dynamic.Cylinder(new Vector3(16, 17.13f, 16), .4f, .15f, .72f, Teal, 8);
         dynamic.Box(new Vector3(15.87f, 17.76f, 15.87f), new Vector3(16.13f, 18.17f, 16.13f), new Color(229, 255, 239));
         dynamic.Box(new Vector3(15.7f, 17.90f, 15.88f), new Vector3(16.3f, 18.02f, 16.12f), new Color(229, 255, 239));
         foreach (var turret in session.Turrets) DrawTurret(turret, turret == selected);
-        foreach (var zombie in session.Zombies) DrawZombie(zombie, time);
+        foreach (var zombie in session.Zombies)
+        {
+            var current = zombie.ArmorPieces.ToDictionary(piece => piece.Slot, piece => piece.Tier);
+            if (armorSeen.TryGetValue(zombie.Id, out var old))
+                foreach (var piece in old.Where(piece => !current.ContainsKey(piece.Key)))
+                {
+                    var (min, max) = ArmorBounds(piece.Key);
+                    var scale = new Vector3(1, ZombieHeightScale, 1);
+                    var orientation = ZombieRotation(zombie);
+                    var origin = ZombieFeet(zombie) + Vector3.Transform((min + max) * .5f * scale, orientation);
+                    var drift = Vector3.Transform(new Vector3(piece.Key == ArmorSlot.Shield ? -.15f : .25f, 0,
+                        piece.Key == ArmorSlot.Shield ? .4f : .2f), orientation);
+                    float floor = origin.Y;
+                    while (floor > .1f && !session.World.IsSolidAt(new System.Numerics.Vector3(origin.X, floor - .1f, origin.Z))) floor -= .1f;
+                    var spin = new Vector3(piece.Key == ArmorSlot.Shield ? 2.7f : 1.8f, 0,
+                        piece.Key == ArmorSlot.Helmet ? -2.2f : 1.6f);
+                    fallenArmor.Add(new FallenArmor(origin, drift, floor, (max - min) * .5f * scale,
+                        orientation, spin, piece.Value, time));
+                }
+            armorSeen[zombie.Id] = current;
+            DrawZombie(zombie, time);
+        }
+        foreach (var id in armorSeen.Keys.Where(id => !session.Zombies.Any(zombie => zombie.Id == id)).ToArray()) armorSeen.Remove(id);
+        fallenArmor.RemoveAll(piece => time - piece.Started > 2.5);
+        foreach (var piece in fallenArmor)
+        {
+            float age = (float)(time - piece.Started);
+            var position = piece.Origin + piece.Drift * Math.Min(age, .8f);
+            var rotation = Matrix.CreateRotationX(piece.Spin.X * age) * Matrix.CreateRotationZ(piece.Spin.Z * age) * piece.Orientation;
+            float halfHeight = MathF.Abs(rotation.M12) * piece.HalfSize.X + MathF.Abs(rotation.M22) * piece.HalfSize.Y + MathF.Abs(rotation.M32) * piece.HalfSize.Z;
+            position.Y = Math.Max(piece.Floor + halfHeight, piece.Origin.Y + .7f * age - 4.9f * age * age);
+            int firstVertex = dynamic.Vertices.Count;
+            dynamic.Box(-piece.HalfSize, piece.HalfSize, ArmorColor(piece.Tier));
+            TransformVertices(firstVertex, rotation * Matrix.CreateTranslation(position));
+        }
         foreach (var projectile in session.Projectiles)
         {
             var position = ToXna(projectile.Position);
@@ -76,6 +121,51 @@ public sealed class WorldRenderer : IDisposable
             var vertices = dynamic.Vertices.ToArray();
             foreach (var pass in effect.CurrentTechnique.Passes) { pass.Apply(); device.DrawUserPrimitives(PrimitiveType.TriangleList, vertices, 0, vertices.Length / 3); }
         }
+        DrawLiquids(session, Matrix.Invert(view).Translation, time);
+    }
+
+    private void DrawLiquids(GameSession session, Vector3 camera, double time)
+    {
+        var translucent = new MeshBuilder();
+        foreach (var volume in session.Liquids.Cells.SelectMany(cell => session.Liquids.GetVolumes(cell.Cell))
+                     .OrderByDescending(volume => Vector3.DistanceSquared(camera, ToXna((volume.Min + volume.Max) * .5f))))
+        {
+            var color = volume.Kind switch
+            {
+                LiquidKind.Water => new Color(58, 142, 211, 145), LiquidKind.Mercury => new Color(184, 197, 215, 220),
+                _ => new Color(248, 102, 32, 225)
+            };
+            var min = ToXna(volume.Min); var max = ToXna(volume.Max);
+            translucent.Box(min, max, color);
+            // Fine surface lines make one-unit changes and density layers legible.
+            translucent.Line(new Vector3(min.X + .02f, max.Y + .004f, min.Z + .03f),
+                new Vector3(max.X - .02f, max.Y + .004f, max.Z - .03f), .007f,
+                volume.Kind == LiquidKind.Lava ? new Color(255, 206, 83, 185) : new Color(218, 236, 244, 100));
+        }
+        foreach (var cloud in session.Liquids.Hazards)
+        {
+            var center = ToXna(cloud.Center.Center);
+            var size = new Vector3(cloud.Radius + .5f);
+            var color = cloud.Kind == DamageKind.Chemical ? new Color(157, 189, 131, 24) : new Color(227, 214, 199, 28);
+            translucent.Outline(center - size, center + size, color * 2, .009f);
+            for (int i = 0; i < 5; i++)
+            {
+                float phase = (float)time * .6f + i * 1.7f;
+                var offset = new Vector3(MathF.Sin(phase) * .6f, MathF.Sin(phase * .5f) * .3f, MathF.Cos(phase) * .6f);
+                var puff = new Vector3((cloud.Radius + .3f) * .55f);
+                translucent.Box(center + offset - puff, center + offset + puff, color);
+            }
+        }
+        if (translucent.Vertices.Count == 0) return;
+        device.BlendState = BlendState.NonPremultiplied;
+        device.DepthStencilState = DepthStencilState.DepthRead;
+        var vertices = translucent.Vertices.ToArray();
+        foreach (var pass in effect.CurrentTechnique.Passes)
+        {
+            pass.Apply(); device.DrawUserPrimitives(PrimitiveType.TriangleList, vertices, 0, vertices.Length / 3);
+        }
+        device.DepthStencilState = DepthStencilState.Default;
+        device.BlendState = BlendState.Opaque;
     }
     private void RebuildTerrain(WorldGrid world)
     {
@@ -83,7 +173,7 @@ public sealed class WorldRenderer : IDisposable
         for (int x = 0; x < 32; x++) for (int y = 0; y < 32; y++) for (int z = 0; z < 32; z++)
                 {
                     var cell = new Cell(x, y, z); var material = world.GetMaterial(cell);
-                    if (material == Material.Air) continue;
+                    if (material is Material.Air or Material.Obsidian) continue;
                     Color color = material switch
                     {
                         Material.Core => new Color(82, 205, 183),
@@ -96,7 +186,7 @@ public sealed class WorldRenderer : IDisposable
                         if (x == 0 || z == 0 || x == 31 || z == 31) color = new Color(106, 79, 73);
                         else if (x >= 12 && x < 20 && z >= 12 && z < 20) color = Color.Lerp(color, new Color(91, 153, 126), .3f);
                     }
-                    bool Empty(int dx, int dy, int dz) => world.GetMaterial(new Cell(x + dx, y + dy, z + dz)) == Material.Air;
+                    bool Empty(int dx, int dy, int dz) => world.GetMaterial(new Cell(x + dx, y + dy, z + dz)) is Material.Air or Material.Obsidian;
                     bool top = Empty(0, 1, 0);
                     mesh.Box(new Vector3(x, y, z), new Vector3(x + 1, y + 1, z + 1), color, top, Empty(0, -1, 0), Empty(-1, 0, 0), Empty(1, 0, 0), Empty(0, 0, 1), Empty(0, 0, -1));
                     if (top)
@@ -142,7 +232,8 @@ public sealed class WorldRenderer : IDisposable
     }
     private void DrawZombie(Zombie zombie, double time)
     {
-        var p = ToXna(zombie.Position) - new Vector3(0, .5f, 0);
+        int firstVertex = dynamic.Vertices.Count;
+        var p = ZombieFeet(zombie);
         var skin = new Color(115, 144, 99); var dark = new Color(43, 63, 53);
         float stride = MathF.Sin((float)time * 7 + zombie.Id) * .08f;
         dynamic.Box(p + new Vector3(-.21f, .04f + stride, -.14f), p + new Vector3(-.045f, .39f + stride, .14f), dark);
@@ -152,12 +243,11 @@ public sealed class WorldRenderer : IDisposable
         dynamic.Box(p + new Vector3(-.39f, .42f, -.11f), p + new Vector3(-.25f, .87f, .14f), skin);
         dynamic.Box(p + new Vector3(.25f, .42f, -.11f), p + new Vector3(.39f, .87f, .14f), skin);
         dynamic.Box(p + new Vector3(-.15f, 1.02f, .195f), p + new Vector3(.15f, 1.07f, .21f), new Color(240, 122, 91));
-        var tier = zombie.Tier switch { GearTier.Wood => new Color(137, 100, 67), GearTier.Stone => new Color(137, 146, 155), GearTier.Copper => new Color(188, 123, 83), GearTier.Iron => new Color(189, 201, 207), GearTier.Gold => new Color(241, 186, 62), GearTier.Diamond => new Color(100, 207, 233), _ => new Color(107, 101, 139) };
-        if (zombie.Kind is ZombieKind.Armored or ZombieKind.ArmedArmored)
+        var tier = ArmorColor(zombie.Tier);
+        foreach (var piece in zombie.ArmorPieces)
         {
-            dynamic.Box(p + new Vector3(-.255f, .45f, -.19f), p + new Vector3(.255f, .83f, .19f), tier);
-            dynamic.Box(p + new Vector3(-.22f, 1.13f, -.22f), p + new Vector3(.22f, 1.28f, .22f), tier);
-            dynamic.Box(p + new Vector3(-.49f, .36f, .12f), p + new Vector3(-.26f, .9f, .24f), tier);
+            var (min, max) = ArmorBounds(piece.Slot);
+            dynamic.Box(p + min, p + max, ArmorColor(piece.Tier));
         }
         if (zombie.Kind is ZombieKind.Armed or ZombieKind.ArmedArmored)
             dynamic.Box(p + new Vector3(.35f, .33f, -.09f), p + new Vector3(.46f, 1.10f, .04f), tier);
@@ -166,7 +256,46 @@ public sealed class WorldRenderer : IDisposable
             dynamic.Box(p + new Vector3(-.3f, 1.42f, -.025f), p + new Vector3(.3f, 1.47f, .025f), new Color(47, 45, 43));
             dynamic.Box(p + new Vector3(-.3f, 1.43f, -.029f), p + new Vector3(-.3f + .6f * zombie.Hp / zombie.MaxHp, 1.48f, .029f), new Color(233, 126, 106));
         }
+        if (zombie.AirRemaining < Balance.AirSeconds)
+        {
+            dynamic.Box(p + new Vector3(-.3f, 1.53f, -.025f), p + new Vector3(.3f, 1.57f, .025f), new Color(35, 46, 60));
+            dynamic.Box(p + new Vector3(-.3f, 1.54f, -.029f), p + new Vector3(-.3f + .6f * zombie.AirRemaining / Balance.AirSeconds, 1.58f, .029f), new Color(107, 185, 231));
+        }
+        // Local +Z is the face and shield front. One transform keeps every body part,
+        // equipped item, and status bar aligned while preserving the one-cell body height.
+        TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(1, ZombieHeightScale, 1) *
+            ZombieRotation(zombie) * Matrix.CreateTranslation(p));
     }
+    private static Vector3 ZombieFeet(Zombie zombie) => ToXna(zombie.Position) - new Vector3(0, .5f, 0);
+    private static Matrix ZombieRotation(Zombie zombie)
+    {
+        var facing = ToXna(zombie.Facing);
+        facing.Y = 0;
+        if (!float.IsFinite(facing.X) || !float.IsFinite(facing.Z) || facing.LengthSquared() < .000001f) facing = Vector3.UnitZ;
+        else facing.Normalize();
+        return Matrix.CreateRotationY(MathF.Atan2(facing.X, facing.Z));
+    }
+    private static (Vector3 Min, Vector3 Max) ArmorBounds(ArmorSlot slot) => slot switch
+    {
+        ArmorSlot.Helmet => (new Vector3(-.22f, 1.13f, -.22f), new Vector3(.22f, 1.28f, .22f)),
+        ArmorSlot.Chestplate => (new Vector3(-.255f, .45f, -.19f), new Vector3(.255f, .83f, .19f)),
+        ArmorSlot.Shield => (new Vector3(-.28f, .36f, .235f), new Vector3(.28f, .9f, .32f)),
+        _ => throw new ArgumentOutOfRangeException(nameof(slot))
+    };
+    private void TransformVertices(int firstVertex, Matrix transform)
+    {
+        for (int i = firstVertex; i < dynamic.Vertices.Count; i++)
+        {
+            var vertex = dynamic.Vertices[i];
+            vertex.Position = Vector3.Transform(vertex.Position, transform);
+            dynamic.Vertices[i] = vertex;
+        }
+    }
+    private static Color ArmorColor(GearTier tier) => tier switch
+    {
+        GearTier.Wood => new Color(137, 100, 67), GearTier.Stone => new Color(137, 146, 155), GearTier.Copper => new Color(188, 123, 83),
+        GearTier.Iron => new Color(189, 201, 207), GearTier.Gold => new Color(241, 186, 62), GearTier.Diamond => new Color(100, 207, 233), _ => new Color(107, 101, 139)
+    };
     public static Vector3 ToXna(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
     public void Dispose() { terrain?.Dispose(); effect.Dispose(); }
 }

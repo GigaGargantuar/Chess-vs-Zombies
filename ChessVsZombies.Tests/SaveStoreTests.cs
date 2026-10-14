@@ -1,4 +1,5 @@
 using ChessVsZombies.Core;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace ChessVsZombies.Tests;
@@ -125,7 +126,7 @@ public class SaveStoreTests
     }
 
     [Fact]
-    public void CurrentCheckpointRejectsATurretInsideTheReservedBlockVolume()
+    public void VersionFiveCheckpointRejectsATurretInsideTheReservedBlockVolume()
     {
         WithSavePath(path =>
         {
@@ -133,6 +134,8 @@ public class SaveStoreTests
             Assert.True(game.Deploy(PieceKind.Pawn, new Cell(11, 16, 12)));
             SaveStore.Save(game, path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+            document["Version"] = 5;
+            document.AsObject().Remove("TerrainPlacements");
             document["Turrets"]![0]!["Cell"]!["X"] = 12;
             string invalid = document.ToJsonString();
             File.WriteAllText(path, invalid);
@@ -151,7 +154,9 @@ public class SaveStoreTests
             SaveStore.Save(new GameSession(), path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
             document["Version"] = 1;
+            RemoveLiquidFields(document);
             document.AsObject().Remove("Inventory");
+            document.AsObject().Remove("DamagedTerrain");
             document["Economy"]!["Currency"] = 900;
             SetLegacyProgress(document, "HP", 21, 19);
             SetLegacyProgress(document, "ATK", 11, 10);
@@ -198,7 +203,7 @@ public class SaveStoreTests
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v1.bak"));
             var saved = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-            Assert.Equal(3, saved["Version"]!.GetValue<int>());
+            Assert.Equal(6, saved["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
             Assert.Equal(901, reloaded.Economy.Currency);
@@ -217,7 +222,9 @@ public class SaveStoreTests
             SaveStore.Save(game, path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
             document["Version"] = 1;
+            RemoveLiquidFields(document);
             document.AsObject().Remove("Inventory");
+            document.AsObject().Remove("DamagedTerrain");
             var turret = document["Turrets"]![0]!.AsObject();
             turret.Remove("UpgradePoints");
             turret["Upgrades"] = new System.Text.Json.Nodes.JsonArray();
@@ -243,7 +250,9 @@ public class SaveStoreTests
             SaveStore.Save(new GameSession(), path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
             document["Version"] = version;
+            RemoveLiquidFields(document);
             document.AsObject().Remove("Inventory");
+            document.AsObject().Remove("DamagedTerrain");
             document["Barriers"] = System.Text.Json.Nodes.JsonNode.Parse("""
                 [{"Cell":{"X":12,"Y":16,"Z":12},"Hp":25}]
                 """);
@@ -296,6 +305,623 @@ public class SaveStoreTests
         });
     }
 
+    [Fact]
+    public void CheckpointPreservesDamagedAndDestroyedNaturalTerrainWithoutGrantingInventory()
+    {
+        WithSavePath(path =>
+        {
+            var dirt = new Cell(8, 15, 8);
+            var stone = new Cell(8, 11, 8);
+            var destroyedDirt = new Cell(9, 15, 8);
+            var destroyedStone = new Cell(9, 11, 8);
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(dirt, 73), TerrainDamage(stone, 473));
+            document["Excavated"] = new JsonArray(SavedCell(destroyedDirt), SavedCell(destroyedStone));
+            File.WriteAllText(path, document.ToJsonString());
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(Material.Dirt, restored.World.GetMaterial(dirt));
+            Assert.Equal(Material.Stone, restored.World.GetMaterial(stone));
+            Assert.Equal(73, restored.World.GetTerrainHp(dirt));
+            Assert.Equal(473, restored.World.GetTerrainHp(stone));
+            Assert.Equal(2, restored.World.DamagedTerrain.Count());
+            Assert.Equal(Material.Air, restored.World.GetMaterial(destroyedDirt));
+            Assert.Equal(Material.Air, restored.World.GetMaterial(destroyedStone));
+            Assert.Equal(0, restored.World.GetTerrainHp(destroyedDirt));
+            Assert.Equal(0, restored.World.GetTerrainHp(destroyedStone));
+            Assert.Equal(0, restored.Inventory.DirtCount);
+            Assert.Equal(0, restored.Inventory.StoneCount);
+
+            SaveStore.Save(restored, path);
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.NotNull(reloaded);
+            Assert.Equal(73, reloaded.World.GetTerrainHp(dirt));
+            Assert.Equal(473, reloaded.World.GetTerrainHp(stone));
+            Assert.Equal(Material.Air, reloaded.World.GetMaterial(destroyedDirt));
+            Assert.Equal(Material.Air, reloaded.World.GetMaterial(destroyedStone));
+            Assert.Equal(0, reloaded.Inventory.DirtCount);
+            Assert.Equal(0, reloaded.Inventory.StoneCount);
+
+            Assert.True(reloaded.BuyTool(ToolKind.Shovel));
+            Assert.True(reloaded.Dig(dirt));
+            Assert.Equal(1, reloaded.Inventory.DirtCount);
+            Assert.Equal(stone, Assert.Single(reloaded.World.DamagedTerrain).Key);
+            SaveStore.Save(reloaded, path);
+            Assert.True(SaveStore.TryLoad(path, out var excavated, out error), error);
+            Assert.NotNull(excavated);
+            Assert.Equal(0, excavated.World.GetTerrainHp(dirt));
+            Assert.Equal(Material.Air, excavated.World.GetMaterial(dirt));
+            Assert.Equal(stone, Assert.Single(excavated.World.DamagedTerrain).Key);
+            Assert.Equal(1, excavated.Inventory.DirtCount);
+            Assert.Equal(0, excavated.Inventory.StoneCount);
+        });
+    }
+
+    [Fact]
+    public void VersionThreeMigrationPreservesInventoryAndRemovedTerrainAndBacksUpOriginalOnSave()
+    {
+        WithSavePath(path =>
+        {
+            var dirt = new Cell(8, 15, 8);
+            var stone = new Cell(8, 11, 8);
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["Version"] = 3;
+            RemoveLiquidFields(document);
+            document.AsObject().Remove("DamagedTerrain");
+            document["Inventory"]!["DirtCount"] = 7;
+            document["Inventory"]!["StoneCount"] = 3;
+            document["Inventory"]!["HasShovel"] = true;
+            document["Excavated"] = new JsonArray(SavedCell(dirt), SavedCell(stone));
+            string legacy = document.ToJsonString();
+            File.WriteAllText(path, legacy);
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.False(string.IsNullOrWhiteSpace(restored.MigrationNotice));
+            Assert.Equal(legacy, File.ReadAllText(path));
+            Assert.False(File.Exists(path + ".v3.bak"));
+            Assert.Empty(restored.World.DamagedTerrain);
+            Assert.Equal(100, restored.World.GetTerrainHp(new Cell(9, 15, 8)));
+            Assert.Equal(500, restored.World.GetTerrainHp(new Cell(9, 11, 8)));
+            Assert.Equal(Material.Air, restored.World.GetMaterial(dirt));
+            Assert.Equal(Material.Air, restored.World.GetMaterial(stone));
+            Assert.Equal(7, restored.Inventory.DirtCount);
+            Assert.Equal(3, restored.Inventory.StoneCount);
+            Assert.True(restored.Inventory.HasShovel);
+            Assert.False(restored.Inventory.HasPickaxe);
+            Assert.Equal(1000, restored.Economy.Currency);
+
+            SaveStore.Save(restored, path);
+            Assert.Equal(legacy, File.ReadAllText(path + ".v3.bak"));
+            var upgraded = JsonNode.Parse(File.ReadAllText(path))!;
+            Assert.Equal(6, upgraded["Version"]!.GetValue<int>());
+            Assert.Empty(upgraded["DamagedTerrain"]!.AsArray());
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.NotNull(reloaded);
+            Assert.Equal(7, reloaded.Inventory.DirtCount);
+            Assert.Equal(3, reloaded.Inventory.StoneCount);
+            Assert.Equal(Material.Air, reloaded.World.GetMaterial(dirt));
+            Assert.Equal(Material.Air, reloaded.World.GetMaterial(stone));
+            Assert.Empty(reloaded.World.DamagedTerrain);
+            Assert.Equal(legacy, File.ReadAllText(path + ".v3.bak"));
+        });
+    }
+
+    [Fact]
+    public void VersionFourMigrationAddsEmptyLiquidsWithoutChangingExistingMaterialsOrDamage()
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["Version"] = 4;
+            RemoveLiquidFields(document);
+            document["Inventory"]!["DirtCount"] = 7;
+            document["Inventory"]!["StoneCount"] = 3;
+            document["Inventory"]!["HasShovel"] = true;
+            document["Excavated"] = new JsonArray(SavedCell(new Cell(8, 15, 8)));
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(new Cell(9, 15, 8), 73));
+            string legacy = document.ToJsonString();
+            File.WriteAllText(path, legacy);
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(legacy, File.ReadAllText(path));
+            Assert.False(File.Exists(path + ".v4.bak"));
+            Assert.Equal(7, restored.Inventory.DirtCount);
+            Assert.Equal(3, restored.Inventory.StoneCount);
+            Assert.True(restored.Inventory.HasShovel);
+            Assert.Equal(73, restored.World.GetTerrainHp(new Cell(9, 15, 8)));
+            Assert.Equal(Material.Air, restored.World.GetMaterial(new Cell(8, 15, 8)));
+            Assert.Equal(1000, restored.Economy.Currency);
+            Assert.All(restored.LiquidInventory, pair => Assert.Equal(0, pair.Value));
+            Assert.Equal(3, restored.LiquidInventory.Count);
+            Assert.Empty(restored.Liquids.ExportState().Cells);
+            Assert.Empty(restored.Liquids.ExportState().Obsidian);
+            Assert.Empty(restored.Liquids.ExportState().Hazards);
+
+            SaveStore.Save(restored, path);
+            Assert.Equal(legacy, File.ReadAllText(path + ".v4.bak"));
+            Assert.Equal(6, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.NotNull(reloaded);
+            Assert.Equal(7, reloaded.Inventory.DirtCount);
+            Assert.Equal(3, reloaded.Inventory.StoneCount);
+            Assert.Equal(73, reloaded.World.GetTerrainHp(new Cell(9, 15, 8)));
+            Assert.All(reloaded.LiquidInventory, pair => Assert.Equal(0, pair.Value));
+        });
+    }
+
+    [Fact]
+    public void FallenNaturalTerrainPreservesItsNewMaterialAndRemainingHpAcrossCheckpoints()
+    {
+        WithSavePath(path =>
+        {
+            var game = SessionWithBothTools();
+            var original = new Cell(8, 12, 8);
+            var landing = new Cell(8, 11, 8);
+            SaveStore.Save(game, path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(original, 73));
+            File.WriteAllText(path, document.ToJsonString());
+            Assert.True(SaveStore.TryLoad(path, out var damaged, out var error), error);
+            Assert.NotNull(damaged);
+            game = damaged;
+
+            foreach (var offset in new[] { new Cell(0, 1, 0), new Cell(1, 0, 0), new Cell(-1, 0, 0), new Cell(0, 0, 1), new Cell(0, 0, -1) })
+                Assert.True(game.Dig(original + offset));
+            Assert.True(game.Dig(landing));
+
+            Assert.Equal(Material.Air, game.World.GetNaturalMaterial(original));
+            Assert.Equal(Material.Stone, WorldGrid.InitialMaterial(landing));
+            Assert.Equal(Material.Dirt, game.World.GetNaturalMaterial(landing));
+            Assert.Equal(73, game.World.GetTerrainHp(landing));
+            Assert.Equal(5, game.Inventory.DirtCount);
+            Assert.Equal(1, game.Inventory.StoneCount);
+            SaveStore.Save(game, path);
+            Assert.True(SaveStore.TryLoad(path, out var restored, out error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(Material.Air, restored.World.GetNaturalMaterial(original));
+            Assert.Equal(Material.Dirt, restored.World.GetNaturalMaterial(landing));
+            Assert.Equal(73, restored.World.GetTerrainHp(landing));
+            Assert.Equal(5, restored.Inventory.DirtCount);
+            Assert.Equal(1, restored.Inventory.StoneCount);
+            Assert.Contains(restored.ExportState().Excavated, cell => cell == landing);
+            var moved = Assert.Single(restored.ExportState().TerrainPlacements!);
+            Assert.Equal(landing, moved.Cell);
+            Assert.Equal(Material.Dirt, moved.Material);
+        });
+    }
+
+    [Fact]
+    public void TowerStacksCanFallToTheBottomAndRetainTheirCellsAndHpOnReload()
+    {
+        WithSavePath(path =>
+        {
+            var game = SessionWithBothTools();
+            game.Economy.Credit(3);
+            for (int y = 16; y <= 18; y++) Assert.True(game.Deploy(PieceKind.Pawn, new Cell(8, y, 8)));
+            game.Turrets[1].Hp = 23;
+            for (int y = 15; y >= 0; y--) Assert.True(game.Dig(new Cell(8, y, 8)));
+            Assert.Equal(new[] { new Cell(8, 0, 8), new Cell(8, 1, 8), new Cell(8, 2, 8) }, game.Turrets.Select(tower => tower.Cell));
+
+            SaveStore.Save(game, path);
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(game.Turrets.Select(tower => (tower.Id, tower.Cell, tower.Hp)), restored.Turrets.Select(tower => (tower.Id, tower.Cell, tower.Hp)));
+            Assert.Equal(23, restored.Turrets[1].Hp);
+            Assert.Equal(4, restored.Inventory.DirtCount);
+            Assert.Equal(12, restored.Inventory.StoneCount);
+        });
+    }
+
+    [Fact]
+    public void APhysicalFallIntoTheBlockEnclosureDoesNotMakeTheCheckpointInvalid()
+    {
+        WithSavePath(path =>
+        {
+            var game = new GameSession();
+            Assert.True(game.Inventory.Add(Material.Dirt, 4));
+            for (int y = 16; y <= 19; y++) Assert.True(game.BuildBarrier(new Cell(14, y, 15)));
+            Assert.True(game.Deploy(PieceKind.Pawn, new Cell(14, 20, 15)));
+            Assert.True(game.Remove(new Cell(14, 19, 15)));
+            var fallen = Assert.Single(game.Turrets);
+            Assert.Equal(new Cell(14, 19, 15), fallen.Cell);
+            Assert.True(WorldGrid.IsBuildZone(fallen.Cell));
+
+            SaveStore.Save(game, path);
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(fallen.Cell, Assert.Single(restored.Turrets).Cell);
+        });
+    }
+
+    [Fact]
+    public void FallenFortificationBelowTheBuildZonePreservesMaterialAndDamage()
+    {
+        WithSavePath(path =>
+        {
+            var game = SessionWithBothTools();
+            Assert.True(game.Inventory.Add(Material.Dirt));
+            Assert.True(game.BuildBarrier(new Cell(12, 16, 12)));
+            Assert.Single(game.World.Barriers).Hp = 73;
+            for (int y = 15; y >= 11; y--)
+                for (int x = 11; x <= 13; x++)
+                    for (int z = 11; z <= 13; z++)
+                        Assert.True(game.Dig(new Cell(x, y, z)));
+            var fallen = Assert.Single(game.World.Barriers);
+            Assert.Equal(new Cell(12, 11, 12), fallen.Cell);
+
+            SaveStore.Save(game, path);
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            var reloaded = Assert.Single(restored.World.Barriers);
+            Assert.Equal(fallen.Cell, reloaded.Cell);
+            Assert.Equal(Material.Dirt, reloaded.Content);
+            Assert.Equal(73, reloaded.Hp);
+        });
+    }
+
+    [Fact]
+    public void AttachedHangingFortificationsRemainAtTheirSavedCells()
+    {
+        WithSavePath(path =>
+        {
+            var game = SessionWithBothTools();
+            Assert.True(game.Inventory.Add(Material.Dirt, 2));
+            Assert.True(game.BuildBarrier(new Cell(12, 16, 12)));
+            Assert.True(game.BuildBarrier(new Cell(12, 17, 12)));
+            Assert.True(game.Dig(new Cell(12, 15, 12)));
+            Assert.Equal(new[] { 16, 17 }, game.World.Barriers.Select(barrier => barrier.Cell.Y).Order());
+
+            SaveStore.Save(game, path);
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(new[] { 16, 17 }, restored.World.Barriers.Select(barrier => barrier.Cell.Y).Order());
+            Assert.Equal(Material.Air, restored.World.GetNaturalMaterial(new Cell(12, 15, 12)));
+        });
+    }
+
+    [Fact]
+    public void VersionFiveMigrationPreservesExistingStateAndBacksUpItsOriginalFile()
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            SetFluidFixture(document);
+            document["Version"] = 5;
+            document.AsObject().Remove("TerrainPlacements");
+            document["Inventory"]!["DirtCount"] = 7;
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(new Cell(8, 15, 8), 73));
+            string legacy = document.ToJsonString();
+            File.WriteAllText(path, legacy);
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(legacy, File.ReadAllText(path));
+            Assert.False(File.Exists(path + ".v5.bak"));
+            Assert.Empty(restored.ExportState().TerrainPlacements!);
+            Assert.Equal(7, restored.Inventory.DirtCount);
+            Assert.Equal(73, restored.World.GetTerrainHp(new Cell(8, 15, 8)));
+            string liquids = System.Text.Json.JsonSerializer.Serialize(restored.Liquids.ExportState());
+            SaveStore.Save(restored, path);
+
+            Assert.Equal(legacy, File.ReadAllText(path + ".v5.bak"));
+            Assert.Equal(6, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.NotNull(reloaded);
+            Assert.Equal(7, reloaded.Inventory.DirtCount);
+            Assert.Equal(73, reloaded.World.GetTerrainHp(new Cell(8, 15, 8)));
+            Assert.Equal(liquids, System.Text.Json.JsonSerializer.Serialize(reloaded.Liquids.ExportState()));
+            Assert.Equal(restored.LiquidInventory.OrderBy(pair => pair.Key), reloaded.LiquidInventory.OrderBy(pair => pair.Key));
+        });
+    }
+
+    [Theory]
+    [InlineData("missing collection")]
+    [InlineData("null collection")]
+    [InlineData("null entry")]
+    [InlineData("duplicate placement")]
+    [InlineData("uncleared cell")]
+    [InlineData("initial material")]
+    [InlineData("outside grid")]
+    [InlineData("objective")]
+    [InlineData("invalid material")]
+    [InlineData("missing material")]
+    [InlineData("legacy placement")]
+    public void InvalidMovedTerrainIsRejectedWithoutChangingTheCheckpoint(string defect)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            var cell = new Cell(8, 11, 8);
+            document["Excavated"] = new JsonArray(SavedCell(cell));
+            var placement = new JsonObject { ["Cell"] = SavedCell(cell), ["Material"] = "Dirt" };
+            document["TerrainPlacements"] = new JsonArray(placement);
+            switch (defect)
+            {
+                case "missing collection": document.AsObject().Remove("TerrainPlacements"); break;
+                case "null collection": document["TerrainPlacements"] = null; break;
+                case "null entry": document["TerrainPlacements"]![0] = null; break;
+                case "duplicate placement": document["TerrainPlacements"]!.AsArray().Add(placement.DeepClone()); break;
+                case "uncleared cell": document["Excavated"] = new JsonArray(); break;
+                case "initial material": placement["Material"] = "Stone"; break;
+                case "outside grid": placement["Cell"]!["X"] = 32; break;
+                case "objective": placement["Cell"] = SavedCell(new Cell(15, 15, 15)); break;
+                case "invalid material": placement["Material"] = "Obsidian"; break;
+                case "missing material": placement.AsObject().Remove("Material"); break;
+                case "legacy placement": document["Version"] = 5; break;
+            }
+            AssertRejectedWithoutRewrite(path, document);
+        });
+    }
+
+    [Theory]
+    [InlineData("missing inventory")]
+    [InlineData("null inventory")]
+    [InlineData("missing kind")]
+    [InlineData("unknown kind")]
+    [InlineData("negative units")]
+    [InlineData("fractional units")]
+    [InlineData("missing simulation")]
+    [InlineData("null simulation")]
+    [InlineData("legacy fluid data")]
+    public void InvalidLiquidCheckpointEnvelopeIsRejectedAndLeftIntact(string defect)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            switch (defect)
+            {
+                case "missing inventory": document.AsObject().Remove("LiquidInventory"); break;
+                case "null inventory": document["LiquidInventory"] = null; break;
+                case "missing kind": document["LiquidInventory"]!.AsObject().Remove("Mercury"); break;
+                case "unknown kind": document["LiquidInventory"]!["Oil"] = 1; break;
+                case "negative units": document["LiquidInventory"]!["Water"] = -1; break;
+                case "fractional units": document["LiquidInventory"]!["Water"] = .5; break;
+                case "missing simulation": document.AsObject().Remove("Liquids"); break;
+                case "null simulation": document["Liquids"] = null; break;
+                case "legacy fluid data": document["Version"] = 4; document.AsObject().Remove("TerrainPlacements"); break;
+            }
+            AssertRejectedWithoutRewrite(path, document);
+        });
+    }
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(int.MaxValue)]
+    public void LiquidCheckpointPreservesStratificationCrustDamageVaporAndFlowContinuation(int flowTick)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            SetFluidFixture(document);
+            document["Liquids"]!["FlowTick"] = flowTick;
+            File.WriteAllText(path, document.ToJsonString());
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            Assert.Equal(13, restored.LiquidInventory[LiquidKind.Water]);
+            Assert.Equal(27, restored.LiquidInventory[LiquidKind.Mercury]);
+            Assert.Equal(9, restored.LiquidInventory[LiquidKind.Lava]);
+            var state = restored.Liquids.ExportState();
+            var layers = Assert.Single(state.Cells, cell => cell.Cell == new Cell(8, 16, 8));
+            Assert.Equal(4, layers.Water);
+            Assert.Equal(6, layers.Mercury);
+            Assert.Equal(0, layers.Lava);
+            var crust = Assert.Single(state.Obsidian);
+            Assert.Equal(new Cell(9, 15, 8), crust.Cell);
+            Assert.Equal(2, crust.Units);
+            Assert.Equal(CrustFace.West, crust.Face);
+            Assert.Equal(75, crust.Hp);
+            Assert.Equal(Material.Obsidian, restored.World.GetMaterial(crust.Cell));
+            Assert.Equal(0, restored.Inventory.DirtCount);
+            Assert.Equal(2, state.Hazards.Count);
+            Assert.Equal(.07d, state.Accumulator);
+            Assert.Equal(flowTick, state.FlowTick);
+            restored.Liquids.Update(.023456789f);
+            state = restored.Liquids.ExportState();
+            Assert.Equal(.07d + .023456789f, state.Accumulator);
+            string before = System.Text.Json.JsonSerializer.Serialize(state);
+
+            SaveStore.Save(restored, path);
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.NotNull(reloaded);
+            Assert.Equal(before, System.Text.Json.JsonSerializer.Serialize(reloaded.Liquids.ExportState()));
+            restored.Liquids.Update(.17f);
+            reloaded.Liquids.Update(.17f);
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(restored.Liquids.ExportState()),
+                System.Text.Json.JsonSerializer.Serialize(reloaded.Liquids.ExportState()));
+            Assert.Equal(restored.LiquidInventory.OrderBy(pair => pair.Key), reloaded.LiquidInventory.OrderBy(pair => pair.Key));
+        });
+    }
+
+    [Theory]
+    [InlineData("missing cells")]
+    [InlineData("null cells")]
+    [InlineData("null entry")]
+    [InlineData("duplicate cell")]
+    [InlineData("outside grid")]
+    [InlineData("solid terrain")]
+    [InlineData("objective")]
+    [InlineData("negative units")]
+    [InlineData("fractional units")]
+    [InlineData("over capacity")]
+    [InlineData("crust capacity")]
+    [InlineData("crust duplicate")]
+    [InlineData("crust HP")]
+    [InlineData("crust face")]
+    [InlineData("cloud radius")]
+    [InlineData("cloud lifetime")]
+    [InlineData("cloud vapor units")]
+    [InlineData("cloud kind")]
+    [InlineData("negative accumulator")]
+    [InlineData("whole tick accumulator")]
+    [InlineData("negative flow tick")]
+    public void InvalidLiquidGeometryOrSimulationStateIsRejectedAndLeftIntact(string defect)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            SetFluidFixture(document);
+            var liquid = document["Liquids"]!;
+            var first = liquid["Cells"]![0]!;
+            switch (defect)
+            {
+                case "missing cells": liquid.AsObject().Remove("Cells"); break;
+                case "null cells": liquid["Cells"] = null; break;
+                case "null entry": liquid["Cells"]![0] = null; break;
+                case "duplicate cell": liquid["Cells"]!.AsArray().Add(first.DeepClone()); break;
+                case "outside grid": first["Cell"]!["X"] = 32; break;
+                case "solid terrain": first["Cell"]!["Y"] = 15; break;
+                case "objective": first["Cell"] = SavedCell(new Cell(15, 16, 15)); break;
+                case "negative units": first["Water"] = -1; break;
+                case "fractional units": first["Water"] = 1.5; break;
+                case "over capacity": first["Water"] = 5; break;
+                case "crust capacity": liquid["Cells"]![1]!["Mercury"] = 9; break;
+                case "crust duplicate": liquid["Obsidian"]!.AsArray().Add(liquid["Obsidian"]![0]!.DeepClone()); break;
+                case "crust HP": liquid["Obsidian"]![0]!["Hp"] = 101; break;
+                case "crust face": liquid["Obsidian"]![0]!["Face"] = "Invalid"; break;
+                case "cloud radius": liquid["Hazards"]![0]!["Radius"] = 2; break;
+                case "cloud lifetime": liquid["Hazards"]![0]!["RemainingSeconds"] = 0; break;
+                case "cloud vapor units": liquid["Hazards"]![0]!["VaporizedUnits"] = 0; break;
+                case "cloud kind": liquid["Hazards"]![0]!["Kind"] = "Pierce"; break;
+                case "negative accumulator": liquid["Accumulator"] = -.01; break;
+                case "whole tick accumulator": liquid["Accumulator"] = .1; break;
+                case "negative flow tick": liquid["FlowTick"] = -1; break;
+            }
+            AssertRejectedWithoutRewrite(path, document);
+        });
+    }
+
+    [Fact]
+    public void CheckpointRejectsLiquidsOverlappingADeployedPiece()
+    {
+        WithSavePath(path =>
+        {
+            var game = new GameSession();
+            Assert.True(game.Deploy(PieceKind.Pawn, new Cell(8, 16, 8)));
+            SaveStore.Save(game, path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            SetFluidFixture(document);
+            AssertRejectedWithoutRewrite(path, document);
+        });
+    }
+
+    [Theory]
+    [InlineData(8, 15, 8, 0)]
+    [InlineData(8, 15, 8, -1)]
+    [InlineData(8, 15, 8, 100)]
+    [InlineData(8, 15, 8, 101)]
+    [InlineData(8, 11, 8, 500)]
+    [InlineData(8, 11, 8, 501)]
+    [InlineData(15, 15, 15, 1)]
+    [InlineData(8, 16, 8, 1)]
+    [InlineData(32, 15, 8, 1)]
+    public void InvalidNaturalTerrainDamageIsRejectedWithoutChangingCheckpoint(int x, int y, int z, int hp)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(new Cell(x, y, z), hp));
+            AssertRejectedWithoutRewrite(path, document);
+        });
+    }
+
+    [Theory]
+    [InlineData("missing collection")]
+    [InlineData("null collection")]
+    [InlineData("duplicate cell")]
+    [InlineData("excavated cell")]
+    [InlineData("missing HP")]
+    [InlineData("missing cell")]
+    [InlineData("null entry")]
+    [InlineData("legacy collection")]
+    [InlineData("nonfinite HP")]
+    public void MalformedTerrainDamageDataIsRejectedWithoutChangingCheckpoint(string defect)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            var dirt = new Cell(8, 15, 8);
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(dirt, 73));
+            switch (defect)
+            {
+                case "missing collection": document.AsObject().Remove("DamagedTerrain"); break;
+                case "null collection": document["DamagedTerrain"] = null; break;
+                case "duplicate cell": document["DamagedTerrain"]!.AsArray().Add(TerrainDamage(dirt, 72)); break;
+                case "excavated cell": document["Excavated"] = new JsonArray(SavedCell(dirt)); break;
+                case "missing HP": document["DamagedTerrain"]![0]!.AsObject().Remove("Hp"); break;
+                case "missing cell": document["DamagedTerrain"]![0]!.AsObject().Remove("Cell"); break;
+                case "null entry": document["DamagedTerrain"] = new JsonArray((JsonNode?)null); break;
+                case "legacy collection": document["Version"] = 3; RemoveLiquidFields(document); break;
+                case "nonfinite HP": document["DamagedTerrain"]![0]!["Hp"] = JsonNode.Parse("1e100"); break;
+            }
+            AssertRejectedWithoutRewrite(path, document);
+        });
+    }
+
+    private static JsonObject TerrainDamage(Cell cell, float hp) => new() { ["Cell"] = SavedCell(cell), ["Hp"] = hp };
+
+    private static GameSession SessionWithBothTools()
+    {
+        var game = new GameSession();
+        game.Economy.Credit(100);
+        Assert.True(game.BuyTool(ToolKind.Shovel));
+        Assert.True(game.BuyTool(ToolKind.Pickaxe));
+        return game;
+    }
+
+    private static void RemoveLiquidFields(JsonNode document)
+    {
+        document.AsObject().Remove("TerrainPlacements");
+        document.AsObject().Remove("Liquids");
+        document.AsObject().Remove("LiquidInventory");
+    }
+
+    private static void SetFluidFixture(JsonNode document)
+    {
+        document["Excavated"] = new JsonArray(SavedCell(new Cell(9, 15, 8)));
+        document["LiquidInventory"] = JsonNode.Parse("""{"Water":13,"Mercury":27,"Lava":9}""");
+        document["Liquids"] = JsonNode.Parse("""
+            {
+              "Cells": [
+                {"Cell":{"X":8,"Y":16,"Z":8},"Water":4,"Mercury":6,"Lava":0,"ObsidianUnits":0,"CrustFace":null},
+                {"Cell":{"X":9,"Y":15,"Z":8},"Water":0,"Mercury":3,"Lava":0,"ObsidianUnits":2,"CrustFace":"West"}
+              ],
+              "Obsidian": [{"Cell":{"X":9,"Y":15,"Z":8},"Units":2,"Face":"West","Hp":75}],
+              "Hazards": [
+                {"Center":{"X":8,"Y":17,"Z":8},"Radius":1,"Kind":"Thermal","RemainingSeconds":3,"Dps":2,"VaporizedUnits":10},
+                {"Center":{"X":12,"Y":17,"Z":8},"Radius":2,"Kind":"Chemical","RemainingSeconds":6,"Dps":4,"VaporizedUnits":3}
+              ],
+              "Accumulator":0.07,
+              "FlowTick":7
+            }
+            """);
+    }
+
+    private static JsonObject SavedCell(Cell cell) => new() { ["X"] = cell.X, ["Y"] = cell.Y, ["Z"] = cell.Z };
+
+    private static void AssertRejectedWithoutRewrite(string path, JsonNode document)
+    {
+        string invalid = document.ToJsonString();
+        File.WriteAllText(path, invalid);
+        Assert.False(SaveStore.TryLoad(path, out var restored, out var error));
+        Assert.Null(restored);
+        Assert.False(string.IsNullOrWhiteSpace(error));
+        Assert.Equal(invalid, File.ReadAllText(path));
+    }
+
     private static void SetLegacyProgress(System.Text.Json.Nodes.JsonNode document, string kind, int pulls, int available)
     {
         document["Economy"]!["Upgrades"]![kind]!["PullCount"] = pulls;
@@ -311,6 +937,9 @@ public class SaveStoreTests
             File.Delete(path);
             File.Delete(path + ".v1.bak");
             File.Delete(path + ".v2.bak");
+            File.Delete(path + ".v3.bak");
+            File.Delete(path + ".v4.bak");
+            File.Delete(path + ".v5.bak");
         }
     }
 }
