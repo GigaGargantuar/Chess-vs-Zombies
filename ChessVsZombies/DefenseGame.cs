@@ -70,7 +70,13 @@ public sealed class DefenseGame : Game
         int saveIndex = Array.IndexOf(args, "--save-path");
         if (saveIndex >= 0 && saveIndex + 1 < args.Length) savePath = Path.GetFullPath(args[saveIndex + 1]);
         Activated += (_, _) => { if (captured) CenterMouse(); };
+        Window.ClientSizeChanged += (_, _) => { if (captured) CenterMouse(); };
         Exiting += (_, _) => SaveCheckpoint();
+    }
+    protected override void Initialize()
+    {
+        base.Initialize();
+        DesktopWindow.Maximize(Window);
     }
     protected override void LoadContent()
     {
@@ -257,7 +263,7 @@ public sealed class DefenseGame : Game
     }
     private void SelectTarget()
     {
-        const float selectionRange = 5;
+        const float selectionRange = 10;
         selected = !hitLiquid && hit.HasValue && session.TrySelectTurret(hit.Value) is { } turret &&
             System.Numerics.Vector3.DistanceSquared(cameraControl.Position, turret.Cell.Center) <= selectionRange * selectionRange
             ? turret : null;
