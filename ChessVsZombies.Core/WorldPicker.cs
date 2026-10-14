@@ -2,7 +2,7 @@ using System.Numerics;
 
 namespace ChessVsZombies.Core;
 
-public readonly record struct AimResult(Cell Hit, Cell? Placement, bool IsLiquid)
+public readonly record struct AimResult(Cell Hit, Cell? Placement, bool IsLiquid, CrustFace? ObsidianFace = null)
 {
     public Cell? Highlight => IsLiquid ? Placement : Hit;
 }
@@ -38,19 +38,20 @@ public static class WorldPicker
             double next = Math.Min(tx, Math.Min(ty, tz));
             double nearest = double.PositiveInfinity;
             bool liquid = false;
+            CrustFace? obsidianFace = null;
             var min = new Vector3(cell.X, cell.Y, cell.Z);
             var max = min + Vector3.One;
             var material = session.World.GetMaterial(cell);
             if (session.TrySelectTurret(cell) is not null || material is not (Material.Air or Material.Obsidian))
                 Consider(min, max, false);
             else if (session.World.GetObsidian(cell) is { } crust)
-                Consider(crust.Min, crust.Max, false);
+                foreach (var part in crust.Parts) Consider(part.Min, part.Max, false, part.Face);
             if (includeLiquids)
                 foreach (var volume in session.Liquids.GetVolumes(cell)) Consider(volume.Min, volume.Max, true);
             if (double.IsFinite(nearest))
             {
                 var placement = liquid ? cell + new Cell(0, 1, 0) : previous;
-                return new AimResult(cell, WorldGrid.IsInside(placement) ? placement : null, liquid);
+                return new AimResult(cell, WorldGrid.IsInside(placement) ? placement : null, liquid, obsidianFace);
             }
             if (next > exit) break;
             previous = cell;
@@ -58,7 +59,7 @@ public static class WorldPicker
             cell += new Cell(tx == next ? sx : 0, ty == next ? sy : 0, tz == next ? sz : 0);
             enter = next;
 
-            void Consider(Vector3 boxMin, Vector3 boxMax, bool isLiquid)
+            void Consider(Vector3 boxMin, Vector3 boxMax, bool isLiquid, CrustFace? face = null)
             {
                 if (!Intersect(origin, dx, dy, dz, boxMin, boxMax, out var near, out var far) || far <= enter) return;
                 near = Math.Max(enter, near);
@@ -66,6 +67,7 @@ public static class WorldPicker
                 if (near > next || near > exit || near >= nearest) return;
                 nearest = near;
                 liquid = isLiquid;
+                obsidianFace = face;
             }
         }
         return null;

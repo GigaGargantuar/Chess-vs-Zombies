@@ -19,14 +19,48 @@ public sealed record ObsidianCell(
     [property: JsonRequired] int Units,
     [property: JsonRequired] CrustFace Face,
     [property: JsonRequired] float Hp,
-    int OffsetUnits = 0)
+    int OffsetUnits = 0,
+    int OppositeUnits = 0,
+    float OppositeHp = 0)
 {
-    [JsonIgnore] public Vector3 Min => new(Cell.X + (Face == CrustFace.East ? 1 - Units / 10f : 0),
-        Cell.Y + (Face == CrustFace.Top ? 1 - (Units + OffsetUnits) / 10f : Face == CrustFace.Bottom ? OffsetUnits / 10f : 0),
-        Cell.Z + (Face == CrustFace.South ? 1 - Units / 10f : 0));
-    [JsonIgnore] public Vector3 Max => new(Cell.X + (Face == CrustFace.West ? Units / 10f : 1),
-        Cell.Y + (Face == CrustFace.Bottom ? (Units + OffsetUnits) / 10f : Face == CrustFace.Top ? 1 - OffsetUnits / 10f : 1),
-        Cell.Z + (Face == CrustFace.North ? Units / 10f : 1));
+    // Units and Hp remain the cell totals for mining, capacity, and older saves.
+    // The two leaves retain their actual bounds and durability independently.
+    [JsonIgnore] public int PrimaryUnits => Units - OppositeUnits;
+    [JsonIgnore] public IEnumerable<ObsidianCell> Parts
+    {
+        get
+        {
+            if (OppositeUnits == 0) { yield return this; yield break; }
+            yield return this with { Units = PrimaryUnits, Hp = Hp - OppositeHp, OppositeUnits = 0, OppositeHp = 0 };
+            yield return new ObsidianCell(Cell, OppositeUnits, OppositeFace(Face), OppositeHp);
+        }
+    }
+    [JsonIgnore] public Vector3 Min => new(Cell.X + (Face == CrustFace.East ? 1 - PrimaryUnits / 10f : 0),
+        Cell.Y + (Face == CrustFace.Top ? 1 - (PrimaryUnits + OffsetUnits) / 10f : Face == CrustFace.Bottom ? OffsetUnits / 10f : 0),
+        Cell.Z + (Face == CrustFace.South ? 1 - PrimaryUnits / 10f : 0));
+    [JsonIgnore] public Vector3 Max => new(Cell.X + (Face == CrustFace.West ? PrimaryUnits / 10f : 1),
+        Cell.Y + (Face == CrustFace.Bottom ? (PrimaryUnits + OffsetUnits) / 10f : Face == CrustFace.Top ? 1 - OffsetUnits / 10f : 1),
+        Cell.Z + (Face == CrustFace.North ? PrimaryUnits / 10f : 1));
+
+    public static CrustFace OppositeFace(CrustFace face) => face switch
+    {
+        CrustFace.West => CrustFace.East, CrustFace.East => CrustFace.West,
+        CrustFace.Bottom => CrustFace.Top, CrustFace.Top => CrustFace.Bottom,
+        CrustFace.North => CrustFace.South, CrustFace.South => CrustFace.North,
+        _ => throw new ArgumentOutOfRangeException(nameof(face))
+    };
+
+    internal bool HasValidGeometryAndDurability() => WorldGrid.IsInside(Cell) && Enum.IsDefined(Face) &&
+        Units is >= 1 and <= LiquidSystem.UnitsPerBlock &&
+        float.IsFinite(Hp) && Hp > 0 && Hp <= Units * LiquidSystem.ObsidianHpPerUnit &&
+        OffsetUnits >= 0 && OffsetUnits <= LiquidSystem.UnitsPerBlock - Units &&
+        (OffsetUnits == 0 || Face is CrustFace.Bottom or CrustFace.Top) &&
+        OppositeUnits >= 0 && float.IsFinite(OppositeHp) &&
+        (OppositeUnits == 0 ? OppositeHp == 0 :
+            OppositeUnits < Units && OffsetUnits == 0 &&
+            Face is CrustFace.West or CrustFace.East or CrustFace.North or CrustFace.South &&
+            OppositeHp > 0 && OppositeHp <= OppositeUnits * LiquidSystem.ObsidianHpPerUnit &&
+            Hp > OppositeHp && Hp - OppositeHp <= PrimaryUnits * LiquidSystem.ObsidianHpPerUnit);
 }
 
 public sealed record VaporCloud(
@@ -94,6 +128,42 @@ public sealed class LiquidSystem
         if (fromLiquid is not null) _cells[to] = fromLiquid;
         if (toLiquid is not null) _cells[from] = toLiquid;
         if (fromLiquid is not null || toLiquid is not null) Revision++;
+    }
+
+    /// <summary>
+    /// Side crusts can share a cell without sharing occupied volume. Keep its liquid
+    /// in the opening, moving only the overflow into the space the falling leaf vacated.
+    /// Called after the world has moved the leaf; each liquid kind is conserved.
+    /// </summary>
+    internal void DisplaceForObsidianMove(Cell from, Cell to)
+    {
+        var source = _cells.TryGetValue(from, out var fromAmounts) ? (int[])fromAmounts.Clone() : new int[3];
+        var target = _cells.TryGetValue(to, out var toAmounts) ? (int[])toAmounts.Clone() : new int[3];
+        bool changed = false;
+        foreach (var kind in SurfaceOrder)
+        {
+            var excess = Math.Max(0, -FreeInRegion(to, kind, target));
+            var move = Math.Min(target[(int)kind], excess);
+            if (move == 0) continue;
+            if (move > FreeInRegion(from, kind, source))
+                throw new InvalidOperationException("Falling obsidian has insufficient vacated space for displaced liquid.");
+            target[(int)kind] -= move;
+            source[(int)kind] += move;
+            changed = true;
+        }
+        if (!changed) return;
+        if (source.Any(amount => amount > 0)) _cells[from] = source;
+        else _cells.Remove(from);
+        if (target.Any(amount => amount > 0)) _cells[to] = target;
+        else _cells.Remove(to);
+        Revision++;
+
+        int FreeInRegion(Cell cell, LiquidKind kind, int[] amounts)
+        {
+            var (min, max) = Region(cell, kind);
+            var capacity = (int)MathF.Round((max.X - min.X) * (max.Y - min.Y) * (max.Z - min.Z) * UnitsPerBlock);
+            return capacity - DensityOrder.Where(k => SameRegion(cell, k, kind)).Sum(k => amounts[(int)k]);
+        }
     }
 
     public IEnumerable<LiquidVolume> GetVolumes(Cell cell)
@@ -174,10 +244,7 @@ public sealed class LiquidSystem
         var solids = new Dictionary<Cell, ObsidianCell>();
         foreach (var crust in state.Obsidian)
         {
-            if (crust is null || !WorldGrid.IsInside(crust.Cell) || !Enum.IsDefined(crust.Face) || crust.Units is < 1 or > UnitsPerBlock ||
-                !float.IsFinite(crust.Hp) || crust.Hp <= 0 || crust.Hp > crust.Units * ObsidianHpPerUnit ||
-                crust.OffsetUnits < 0 || crust.OffsetUnits > UnitsPerBlock - crust.Units ||
-                crust.OffsetUnits != 0 && crust.Face is not (CrustFace.Bottom or CrustFace.Top) ||
+            if (crust is null || !crust.HasValidGeometryAndDurability() ||
                 _world.GetMaterial(crust.Cell) is not (Material.Air or Material.Obsidian) || !solids.TryAdd(crust.Cell, crust))
                 throw new InvalidDataException("Invalid or overlapping obsidian crust.");
         }
@@ -250,21 +317,22 @@ public sealed class LiquidSystem
         var lavaPerReaction = reactant == LiquidKind.Mercury ? 2 : 1;
         if (lava < lavaPerReaction || amount == 0) return;
         var crust = _world.GetObsidian(lavaCell);
-        if (crust is not null && (crust.Face != face || crust.OffsetUnits != offsetUnits) ||
-            (crust?.Units ?? 0) + lavaPerReaction + offsetUnits > UnitsPerBlock) return;
-        if (lavaCell == reactantCell && crust is { OffsetUnits: > 0 })
+        var front = crust?.Parts.FirstOrDefault(part => part.Face == face && part.OffsetUnits == offsetUnits);
+        if (!_world.CanAddObsidian(lavaCell, lavaPerReaction, face, offsetUnits)) return;
+        if (lavaCell == reactantCell && front is { OffsetUnits: > 0 })
         {
             var lavaVolume = GetVolumes(lavaCell).First(v => v.Kind == LiquidKind.Lava);
             var reactantVolume = GetVolumes(reactantCell).First(v => v.Kind == reactant);
             // Heat crosses the solid reaction front, never an air gap left by receding fluid.
-            if (face == CrustFace.Bottom && (lavaVolume.Min.Y > crust.Max.Y + .00001f || reactantVolume.Max.Y < crust.Min.Y - .00001f) ||
-                face == CrustFace.Top && (lavaVolume.Max.Y < crust.Min.Y - .00001f || reactantVolume.Min.Y > crust.Max.Y + .00001f)) return;
+            if (face == CrustFace.Bottom && (lavaVolume.Min.Y > front.Max.Y + .00001f || reactantVolume.Max.Y < front.Min.Y - .00001f) ||
+                face == CrustFace.Top && (lavaVolume.Max.Y < front.Min.Y - .00001f || reactantVolume.Min.Y > front.Max.Y + .00001f)) return;
         }
         else if (lavaCell != reactantCell)
         {
-            // Only this crust's reactive face conducts heat. A second crust on the reagent side
-            // still separates the materials and cannot be consumed through another solid wall.
-            if (_world.GetObsidian(reactantCell) is { } other && (other.Units == UnitsPerBlock || other.Face == FaceToward(reactantCell, lavaCell))) return;
+            // Each leaf can conduct through its own reaction front. A separate crust on the
+            // reagent side still separates the materials and cannot be consumed through it.
+            if (_world.GetObsidian(reactantCell) is { } other && (other.Units == UnitsPerBlock ||
+                other.Parts.Any(part => part.Face == FaceToward(reactantCell, lavaCell)))) return;
             if (crust is null && !HaveFaceContact(lavaCell, LiquidKind.Lava, reactantCell, reactant)) return;
             if (crust is not null && !TouchesFace(reactantCell, reactant, FaceToward(reactantCell, lavaCell))) return;
         }
@@ -363,14 +431,14 @@ public sealed class LiquidSystem
             if (below) max.Y = crust.Min.Y;
             else min.Y = crust.Max.Y;
         }
-        else switch (crust.Face)
+        else foreach (var part in crust.Parts) switch (part.Face)
         {
-            case CrustFace.West: min.X = crust.Max.X; break;
-            case CrustFace.East: max.X = crust.Min.X; break;
-            case CrustFace.Bottom: min.Y = crust.Max.Y; break;
-            case CrustFace.Top: max.Y = crust.Min.Y; break;
-            case CrustFace.North: min.Z = crust.Max.Z; break;
-            case CrustFace.South: max.Z = crust.Min.Z; break;
+            case CrustFace.West: min.X = part.Max.X; break;
+            case CrustFace.East: max.X = part.Min.X; break;
+            case CrustFace.Bottom: min.Y = part.Max.Y; break;
+            case CrustFace.Top: max.Y = part.Min.Y; break;
+            case CrustFace.North: min.Z = part.Max.Z; break;
+            case CrustFace.South: max.Z = part.Min.Z; break;
         }
         return (min, max);
     }

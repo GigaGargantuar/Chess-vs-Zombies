@@ -79,6 +79,8 @@ public sealed class BlockInventoryState
     public bool HasPickaxe { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<Material, int>? AdditionalMaterials { get; set; }
+    // Optional additive v8 field: checkpoints created before obsidian mining default to zero.
+    public int ObsidianLayers { get; set; }
 }
 
 public sealed class SavedUpgradeTemplate
@@ -280,7 +282,7 @@ public static class SaveStore
             throw new InvalidDataException("The checkpoint is missing its economy or battlefield collections.");
         if (legacyBlocks ? state.Inventory != null : state.Inventory == null)
             throw new InvalidDataException("The block inventory does not match the checkpoint version.");
-        if (state.Inventory != null && (state.Inventory.DirtCount < 0 || state.Inventory.StoneCount < 0))
+        if (state.Inventory != null && (state.Inventory.DirtCount < 0 || state.Inventory.StoneCount < 0 || state.Inventory.ObsidianLayers < 0))
             throw new InvalidDataException("Saved block inventory counts must be nonnegative.");
         if (state.Version < 8 ? state.Inventory?.AdditionalMaterials != null : state.Inventory?.AdditionalMaterials == null)
             throw new InvalidDataException("The additional material inventory does not match the checkpoint version.");
@@ -543,7 +545,8 @@ public static class SaveStore
         var obsidian = new List<ObsidianCell>(source.Obsidian.Count);
         foreach (var crust in source.Obsidian)
         {
-            if (crust is null || crust.Units is < 1 or > LiquidSystem.UnitsPerBlock ||
+            if (crust is null || crust.OppositeUnits != 0 || crust.OppositeHp != 0 ||
+                crust.Units is < 1 or > LiquidSystem.UnitsPerBlock ||
                 !float.IsFinite(crust.Hp) || crust.Hp <= 0 || crust.Hp > crust.Units * LegacyObsidianHpPerUnit)
                 throw new InvalidDataException("Invalid legacy obsidian durability.");
             // Keep a positive representable value for extremely small surviving

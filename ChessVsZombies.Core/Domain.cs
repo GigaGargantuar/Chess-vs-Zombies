@@ -36,6 +36,7 @@ public static class Balance
     public const int LiquidPurchaseUnits = 10;
     public const float AirSeconds = 10, HeatProtectionSecondsPerPiece = 10;
     public const float ZombieBreathingHeight = .7f;
+    public const int FallDamageMinimumBlocks = 4, FallDamagePerBlock = 5;
     public const float ChemicalDamagePerSecond = 5, LavaDamagePerSecond = 10, SteamDamagePerSecond = 3;
     public const int DuplicatesPerRank = 10;
     public const int HpUpgradePerPoint = 10, AtkUpgradePerPoint = 1;
@@ -58,6 +59,7 @@ public static class Balance
     };
     public static int BlockSellValue(Material material) => material switch
     {
+        Material.Obsidian => 250,
         Material.Wood => 100,
         Material.Stone => 200,
         Material.Copper => 300,

@@ -40,14 +40,14 @@ public sealed partial class GameSession
                 var endAge = startAge + dt * sample / steps;
                 var to = projectile.GetPositionAt(endAge);
                 if (!ProjectilePointIsFinite(from) || !ProjectilePointIsFinite(to)) { stopped = true; break; }
-                if (FindProjectileImpact(from, to, out var fraction, out var terrain, out var zombie))
+                if (FindProjectileImpact(from, to, out var fraction, out var terrain, out var zombie, out var crustFace))
                 {
                     var previousAge = startAge + dt * (sample - 1) / steps;
                     var hitAge = previousAge + (endAge - previousAge) * fraction;
                     if (zombie != null)
                         DamageZombie(zombie, projectile.Damage, projectile.DamageKind, projectile.Kind, projectile.GetTravelDirection(hitAge));
                     else if (terrain.HasValue)
-                        DamageProjectileTerrain(terrain.Value, projectile.Damage);
+                        DamageProjectileTerrain(terrain.Value, projectile.Damage, crustFace);
                     stopped = true;
                 }
                 from = to;
@@ -56,10 +56,11 @@ public sealed partial class GameSession
         }
     }
 
-    private bool FindProjectileImpact(Vector3 from, Vector3 to, out float fraction, out Cell? terrain, out Zombie? zombie)
+    private bool FindProjectileImpact(Vector3 from, Vector3 to, out float fraction, out Cell? terrain, out Zombie? zombie, out CrustFace? crustFace)
     {
         terrain = null;
         zombie = null;
+        crustFace = null;
         fraction = float.PositiveInfinity;
         if (!ProjectilePointIsInside(from)) { fraction = 0; return true; }
         var delta = to - from;
@@ -83,11 +84,22 @@ public sealed partial class GameSession
                     var cell = new Cell(x, y, z);
                     if (World.GetMaterial(cell) == Material.Air) continue; // Friendly pieces have no terrain volume.
                     var crust = World.GetObsidian(cell);
-                    var blockMin = crust?.Min ?? new Vector3(x, y, z);
-                    var blockMax = crust?.Max ?? new Vector3(x + 1, y + 1, z + 1);
-                    if (!ProjectileBoxIntersection(from, delta, blockMin, blockMax, out var hit) || hit > fraction) continue;
-                    fraction = hit;
-                    terrain = cell;
+                    if (crust is not null)
+                    {
+                        foreach (var part in crust.Parts)
+                        {
+                            if (!ProjectileBoxIntersection(from, delta, part.Min, part.Max, out var hit) || hit > fraction) continue;
+                            fraction = hit;
+                            terrain = cell;
+                            crustFace = part.Face;
+                        }
+                    }
+                    else if (ProjectileBoxIntersection(from, delta, new Vector3(x, y, z), new Vector3(x + 1, y + 1, z + 1), out var hit) && hit <= fraction)
+                    {
+                        fraction = hit;
+                        terrain = cell;
+                        crustFace = null;
+                    }
                 }
         foreach (var candidate in Zombies)
         {
@@ -95,11 +107,12 @@ public sealed partial class GameSession
             fraction = hit;
             zombie = candidate;
             terrain = null;
+            crustFace = null;
         }
         return float.IsFinite(fraction);
     }
 
-    private void DamageProjectileTerrain(Cell cell, float damage)
+    private void DamageProjectileTerrain(Cell cell, float damage, CrustFace? crustFace = null)
     {
         if (!float.IsFinite(damage) || damage <= 0) return;
         bool destroyed = false;
@@ -109,7 +122,7 @@ public sealed partial class GameSession
             if (barrier.Hp <= 0) destroyed = World.RemoveBarrier(cell);
         }
         else if (World.GetObsidian(cell) != null)
-            destroyed = World.DamageObsidian(cell, damage);
+            destroyed = crustFace.HasValue ? World.DamageObsidianPart(cell, crustFace.Value, damage) : World.DamageObsidian(cell, damage);
         else if (Balance.IsTerrainMaterial(World.GetMaterial(cell)))
             destroyed = World.DamageTerrain(cell, damage);
         // Projectile destruction never calls mining, block-drop, or obsidian-shatter paths.

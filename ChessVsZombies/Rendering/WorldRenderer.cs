@@ -29,6 +29,8 @@ public sealed class WorldRenderer : IDisposable
         if (previousWorld != session.World) { armorSeen.Clear(); fallenArmor.Clear(); }
         var fallingBlocks = session.Falls.Blocks.ToArray();
         var fallingCells = fallingBlocks.Select(block => block.Destination).ToHashSet();
+        var fallingCrusts = fallingBlocks.Where(block => block.Crust is not null)
+            .SelectMany(block => block.Crust!.Parts.Select(part => (block.Destination, part.Face))).ToHashSet();
         if (revision != session.World.Revision || previousWorld != session.World || fallRevision != session.Falls.Revision)
         {
             RebuildTerrain(session.World, fallingCells);
@@ -46,17 +48,23 @@ public sealed class WorldRenderer : IDisposable
         dynamic.Vertices.Clear();
         foreach (var crust in session.World.ObsidianCells)
         {
-            if (fallingCells.Contains(crust.Cell)) continue;
-            dynamic.Box(ToXna(crust.Min), ToXna(crust.Max), new Color(49, 35, 66));
-            dynamic.Outline(ToXna(crust.Min) + new Vector3(.003f), ToXna(crust.Max) - new Vector3(.003f), new Color(104, 72, 127), .008f);
+            foreach (var part in crust.Parts)
+            {
+                if (fallingCrusts.Contains((part.Cell, part.Face))) continue;
+                dynamic.Box(ToXna(part.Min), ToXna(part.Max), new Color(49, 35, 66));
+                dynamic.Outline(ToXna(part.Min) + new Vector3(.003f), ToXna(part.Max) - new Vector3(.003f), new Color(104, 72, 127), .008f);
+            }
         }
         foreach (var block in fallingBlocks)
         {
             var offset = ToXna(block.Position - block.Destination.Center);
             if (block.Crust is { } crust)
             {
-                dynamic.Box(ToXna(crust.Min) + offset, ToXna(crust.Max) + offset, new Color(49, 35, 66));
-                dynamic.Outline(ToXna(crust.Min) + offset + new Vector3(.003f), ToXna(crust.Max) + offset - new Vector3(.003f), new Color(104, 72, 127), .008f);
+                foreach (var part in crust.Parts)
+                {
+                    dynamic.Box(ToXna(part.Min) + offset, ToXna(part.Max) + offset, new Color(49, 35, 66));
+                    dynamic.Outline(ToXna(part.Min) + offset + new Vector3(.003f), ToXna(part.Max) + offset - new Vector3(.003f), new Color(104, 72, 127), .008f);
+                }
             }
             else
             {

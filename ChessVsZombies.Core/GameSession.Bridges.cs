@@ -121,8 +121,13 @@ public sealed partial class GameSession
             !IsValidStep(from, next) || !HasZombieSupport(from) ||
             Vector3.DistanceSquared(zombie.Position, from.Center) > .000001f) return false;
         var floor = next + new Cell(0, -1, 0);
-        if (!IsEmpty(floor) || !World.HasOrthogonalBlockSupport(floor) || IsOccupiedByZombie(floor) ||
-            !IsEmpty(next) || !World.RestoreTerrainPlacement(floor, zombie.CarriedBlockMaterial)) return false;
+        if (!IsEmpty(floor) || !World.HasOrthogonalBlockSupport(floor) || !IsEmpty(next)) return false;
+        if (IsOccupiedByZombie(floor))
+        {
+            RequestBuilderYield(zombie, from, floor);
+            return false;
+        }
+        if (!World.RestoreTerrainPlacement(floor, zombie.CarriedBlockMaterial)) return false;
         zombie.CarriedBlocks--;
         zombie.FaceToward(next.Center - zombie.Position);
         zombie.Cooldown = 1;

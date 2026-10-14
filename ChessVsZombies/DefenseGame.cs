@@ -26,6 +26,7 @@ public sealed class DefenseGame : Game
     private Material BlockMaterial => tool == 4 ? Material.Dirt : tool == 5 ? Material.Stone : recoveredMaterial;
     private Turret? selected;
     private Cell? hit, placement, highlight;
+    private CrustFace? obsidianPlacementFace;
     private bool hitLiquid;
     private string notice = "Place your first pieces. Press Tab to use the command panel.";
     private float noticeTime = 8;
@@ -41,7 +42,7 @@ public sealed class DefenseGame : Game
     private readonly int captureFrame = 90;
     private double elapsed;
     private readonly string savePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ChessVsZombies", "campaign.json");
-    private static readonly Material[] SaleMaterials = [Material.Wood, Material.Stone, Material.Copper, Material.Iron, Material.Gold, Material.Diamond, Material.Osmium];
+    private static readonly Material[] SaleMaterials = [Material.Wood, Material.Stone, Material.Copper, Material.Iron, Material.Gold, Material.Diamond, Material.Osmium, Material.Obsidian];
     private static readonly Color Background = new(11, 17, 26), Panel = new(17, 26, 37), Raised = new(26, 39, 52), TextColor = new(230, 235, 232), Muted = new(138, 157, 170), Teal = new(105, 225, 191), Gold = new(232, 190, 114), Red = new(235, 125, 112);
 
     public DefenseGame(string[] args)
@@ -141,10 +142,17 @@ public sealed class DefenseGame : Game
     }
     private void PrepareBridgeSmoke()
     {
-        for (int i = 0; i < SaleMaterials.Length; i++) session.Inventory.Add(SaleMaterials[i], i + 1);
+        for (int i = 0; i < SaleMaterials.Length; i++) session.Inventory.Add(SaleMaterials[i], SaleMaterials[i] == Material.Obsidian ? 13 : i + 1);
+        var blockMaterials = SaleMaterials.Where(Balance.IsTerrainMaterial).ToArray();
         var state = session.ExportState();
-        for (int i = 0; i < SaleMaterials.Length; i++)
-            state.TerrainPlacements!.Add(new SavedTerrainPlacement { Cell = new Cell(17 + i, 16, 22), Material = SaleMaterials[i] });
+        for (int i = 0; i < blockMaterials.Length; i++)
+            state.TerrainPlacements!.Add(new SavedTerrainPlacement { Cell = new Cell(17 + i, 16, 22), Material = blockMaterials[i] });
+        var crustCell = new Cell(24, 16, 22);
+        state.Liquids!.Cells.Add(new LiquidCell(crustCell, 0, 0, 0, 2, CrustFace.West));
+        state.Liquids.Obsidian.Add(new ObsidianCell(crustCell, 2, CrustFace.West, 10));
+        var fallingCrust = crustCell + new Cell(0, 2, 0);
+        state.Liquids.Cells.Add(new LiquidCell(fallingCrust, 0, 0, 0, 2, CrustFace.East));
+        state.Liquids.Obsidian.Add(new ObsidianCell(fallingCrust, 2, CrustFace.East, 10));
         var fixture = Path.Combine(Path.GetTempPath(), $"ChessVsZombies-bridge-smoke-{Guid.NewGuid():N}.json");
         try
         {
@@ -155,7 +163,7 @@ public sealed class DefenseGame : Game
         }
         finally { if (File.Exists(fixture)) File.Delete(fixture); }
         selected = session.Turrets.FirstOrDefault();
-        for (int i = 0; i < SaleMaterials.Length; i++)
+        for (int i = 0; i < blockMaterials.Length; i++)
         {
             var carrier = new Zombie { Id = -30 - i, WaveIndex = -1, Kind = ZombieKind.ArmedArmored,
                 Tier = (GearTier)i, Position = new Cell(17 + i, 17, 22).Center };
@@ -259,6 +267,18 @@ public sealed class DefenseGame : Game
         placement = aim?.Placement;
         highlight = aim?.Highlight;
         hitLiquid = aim?.IsLiquid ?? false;
+        obsidianPlacementFace = null;
+        if (tool == 10 && recoveredMaterial == Material.Obsidian)
+        {
+            if (!hitLiquid && hit is { } crustCell && session.World.GetObsidian(crustCell) is { Units: < LiquidSystem.UnitsPerBlock })
+                placement = highlight = crustCell;
+            if (placement is { } target)
+            {
+                if (session.World.GetObsidian(target) is { } existing) obsidianPlacementFace = aim?.ObsidianFace ?? existing.Face;
+                else if (hit is { } support && (support - target).Manhattan == 1)
+                    obsidianPlacementFace = LiquidSystem.FaceToward(target, support);
+            }
+        }
         SelectTarget();
     }
     private void SelectTarget()
@@ -271,7 +291,8 @@ public sealed class DefenseGame : Game
     private void RemoveTarget()
     {
         if (!hit.HasValue) { SetNotice("Aim at a tower or defensive block to remove it."); return; }
-        if (tool == 6 && session.TrySelectTurret(hit.Value) is null && Balance.IsTerrainMaterial(session.World.GetMaterial(hit.Value)))
+        if (tool == 6 && !hitLiquid && session.TrySelectTurret(hit.Value) is null &&
+            (Balance.IsTerrainMaterial(session.World.GetMaterial(hit.Value)) || session.World.GetMaterial(hit.Value) == Material.Obsidian))
             session.Dig(hit.Value);
         else session.Remove(hit.Value);
         SetNotice(session.Message); SaveCheckpoint();
@@ -283,6 +304,11 @@ public sealed class DefenseGame : Game
         {
             if (cameraControl.Intersects(placement.Value)) { SetNotice("Move away from the placement cell first."); return; }
             if (tool is >= 7 and <= 9) session.PourLiquid(placement.Value, (LiquidKind)(tool - 7), pourUnits);
+            else if (tool == 10 && recoveredMaterial == Material.Obsidian)
+            {
+                if (!obsidianPlacementFace.HasValue) { SetNotice("Aim at a supporting block face or an existing crust."); return; }
+                session.BuildObsidian(placement.Value, obsidianPlacementFace.Value);
+            }
             else if (tool is 4 or 5 or 10) session.BuildBarrier(placement.Value, BlockMaterial);
             else session.Deploy((PieceKind)tool, placement.Value);
         }
@@ -350,7 +376,9 @@ public sealed class DefenseGame : Game
     {
         recoveredMaterial = material;
         tool = 10;
-        SetNotice($"{material} selected / {Balance.BlockHp(material):N0} HP. Press Tab, then right-click to place a recovered block.");
+        SetNotice(material == Material.Obsidian
+            ? "Obsidian selected / 5 HP per layer. Right-click a support face or crust to add one layer."
+            : $"{material} selected / {Balance.BlockHp(material):N0} HP. Press Tab, then right-click to place a recovered block.");
     }
     private void OpenJumpEditor()
     {
@@ -391,11 +419,13 @@ public sealed class DefenseGame : Game
         var projection = Matrix.CreatePerspectiveFieldOfView(MathHelper.ToRadians(65), GraphicsDevice.Viewport.AspectRatio, .08f, 150);
         bool towerTool = tool is >= 0 and <= 3;
         bool liquidTool = tool is >= 7 and <= 9;
+        bool obsidianTool = tool == 10 && recoveredMaterial == Material.Obsidian;
         bool validPlacement = tool != 6 && placement is { } p && (towerTool ? session.CanInteractWithTowers : session.Phase == GamePhase.Building) && WorldGrid.IsInside(p) &&
+            (obsidianTool ? obsidianPlacementFace.HasValue && session.CanBuildObsidian(p, obsidianPlacementFace.Value) :
             (liquidTool ? session.CanPourLiquid(p, (LiquidKind)(tool - 7), pourUnits) :
                 (tool is 4 or 5 or 10 ? WorldGrid.IsFortificationZone(p) && session.Inventory.GetCount(BlockMaterial) > 0 && session.World.HasOrthogonalBlockSupport(p) : WorldGrid.IsTurretZone(p) && session.HasTowerSupport(p)) && session.Liquids.GetTotalUnits(p) == 0) &&
             (liquidTool || session.World.GetMaterial(p) == Material.Air) && !session.Turrets.Any(t => t.Cell == p) &&
-            (!towerTool || !session.IsOccupiedByZombie(p)) && !cameraControl.Intersects(p);
+            (!towerTool || !session.IsOccupiedByZombie(p))) && !cameraControl.Intersects(p);
         renderer.Draw(session, view, projection, highlight, tool == 6 ? null : placement, validPlacement, selected, showZones, elapsed);
         buttons.Clear();
         batch.Begin(SpriteSortMode.Deferred, BlendState.NonPremultiplied, SamplerState.LinearClamp, null, null, null, Matrix.CreateScale(uiScale));
@@ -461,7 +491,9 @@ public sealed class DefenseGame : Game
         }
         if (tool == 10)
         {
-            var materialLabel = $"PLACE {recoveredMaterial.ToString().ToUpperInvariant()}  /  {session.Inventory.GetCount(recoveredMaterial):N0} IN BAG  /  {Balance.BlockHp(recoveredMaterial):N0} HP";
+            var materialLabel = recoveredMaterial == Material.Obsidian
+                ? $"PLACE OBSIDIAN  /  {session.Inventory.ObsidianLayers:N0} LAYERS  /  1 LAYER PER CLICK"
+                : $"PLACE {recoveredMaterial.ToString().ToUpperInvariant()}  /  {session.Inventory.GetCount(recoveredMaterial):N0} IN BAG  /  {Balance.BlockHp(recoveredMaterial):N0} HP";
             Text(materialLabel, cx - font.Measure(materialLabel, 12) / 2, cy + 43, 12, Gold);
         }
         float left = 28;
@@ -538,7 +570,7 @@ public sealed class DefenseGame : Game
         Button(session.Inventory.HasShovel ? "Shovel / owned" : "Buy shovel / 100", x + 16, y + 62, 280, 40, () => BuyTool(ToolKind.Shovel), session.Inventory.HasShovel, !session.Inventory.HasShovel && session.Phase == GamePhase.Building);
         Text("Required to excavate dirt", x + 20, y + 108, 13, Muted);
         Button(session.Inventory.HasPickaxe ? "Pickaxe / owned" : "Buy pickaxe / 1,000", x + 16, y + 133, 280, 40, () => BuyTool(ToolKind.Pickaxe), session.Inventory.HasPickaxe, !session.Inventory.HasPickaxe && session.Phase == GamePhase.Building);
-        Text("Required for stone and recovered materials", x + 20, y + 179, 12, Muted);
+        Text("Stone, recovered materials and obsidian", x + 20, y + 179, 12, Muted);
         Rule(x + 20, y + 208, 272);
         Button($"5  Dirt  /  {session.Inventory.GetCount(Material.Dirt)} in bag", x + 16, y + 224, 280, 40, () => tool = 4, tool == 4);
         Text("100 HP / place one excavated dirt block", x + 20, y + 269, 13, Muted);
@@ -551,23 +583,24 @@ public sealed class DefenseGame : Game
     private void DrawMaterialsPanel(float x, float y)
     {
         Text("RECOVERED MATERIALS", x + 20, y, 20);
-        Text(session.Phase == GamePhase.Building ? "Reuse as defenses, or sell one block at a time." : "Placement and sales reopen between levels.", x + 20, y + 33, 12, Muted);
+        Text(session.Phase == GamePhase.Building ? "Reuse blocks or sell stored materials." : "Placement and sales reopen between levels.", x + 20, y + 33, 12, Muted);
         for (int i = 0; i < SaleMaterials.Length; i++)
         {
             var material = SaleMaterials[i];
+            bool obsidian = material == Material.Obsidian;
             int count = session.Inventory.GetCount(material), price = Balance.BlockSellValue(material);
-            float row = y + 68 + i * 53;
+            float row = y + 68 + i * 47;
             Text(material.ToString(), x + 20, row, 17);
-            Text($"{count:N0} in bag", x + 20, row + 23, 12, Muted);
-            bool available = session.Phase == GamePhase.Building && count > 0;
+            Text($"{count:N0} {(obsidian ? "layers" : "in bag")}", x + 20, row + 23, 12, Muted);
+            bool canPlace = session.Phase == GamePhase.Building && count > 0;
+            bool canSell = session.Phase == GamePhase.Building && count >= (obsidian ? LiquidSystem.UnitsPerBlock : 1);
             Button("Place", x + 140, row + 3, 72, 28, () => SelectRecoveredMaterial(material),
-                (tool is 4 or 5 or 10) && BlockMaterial == material, available, textSize: 16);
-            Button("Sell 1", x + 220, row + 3, 76, 28, () => SellBlock(material), enabled: available, textSize: 16);
-            Text($"{Balance.BlockHp(material):N0} HP", x + 145, row + 35, 10, Muted);
-            Text($"+{price:N0}", x + 234, row + 35, 11, Gold);
-            if (i < SaleMaterials.Length - 1) Rule(x + 20, row + 49, 272);
+                (tool is 4 or 5 or 10) && BlockMaterial == material, canPlace, textSize: 16);
+            Button(obsidian ? "Sell 10" : "Sell 1", x + 220, row + 3, 76, 28, () => SellBlock(material), enabled: canSell, textSize: 16);
+            Text(obsidian ? "5 HP / layer" : $"{Balance.BlockHp(material):N0} HP", x + 145, row + 33, 10, Muted);
+            Text($"+{price:N0}", x + 234, row + 33, 11, Gold);
         }
-        Text("Dirt stays in your bag; it cannot be sold.", x + 20, y + 448, 12, Muted);
+        Text("Dirt cannot be sold. Obsidian sells in 10s.", x + 20, y + 448, 12, Muted);
         Button("Back to terrain / tools", x + 16, height - 201, 280, 47, () => panel = 5, true);
     }
     private static string UpgradeName(UpgradeKind kind) => kind switch { UpgradeKind.HP => "Health", UpgradeKind.ATK => "Attack", UpgradeKind.Orthogonal => "Orthogonal", UpgradeKind.PlaneDiagonal => "Plane diagonal", UpgradeKind.SpaceDiagonal => "Space diagonal", _ => "Jump pattern" };

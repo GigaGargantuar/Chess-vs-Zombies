@@ -20,6 +20,7 @@ public sealed partial class GameSession
     private readonly Dictionary<Cell, Turret> _turretsByCell = [];
     private readonly Dictionary<int, Cell> _stepOrigins = [];
     private readonly Dictionary<int, float> _jumpHeights = [];
+    private readonly Dictionary<int, float> _fallStartHeights = [];
     private readonly Dictionary<int, Vector3> _liquidDestinations = [];
     private readonly Dictionary<int, Vector3> _liquidOrigins = [];
     private readonly Dictionary<(Vector3 Position, bool SinksInLava, bool SinksInMercury), Vector3?> _buoyantSteps = [];
@@ -76,6 +77,7 @@ public sealed partial class GameSession
         _turretsByCell.Clear();
         _stepOrigins.Clear();
         _jumpHeights.Clear();
+        _fallStartHeights.Clear();
         _liquidDestinations.Clear();
         _liquidOrigins.Clear();
         _buoyantSteps.Clear();
@@ -86,6 +88,7 @@ public sealed partial class GameSession
         Falls.Clear();
         _spawnCells.Clear();
         ResetBridges();
+        ResetSpentRoutes();
         _random = new Random(_seed);
         _nextId = 1;
         _topologyRevision++;
@@ -219,9 +222,12 @@ public sealed partial class GameSession
     {
         if (!CanBuild()) return false;
         int price = Balance.BlockSellValue(material);
-        if (price <= 0) return Reject("Choose a recovered wood, stone, or metal/gem block to sell.");
+        if (price <= 0) return Reject("Choose a recovered material to sell.");
         if (Economy.Currency > int.MaxValue - price) return Reject("The wallet cannot hold the full sale value.");
-        if (!Inventory.TrySpend(material)) return Reject($"No {material.ToString().ToLowerInvariant()} blocks available to sell.");
+        int units = material == Material.Obsidian ? LiquidSystem.UnitsPerBlock : 1;
+        if (!Inventory.TrySpend(material, units)) return Reject(material == Material.Obsidian
+            ? "Selling obsidian requires 10 layers (one whole block)."
+            : $"No {material.ToString().ToLowerInvariant()} blocks available to sell.");
         Economy.Credit(price);
         Message = $"Sold 1 {material.ToString().ToLowerInvariant()} block for {price} currency.";
         return true;
@@ -277,16 +283,19 @@ public sealed partial class GameSession
     {
         if (!CanBuild()) return false;
         var material = World.GetMaterial(cell);
-        if (!Balance.IsTerrainMaterial(material)) return Reject("Choose a material block to excavate.");
+        var crust = World.GetObsidian(cell);
+        if (!Balance.IsTerrainMaterial(material) && crust is null) return Reject("Choose a material block or obsidian crust to excavate.");
         if (!Inventory.CanExcavate(material, out var error)) return Reject(error);
-        if (!Inventory.Add(material)) return Reject("Block inventory is full.");
-        if (!World.Dig(cell))
+        int units = crust?.Units ?? 1;
+        if (!Inventory.Add(material, units)) return Reject("Block inventory is full.");
+        if (!(crust is null ? World.Dig(cell) : World.DamageObsidian(cell, crust.Hp)))
         {
-            Inventory.TrySpend(material);
+            Inventory.TrySpend(material, units);
             return Reject("That block could not be excavated.");
         }
         SettleDefenses();
-        Message = $"Excavated {cell}; collected 1 {material.ToString().ToLowerInvariant()} block.";
+        Message = crust is null ? $"Excavated {cell}; collected 1 {material.ToString().ToLowerInvariant()} block."
+            : $"Excavated {cell}; collected {units} obsidian layers.";
         return true;
     }
 
@@ -436,6 +445,7 @@ public sealed partial class GameSession
             {
                 QueueDeathBlock(zombie);
                 Falls.CancelZombie(zombie);
+                _fallStartHeights.Remove(zombie.Id);
                 _stepOrigins.Remove(zombie.Id);
                 _jumpHeights.Remove(zombie.Id);
                 _liquidDestinations.Remove(zombie.Id);
@@ -560,6 +570,7 @@ public sealed partial class GameSession
         if (UpdateBuoyancy(zombie, dt))
         {
             Falls.CancelZombie(zombie);
+            _fallStartHeights.Remove(zombie.Id);
             return;
         }
         if (zombie.NextCell is { } movingTo)
@@ -623,6 +634,9 @@ public sealed partial class GameSession
         }
         if (zombie.Position.Y > floorHeight + .0001f)
         {
+            // Retargeting a fall or pausing at an obstruction must not erase the
+            // height already lost. Only landing or buoyancy ends the physical fall.
+            _fallStartHeights.TryAdd(zombie.Id, zombie.Position.Y);
             // Slabs land bodies on their actual upper face; a side crust outside
             // the feet cannot suspend a unit over the remaining empty space.
             var landing = new Vector3(zombie.Position.X, floorHeight, zombie.Position.Z);
@@ -635,18 +649,39 @@ public sealed partial class GameSession
                 if (TryFindBodyObstacle(zombie.Position, position, out var fallBlocker))
                 {
                     Falls.CancelZombie(zombie);
-                    AttackObstacle(zombie, fallBlocker);
+                    AttackObstacle(zombie, fallBlocker, position);
                     break;
                 }
                 if (!IsBodyClear(position)) { Falls.CancelZombie(zombie); break; }
                 zombie.Position = position;
+                // Detect buoyant liquid along the sweep, before a fast fall can
+                // cross a shallow surface and apply ground-impact damage.
+                if (TryBuoyantSurface(zombie, position, out _))
+                {
+                    Falls.CancelZombie(zombie);
+                    _fallStartHeights.Remove(zombie.Id);
+                    return;
+                }
             }
+            if (Math.Abs(zombie.Position.Y - floorHeight) <= .0001f) CompleteZombieFall(zombie, floorHeight);
             return;
         }
         Falls.CancelZombie(zombie);
+        CompleteZombieFall(zombie, floorHeight);
+        if (zombie.Hp <= 0) return;
+        if (zombie.Position.Y < floorHeight - .0001f)
+        {
+            // A new block can fit below the collision body while its normal
+            // standing height is slightly above us. Regain footing continuously
+            // instead of falling into and attacking that new support.
+            var remaining = dt * NavigationCosts.WalkTilesPerSecond;
+            MoveToward(zombie, new Vector3(zombie.Position.X, floorHeight, zombie.Position.Z), ref remaining);
+            return;
+        }
         if (RecoverSupportedPosition(zombie, floorHeight, dt)) return;
         if (TryLeaveFractionalSupport(zombie)) return;
-        if (FaceNearbyCore(zombie))
+        bool yieldingToBuilder = TryGetBuilderYieldStep(zombie, out var next);
+        if (!yieldingToBuilder && FaceNearbyCore(zombie))
         {
             if (zombie.Cooldown <= 0)
             {
@@ -655,7 +690,8 @@ public sealed partial class GameSession
             }
             return;
         }
-        if (!_routes[zombie.Lane % 4].TryGetValue(current, out var next) && !TryGetBridgeStep(current, out next))
+        if (!yieldingToBuilder && !_routes[zombie.Lane % 4].TryGetValue(current, out next) &&
+            !(zombie.CarriedBlocks == 0 ? _spentRoutes.TryGetValue(current, out next) : TryGetBridgeStep(current, out next)))
         {
             // A collapse can temporarily isolate a node; terrain is still destructible.
             // Prefer horizontal exits so a waiting zombie does not dig out its own footing.
@@ -663,6 +699,9 @@ public sealed partial class GameSession
                 if (AttackObstacle(zombie, current + direction)) break;
             return;
         }
+        // A spent builder waits at the best real reachable position until the
+        // terrain changes; it cannot execute a route requiring another block.
+        if (next == current) return;
         if (!HasZombieSupport(next))
         {
             TryBuildBridge(zombie, current, next);
@@ -692,6 +731,14 @@ public sealed partial class GameSession
             _stepOrigins[zombie.Id] = current;
             zombie.FaceToward(next.Center - zombie.Position);
         }
+    }
+
+    private void CompleteZombieFall(Zombie zombie, float landingHeight)
+    {
+        if (!_fallStartHeights.Remove(zombie.Id, out var startHeight)) return;
+        var fallenBlocks = MathF.Floor(startHeight - landingHeight + .0001f);
+        if (fallenBlocks >= Balance.FallDamageMinimumBlocks)
+            DamageZombie(zombie, (fallenBlocks - Balance.FallDamageMinimumBlocks + 1) * Balance.FallDamagePerBlock, DamageKind.Blunt);
     }
 
     private void UpdateLiquidExposure(Zombie zombie, float dt)
@@ -736,7 +783,7 @@ public sealed partial class GameSession
         {
             ClearZombieMovement(zombie);
             var rising = new Vector3(zombie.Position.X, Math.Min(risingSurface + .4f, zombie.Position.Y + dt * 2), zombie.Position.Z);
-            if (TryFindBodyObstacle(zombie.Position, rising, out var ceiling)) AttackObstacle(zombie, ceiling);
+            if (TryFindBodyObstacle(zombie.Position, rising, out var ceiling)) AttackObstacle(zombie, ceiling, rising);
             else if (IsBodyClear(rising)) zombie.Position = rising;
             return true;
         }
@@ -762,7 +809,7 @@ public sealed partial class GameSession
                 var next = length <= dt * .85f ? waypoint : zombie.Position + offset / length * (dt * .85f);
                 if (TryFindBodyObstacle(zombie.Position, next, out var blocker))
                 {
-                    AttackObstacle(zombie, blocker);
+                    AttackObstacle(zombie, blocker, next);
                     return true;
                 }
                 if (!IsBodyClear(next)) return true;
@@ -796,7 +843,7 @@ public sealed partial class GameSession
         var vertical = new Vector3(zombie.Position.X, zombie.Position.Y + Math.Clamp(desiredY - zombie.Position.Y, -dt * 2, dt * 2), zombie.Position.Z);
         if (TryFindBodyObstacle(zombie.Position, vertical, out var surfaceBlocker))
         {
-            AttackObstacle(zombie, surfaceBlocker);
+            AttackObstacle(zombie, surfaceBlocker, vertical);
             return true;
         }
         if (!IsBodyClear(vertical)) return true;
@@ -927,12 +974,16 @@ public sealed partial class GameSession
                     float? top = null;
                     if (World.GetObsidian(cell) is { } crust)
                     {
-                        if (position.X + .2f > crust.Min.X && position.X - .2f < crust.Max.X &&
-                            position.Z + .2f > crust.Min.Z && position.Z - .2f < crust.Max.Z)
-                            top = crust.Max.Y;
+                        foreach (var part in crust.Parts)
+                            if (position.X + .2f > part.Min.X && position.X - .2f < part.Max.X &&
+                                position.Z + .2f > part.Min.Z && position.Z - .2f < part.Max.Z &&
+                                part.Max.Y + .39f <= position.Y + .00001f)
+                                top = Math.Max(top ?? float.NegativeInfinity, part.Max.Y);
                     }
                     else if (World.GetMaterial(cell) != Material.Air || TrySelectTurret(cell) != null) top = y + 1;
-                    if (!top.HasValue || top.Value + .5f > position.Y + .001f) continue;
+                    // Use the collision body's lower face, not its half-block
+                    // standing offset: death drops may appear in that small gap.
+                    if (!top.HasValue || top.Value + .39f > position.Y + .00001f) continue;
                     height = Math.Max(height, top.Value + .5f);
                     break;
                 }
@@ -1001,20 +1052,33 @@ public sealed partial class GameSession
                     var cell = new Cell(x, y, z);
                     if (candidates != null && !candidates.Contains(cell)) continue;
                     if (World.GetMaterial(cell) == Material.Air && !HasLiveIndexedTurret(cell)) continue;
-                    var min = new Vector3(x, y, z);
-                    var max = min + Vector3.One;
-                    if (World.GetObsidian(cell) is { } crust) { min = crust.Min; max = crust.Max; }
-                    min -= body;
-                    max += body;
-                    float enter = 0, leave = 1;
-                    var movement = to - from;
-                    if (!JumpAxisInterval(from.X, movement.X, min.X + .00001f, max.X - .00001f, ref enter, ref leave) ||
-                        !JumpAxisInterval(from.Y, movement.Y, min.Y + .00001f, max.Y - .00001f, ref enter, ref leave) ||
-                        !JumpAxisInterval(from.Z, movement.Z, min.Z + .00001f, max.Z - .00001f, ref enter, ref leave) || enter >= firstContact) continue;
-                    firstContact = enter;
-                    obstacle = cell;
+                    foreach (var bounds in SolidCollisionBounds(cell))
+                    {
+                        var min = bounds.Min - body;
+                        var max = bounds.Max + body;
+                        float enter = 0, leave = 1;
+                        var movement = to - from;
+                        if (!JumpAxisInterval(from.X, movement.X, min.X + .00001f, max.X - .00001f, ref enter, ref leave) ||
+                            !JumpAxisInterval(from.Y, movement.Y, min.Y + .00001f, max.Y - .00001f, ref enter, ref leave) ||
+                            !JumpAxisInterval(from.Z, movement.Z, min.Z + .00001f, max.Z - .00001f, ref enter, ref leave) || enter >= firstContact) continue;
+                        firstContact = enter;
+                        obstacle = cell;
+                    }
                 }
         return float.IsFinite(firstContact);
+    }
+
+    private IEnumerable<(Vector3 Min, Vector3 Max)> SolidCollisionBounds(Cell cell)
+    {
+        if (World.GetObsidian(cell) is { } crust)
+        {
+            foreach (var part in crust.Parts) yield return (part.Min, part.Max);
+        }
+        else
+        {
+            var min = new Vector3(cell.X, cell.Y, cell.Z);
+            yield return (min, min + Vector3.One);
+        }
     }
 
     private bool TryLeaveFractionalSupport(Zombie zombie)
@@ -1057,7 +1121,7 @@ public sealed partial class GameSession
             remaining > 0 ? zombie.Position + offset / distance * remaining : zombie.Position;
         if (TryFindBodyObstacle(zombie.Position, next, out var blocker))
         {
-            AttackObstacle(zombie, blocker);
+            AttackObstacle(zombie, blocker, next);
             remaining = 0;
             return false;
         }
@@ -1073,7 +1137,7 @@ public sealed partial class GameSession
         return false;
     }
 
-    private bool AttackObstacle(Zombie zombie, Cell cell)
+    private bool AttackObstacle(Zombie zombie, Cell cell, Vector3? contactPosition = null)
     {
         var barrier = World.GetBarrier(cell);
         var turret = TrySelectTurret(cell);
@@ -1106,7 +1170,10 @@ public sealed partial class GameSession
         }
         else if (breakableTerrain && World.DamageTerrain(cell, zombie.Attack))
             SettleDefenses();
-        else if (obsidian && World.DamageObsidian(cell, zombie.Attack))
+        else if (obsidian && World.DamageObsidianPart(cell, World.GetObsidian(cell)!.Parts
+                     .MinBy(part => Vector3.DistanceSquared(contactPosition ?? zombie.Position,
+                         Vector3.Clamp(contactPosition ?? zombie.Position, part.Min, part.Max)))!.Face,
+                     zombie.Attack))
         {
             ShatterObsidian(cell);
             SettleDefenses();
@@ -1144,12 +1211,14 @@ public sealed partial class GameSession
         // Blocks retain holes, overhangs, and ceilings whenever any orthogonal block
         // occupies a neighboring cell. Towers rely only on vertical support and settle bottom first.
         var movedSolids = new HashSet<Cell>();
+        var movedCrusts = new List<ObsidianCell>();
         bool moved;
         do
         {
-            moved = false;
+            moved = SettleUnsupportedObsidianStacks(movedSolids, movedCrusts);
             foreach (var origin in World.MovableBlocks().ToArray())
             {
+                if (World.GetObsidian(origin) is { Units: < LiquidSystem.UnitsPerBlock }) continue;
                 var cell = origin;
                 while (cell.Y > 0 && !World.HasOrthogonalBlockSupport(cell))
                 {
@@ -1184,7 +1253,10 @@ public sealed partial class GameSession
         // Preserve crushing by solids that actually fell. A stationary crust
         // growing around a unit is an obstruction it can attack, not an instant kill.
         foreach (var zombie in Zombies)
-            if (zombie.Hp > 0 && movedSolids.Count > 0 && TryFindBodyObstacle(zombie.Position, zombie.Position, out _, movedSolids))
+            if (zombie.Hp > 0 &&
+                (movedSolids.Count > 0 && TryFindBodyObstacle(zombie.Position, zombie.Position, out _, movedSolids) ||
+                 movedCrusts.Any(part => World.GetObsidian(part.Cell)?.Parts.Any(live => live.Face == part.Face) == true &&
+                     BoundsOverlap(part.Min, part.Max, zombie.Position - new Vector3(.2f, .39f, .2f), zombie.Position + new Vector3(.2f, .39f, .2f)))))
                 DamageZombie(zombie, zombie.Hp);
         _settledWorldRevision = World.Revision;
         _settledTopologyRevision = _topologyRevision;
@@ -1302,6 +1374,7 @@ public sealed partial class GameSession
             foreach (var previous in routeOrder)
                 _routes[lane][nodes[nodeRows[previous] - 1]] = nodes[nodeRows[nextIndices[previous]] - 1];
         }
+        BuildSpentRoutes(nodes, nodeRows, edgeCosts, edgeOffsets, edgesPerNode);
         _navigationRevision = _topologyRevision;
         _navigationWorldRevision = World.Revision;
     }
@@ -1357,18 +1430,18 @@ public sealed partial class GameSession
                     var cell = new Cell(x, y, z);
                     var material = World.GetMaterial(cell);
                     if (material == Material.Air && !HasLiveIndexedTurret(cell)) continue;
-                    var min = new Vector3(x, y, z);
-                    var max = min + Vector3.One;
-                    if (World.GetObsidian(cell) is { } crust) { min = crust.Min; max = crust.Max; }
-                    min -= body;
-                    max += body;
-                    float a = start, b = end;
-                    if (!JumpAxisInterval(from.Center.X, to.X - from.X, min.X, max.X, ref a, ref b) ||
-                        !JumpAxisInterval(from.Center.Z, to.Z - from.Z, min.Z, max.Z, ref a, ref b)) continue;
-                    float ya = JumpPosition(from, to, height, a).Y, yb = JumpPosition(from, to, height, b).Y;
-                    float lowest = Math.Min(ya, yb), highest = Math.Max(ya, yb);
-                    if (a <= .5f && b >= .5f) highest = from.Center.Y + height;
-                    if (lowest < max.Y - .00001f && highest > min.Y + .00001f) return false;
+                    foreach (var bounds in SolidCollisionBounds(cell))
+                    {
+                        var min = bounds.Min - body;
+                        var max = bounds.Max + body;
+                        float a = start, b = end;
+                        if (!JumpAxisInterval(from.Center.X, to.X - from.X, min.X, max.X, ref a, ref b) ||
+                            !JumpAxisInterval(from.Center.Z, to.Z - from.Z, min.Z, max.Z, ref a, ref b)) continue;
+                        float ya = JumpPosition(from, to, height, a).Y, yb = JumpPosition(from, to, height, b).Y;
+                        float lowest = Math.Min(ya, yb), highest = Math.Max(ya, yb);
+                        if (a <= .5f && b >= .5f) highest = from.Center.Y + height;
+                        if (lowest < max.Y - .00001f && highest > min.Y + .00001f) return false;
+                    }
                 }
         return true;
     }

@@ -12,13 +12,14 @@ public sealed class FallAnimations
 {
     public const float AccelerationSeconds = 1;
     public const float TerminalSpeed = 5;
-    private readonly Dictionary<Cell, BlockTrack> _blocks = [];
+    private readonly Dictionary<(Cell Cell, CrustFace? Face), BlockTrack> _blocks = [];
     private readonly Dictionary<int, Motion> _turrets = [];
     private readonly Dictionary<int, Motion> _zombies = [];
 
     public int Revision { get; private set; }
-    public IReadOnlyList<FallingBlock> Blocks => _blocks.OrderBy(pair => pair.Key.X).ThenBy(pair => pair.Key.Y).ThenBy(pair => pair.Key.Z)
-        .Select(pair => new FallingBlock(pair.Key, pair.Value.Motion.Position, pair.Value.Material, pair.Value.Content, pair.Value.Crust)).ToArray();
+    public IReadOnlyList<FallingBlock> Blocks => _blocks.OrderBy(pair => pair.Key.Cell.X).ThenBy(pair => pair.Key.Cell.Y).ThenBy(pair => pair.Key.Cell.Z)
+        .ThenBy(pair => pair.Key.Face)
+        .Select(pair => new FallingBlock(pair.Key.Cell, pair.Value.Motion.Position, pair.Value.Material, pair.Value.Content, pair.Value.Crust)).ToArray();
 
     /// <summary>One block in the first second, then five blocks per second.</summary>
     public static float DistanceAfter(float elapsedSeconds)
@@ -62,14 +63,16 @@ public sealed class FallAnimations
     {
         foreach (var entry in _blocks.ToArray())
         {
-            if (world.GetMaterial(entry.Key) != entry.Value.Material)
+            var crust = entry.Key.Face is { } face
+                ? world.GetObsidian(entry.Key.Cell)?.Parts.FirstOrDefault(part => part.Face == face) : null;
+            if (world.GetMaterial(entry.Key.Cell) != entry.Value.Material || entry.Key.Face.HasValue && crust is null)
             {
                 _blocks.Remove(entry.Key);
                 Revision++;
                 continue;
             }
-            entry.Value.Content = world.GetBarrier(entry.Key)?.Content;
-            entry.Value.Crust = world.GetObsidian(entry.Key);
+            entry.Value.Content = world.GetBarrier(entry.Key.Cell)?.Content;
+            entry.Value.Crust = crust;
         }
         if (_turrets.Count > 0)
         {
@@ -86,14 +89,34 @@ public sealed class FallAnimations
     internal void RecordBlockDrop(Cell from, Cell to, WorldGrid world)
     {
         if (from == to) return;
+        if (world.GetObsidian(to) is { } crust)
+        {
+            foreach (var part in crust.Parts) RecordObsidianDrop(from, to, part);
+            return;
+        }
         Motion motion;
-        if (_blocks.Remove(from, out var previous))
+        if (_blocks.Remove((from, null), out var previous))
         {
             motion = previous.Motion;
             motion.Retarget(motion.Position, to.Center);
         }
         else motion = new Motion(from.Center, to.Center);
-        _blocks[to] = new BlockTrack(motion, world.GetMaterial(to), world.GetBarrier(to)?.Content, world.GetObsidian(to));
+        _blocks[(to, null)] = new BlockTrack(motion, world.GetMaterial(to), world.GetBarrier(to)?.Content, null);
+        Revision++;
+    }
+
+    /// <summary>A slab moves independently of any stationary opposite slab sharing its destination.</summary>
+    internal void RecordObsidianDrop(Cell from, Cell to, ObsidianCell part)
+    {
+        if (from == to) return;
+        Motion motion;
+        if (_blocks.Remove((from, part.Face), out var previous))
+        {
+            motion = previous.Motion;
+            motion.Retarget(motion.Position, to.Center);
+        }
+        else motion = new Motion(from.Center, to.Center);
+        _blocks[(to, part.Face)] = new BlockTrack(motion, Material.Obsidian, null, part with { Cell = to });
         Revision++;
     }
 

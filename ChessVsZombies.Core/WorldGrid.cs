@@ -91,6 +91,65 @@ public sealed class WorldGrid
     public Barrier? GetBarrier(Cell cell) => _barriers.GetValueOrDefault(cell);
     public ObsidianCell? GetObsidian(Cell cell) => _obsidian.GetValueOrDefault(cell);
 
+    internal bool CanAddObsidian(Cell cell, int units, CrustFace face, int offsetUnits = 0)
+    {
+        if (!IsInside(cell) || !Enum.IsDefined(face) || units <= 0 || offsetUnits < 0 ||
+            offsetUnits > LiquidSystem.UnitsPerBlock - units ||
+            offsetUnits != 0 && face is not (CrustFace.Bottom or CrustFace.Top)) return false;
+        var existing = GetObsidian(cell);
+        if (existing == null) return GetMaterial(cell) == Material.Air;
+        var part = existing.Parts.FirstOrDefault(part => part.Face == face);
+        return part != null && part.OffsetUnits == offsetUnits &&
+            existing.Units + units + offsetUnits <= LiquidSystem.UnitsPerBlock;
+    }
+
+    /// <summary>Moves one slab without rotating it or filling the gap between opposite slabs.</summary>
+    internal bool MoveObsidianPart(ObsidianCell part, Cell to)
+    {
+        if (!IsInside(to) || to == part.Cell || GetObsidian(part.Cell) is not { } source ||
+            !source.Parts.Contains(part) || GetMaterial(to) is not (Material.Air or Material.Obsidian)) return false;
+        var moved = part with { Cell = to };
+        var target = GetObsidian(to);
+        if (target != null && (target.OppositeUnits != 0 || part.OffsetUnits != 0 || target.OffsetUnits != 0 ||
+            part.Face is CrustFace.Bottom or CrustFace.Top || target.Face != ObsidianCell.OppositeFace(part.Face) ||
+            target.Units + part.Units > LiquidSystem.UnitsPerBlock)) return false;
+        SetObsidianParts(part.Cell, source.Parts.Where(candidate => candidate.Face != part.Face));
+        SetObsidianParts(to, target == null ? [moved] : target.Parts.Append(moved));
+        Revision++;
+        return true;
+    }
+
+    private void SetObsidianParts(Cell cell, IEnumerable<ObsidianCell> parts)
+    {
+        var remaining = parts.ToArray();
+        if (remaining.Length == 0) { _obsidian.Remove(cell); return; }
+        var first = remaining[0];
+        _obsidian[cell] = remaining.Length == 1 ? first : first with
+        {
+            Units = first.Units + remaining[1].Units, Hp = first.Hp + remaining[1].Hp,
+            OppositeUnits = remaining[1].Units, OppositeHp = remaining[1].Hp
+        };
+    }
+
+    /// <summary>Damage the slab actually hit; its disjoint neighbor retains its own durability.</summary>
+    public bool DamageObsidianPart(Cell cell, CrustFace face, float damage)
+    {
+        if (!float.IsFinite(damage) || damage <= 0 || GetObsidian(cell) is not { } crust) return false;
+        var parts = crust.Parts.ToList();
+        int index = parts.FindIndex(part => part.Face == face);
+        if (index < 0) return false;
+        if (damage < parts[index].Hp)
+        {
+            parts[index] = parts[index] with { Hp = parts[index].Hp - damage };
+            SetObsidianParts(cell, parts);
+            return false;
+        }
+        parts.RemoveAt(index);
+        SetObsidianParts(cell, parts);
+        Revision++;
+        return true;
+    }
+
     /// <summary>Point collision respects the actual thickness of an obsidian crust.</summary>
     public bool IsSolidAt(Vector3 point)
     {
@@ -98,8 +157,8 @@ public sealed class WorldGrid
         var cell = new Cell((int)MathF.Floor(point.X), (int)MathF.Floor(point.Y), (int)MathF.Floor(point.Z));
         if (!IsInside(cell)) return false;
         if (GetObsidian(cell) is { } crust)
-            return point.X >= crust.Min.X && point.Y >= crust.Min.Y && point.Z >= crust.Min.Z &&
-                point.X < crust.Max.X && point.Y < crust.Max.Y && point.Z < crust.Max.Z;
+            return crust.Parts.Any(part => point.X >= part.Min.X && point.Y >= part.Min.Y && point.Z >= part.Min.Z &&
+                point.X < part.Max.X && point.Y < part.Max.Y && point.Z < part.Max.Z);
         return GetMaterial(cell) != Material.Air;
     }
 
@@ -118,7 +177,8 @@ public sealed class WorldGrid
 
     private bool Seals(Cell cell, CrustFace face)
     {
-        if (GetObsidian(cell) is { } crust) return crust.Units == LiquidSystem.UnitsPerBlock || crust.OffsetUnits == 0 && crust.Face == face;
+        if (GetObsidian(cell) is { } crust) return crust.Units == LiquidSystem.UnitsPerBlock ||
+            crust.Parts.Any(part => part.OffsetUnits == 0 && part.Face == face);
         return GetMaterial(cell) != Material.Air;
     }
 
@@ -126,7 +186,8 @@ public sealed class WorldGrid
     {
         var min = new Vector3(cell.X, cell.Y, cell.Z);
         var max = min + Vector3.One;
-        if (GetObsidian(cell) is { OffsetUnits: 0 } crust)
+        if (GetObsidian(cell) is { } cellCrust)
+            foreach (var crust in cellCrust.Parts.Where(part => part.OffsetUnits == 0))
             switch (crust.Face)
             {
                 case CrustFace.West: min.X = crust.Max.X; break;
@@ -143,13 +204,12 @@ public sealed class WorldGrid
 
     internal bool AddObsidian(Cell cell, int units, CrustFace face, int offsetUnits = 0)
     {
-        if (!IsInside(cell) || !Enum.IsDefined(face) || units <= 0) return false;
+        if (!CanAddObsidian(cell, units, face, offsetUnits)) return false;
         var previous = GetObsidian(cell);
-        if (previous is null && GetMaterial(cell) != Material.Air || previous is not null && (previous.Face != face || previous.OffsetUnits != offsetUnits) ||
-            offsetUnits < 0 || offsetUnits != 0 && face is not (CrustFace.Bottom or CrustFace.Top) ||
-            units > LiquidSystem.UnitsPerBlock - (previous?.Units ?? 0) - offsetUnits) return false;
-        _obsidian[cell] = new ObsidianCell(cell, units + (previous?.Units ?? 0), face,
-            units * LiquidSystem.ObsidianHpPerUnit + (previous?.Hp ?? 0), offsetUnits);
+        if (previous == null)
+            _obsidian[cell] = new ObsidianCell(cell, units, face, units * LiquidSystem.ObsidianHpPerUnit, offsetUnits);
+        else SetObsidianParts(cell, previous.Parts.Select(part => part.Face == face
+            ? part with { Units = part.Units + units, Hp = part.Hp + units * LiquidSystem.ObsidianHpPerUnit } : part));
         Revision++;
         return true;
     }
@@ -160,7 +220,10 @@ public sealed class WorldGrid
         if (!float.IsFinite(damage) || damage <= 0 || GetObsidian(cell) is not { } crust) return false;
         if (damage < crust.Hp)
         {
-            _obsidian[cell] = crust with { Hp = crust.Hp - damage };
+            // Whole-cell damage is retained for mining and legacy callers. Split
+            // nonlethal damage proportionally without silently healing either slab.
+            float fraction = (crust.Hp - damage) / crust.Hp;
+            SetObsidianParts(cell, crust.Parts.Select(part => part with { Hp = part.Hp * fraction }));
             return false;
         }
         _obsidian.Remove(cell);
