@@ -134,7 +134,7 @@ public class UpgradeTemplateTests
     }
 
     [Fact]
-    public void SessionApplicationRequiresAnActualLivingTowerDuringPreparation()
+    public void SessionApplicationRequiresAnActualLivingTowerDuringPreparationOrCombat()
     {
         var game = new GameSession();
         Seed(game.Economy, UpgradeKind.HP, 11, 2);
@@ -144,9 +144,12 @@ public class UpgradeTemplateTests
         Assert.True(game.ApplyUpgradeTemplate(new Cell(11, 16, 12), template));
         Assert.Equal(40, Assert.Single(game.Turrets).Hp);
         Assert.True(game.StartLevel());
+        Assert.True(game.ApplyUpgradeTemplate(new Cell(11, 16, 12), template));
+        Assert.Equal(0, game.Economy.GetProgress(UpgradeKind.HP).Available);
+        Assert.Equal(50, Assert.Single(game.Turrets).Hp);
+        Assert.False(game.ApplyUpgradeTemplate(new Cell(10, 16, 12), template));
+        Assert.Single(game.Turrets).Hp = 0;
         Assert.False(game.ApplyUpgradeTemplate(new Cell(11, 16, 12), template));
-        Assert.Equal(1, game.Economy.GetProgress(UpgradeKind.HP).Available);
-        Assert.Equal(40, Assert.Single(game.Turrets).Hp);
     }
 
     [Fact]

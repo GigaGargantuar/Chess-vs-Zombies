@@ -10,6 +10,7 @@ public sealed class WorldRenderer : IDisposable
     private readonly BasicEffect effect;
     private VertexBuffer? terrain;
     private int revision = -1;
+    private int fallRevision = -1;
     private WorldGrid? previousWorld;
     private readonly MeshBuilder dynamic = new();
     private readonly Dictionary<int, Dictionary<ArmorSlot, GearTier>> armorSeen = [];
@@ -26,7 +27,13 @@ public sealed class WorldRenderer : IDisposable
     public void Draw(GameSession session, Matrix view, Matrix projection, Cell? hover, Cell? placement, bool placementValid, Turret? selected, bool showZones, double time)
     {
         if (previousWorld != session.World) { armorSeen.Clear(); fallenArmor.Clear(); }
-        if (revision != session.World.Revision || previousWorld != session.World) RebuildTerrain(session.World);
+        var fallingBlocks = session.Falls.Blocks.ToArray();
+        var fallingCells = fallingBlocks.Select(block => block.Destination).ToHashSet();
+        if (revision != session.World.Revision || previousWorld != session.World || fallRevision != session.Falls.Revision)
+        {
+            RebuildTerrain(session.World, fallingCells);
+            fallRevision = session.Falls.Revision;
+        }
         device.DepthStencilState = DepthStencilState.Default;
         device.BlendState = BlendState.Opaque;
         device.RasterizerState = RasterizerState.CullNone;
@@ -39,15 +46,30 @@ public sealed class WorldRenderer : IDisposable
         dynamic.Vertices.Clear();
         foreach (var crust in session.World.ObsidianCells)
         {
+            if (fallingCells.Contains(crust.Cell)) continue;
             dynamic.Box(ToXna(crust.Min), ToXna(crust.Max), new Color(49, 35, 66));
             dynamic.Outline(ToXna(crust.Min) + new Vector3(.003f), ToXna(crust.Max) - new Vector3(.003f), new Color(104, 72, 127), .008f);
+        }
+        foreach (var block in fallingBlocks)
+        {
+            var offset = ToXna(block.Position - block.Destination.Center);
+            if (block.Crust is { } crust)
+            {
+                dynamic.Box(ToXna(crust.Min) + offset, ToXna(crust.Max) + offset, new Color(49, 35, 66));
+                dynamic.Outline(ToXna(crust.Min) + offset + new Vector3(.003f), ToXna(crust.Max) + offset - new Vector3(.003f), new Color(104, 72, 127), .008f);
+            }
+            else
+            {
+                var min = ToXna(block.Position) - new Vector3(.5f);
+                dynamic.Box(min, min + Vector3.One, BlockColor(block.Material, block.Content, block.Destination));
+            }
         }
         // A raised crown marks the two-by-two-by-two objective.
         dynamic.Cylinder(new Vector3(16, 17.035f, 16), .54f, .54f, .10f, new Color(225, 244, 226), 8);
         dynamic.Cylinder(new Vector3(16, 17.13f, 16), .4f, .15f, .72f, Teal, 8);
         dynamic.Box(new Vector3(15.87f, 17.76f, 15.87f), new Vector3(16.13f, 18.17f, 16.13f), new Color(229, 255, 239));
         dynamic.Box(new Vector3(15.7f, 17.90f, 15.88f), new Vector3(16.3f, 18.02f, 16.12f), new Color(229, 255, 239));
-        foreach (var turret in session.Turrets) DrawTurret(turret, turret == selected);
+        foreach (var turret in session.Turrets) DrawTurret(turret, turret == selected, ToXna(session.Falls.GetTurretPosition(turret)));
         foreach (var zombie in session.Zombies)
         {
             var current = zombie.ArmorPieces.ToDictionary(piece => piece.Slot, piece => piece.Tier);
@@ -68,7 +90,7 @@ public sealed class WorldRenderer : IDisposable
                         orientation, spin, piece.Value, time));
                 }
             armorSeen[zombie.Id] = current;
-            DrawZombie(zombie, time);
+            DrawZombie(zombie, time, session.Feedback.GetFlash(zombie.Id));
         }
         foreach (var id in armorSeen.Keys.Where(id => !session.Zombies.Any(zombie => zombie.Id == id)).ToArray()) armorSeen.Remove(id);
         fallenArmor.RemoveAll(piece => time - piece.Started > 2.5);
@@ -89,7 +111,13 @@ public sealed class WorldRenderer : IDisposable
             Color color = projectile.Kind == ShotKind.Lob ? new(239, 190, 102) : new(163, 239, 255);
             float radius = projectile.Kind == ShotKind.Melee ? .09f : .065f;
             dynamic.Box(position - new Vector3(radius), position + new Vector3(radius), color);
-            if (projectile.Kind != ShotKind.Lob) dynamic.Line(position, Vector3.Lerp(position, ToXna(projectile.Origin), .25f), .02f, color);
+            if (projectile.Kind != ShotKind.Lob)
+            {
+                var tail = ToXna(projectile.GetPositionAt(Math.Max(0, projectile.Age - .025f)));
+                var offset = tail - position;
+                if (offset.LengthSquared() > .35f * .35f) tail = position + Vector3.Normalize(offset) * .35f;
+                dynamic.Line(position, tail, .02f, color);
+            }
         }
         if (showZones)
         {
@@ -167,26 +195,15 @@ public sealed class WorldRenderer : IDisposable
         device.DepthStencilState = DepthStencilState.Default;
         device.BlendState = BlendState.Opaque;
     }
-    private void RebuildTerrain(WorldGrid world)
+    private void RebuildTerrain(WorldGrid world, HashSet<Cell> fallingCells)
     {
         var mesh = new MeshBuilder();
         for (int x = 0; x < 32; x++) for (int y = 0; y < 32; y++) for (int z = 0; z < 32; z++)
                 {
                     var cell = new Cell(x, y, z); var material = world.GetMaterial(cell);
-                    if (material is Material.Air or Material.Obsidian) continue;
-                    Color color = material switch
-                    {
-                        Material.Core => new Color(82, 205, 183),
-                        Material.Barrier => world.GetBarrier(cell)?.Content == Material.Stone ? new Color(160, 174, 184) : new Color(155, 118, 78),
-                        Material.Dirt => new Color(112 + (x + z) % 2 * 5, 105 + (x + z) % 2 * 5, 83 + (x + z) % 2 * 3),
-                        _ => new Color(60 + y % 3 * 4, 72 + y % 3 * 4, 81 + y % 3 * 4)
-                    };
-                    if (material == Material.Dirt && y == 15)
-                    {
-                        if (x == 0 || z == 0 || x == 31 || z == 31) color = new Color(106, 79, 73);
-                        else if (x >= 12 && x < 20 && z >= 12 && z < 20) color = Color.Lerp(color, new Color(91, 153, 126), .3f);
-                    }
-                    bool Empty(int dx, int dy, int dz) => world.GetMaterial(new Cell(x + dx, y + dy, z + dz)) is Material.Air or Material.Obsidian;
+                    if (material is Material.Air or Material.Obsidian || fallingCells.Contains(cell)) continue;
+                    Color color = BlockColor(material, world.GetBarrier(cell)?.Content, cell);
+                    bool Empty(int dx, int dy, int dz) => fallingCells.Contains(new Cell(x + dx, y + dy, z + dz)) || world.GetMaterial(new Cell(x + dx, y + dy, z + dz)) is Material.Air or Material.Obsidian;
                     bool top = Empty(0, 1, 0);
                     mesh.Box(new Vector3(x, y, z), new Vector3(x + 1, y + 1, z + 1), color, top, Empty(0, -1, 0), Empty(-1, 0, 0), Empty(1, 0, 0), Empty(0, 0, 1), Empty(0, 0, -1));
                     if (top)
@@ -201,9 +218,32 @@ public sealed class WorldRenderer : IDisposable
         terrain = new VertexBuffer(device, typeof(VertexPositionColor), mesh.Vertices.Count, BufferUsage.WriteOnly);
         terrain.SetData(mesh.Vertices.ToArray()); revision = world.Revision; previousWorld = world;
     }
-    private void DrawTurret(Turret turret, bool selected)
+    private static Color BlockColor(Material material, Material? content, Cell cell)
     {
-        var p = new Vector3(turret.Cell.X + .5f, turret.Cell.Y + .02f, turret.Cell.Z + .5f);
+        var color = material switch
+        {
+            Material.Core => new Color(82, 205, 183),
+            Material.Barrier => content is Material.Dirt ? new Color(155, 118, 78) :
+                content is Material.Stone ? new Color(160, 174, 184) : BlockColor(content ?? Material.Dirt, null, cell),
+            Material.Dirt => new Color(112 + (cell.X + cell.Z) % 2 * 5, 105 + (cell.X + cell.Z) % 2 * 5, 83 + (cell.X + cell.Z) % 2 * 3),
+            Material.Wood => ArmorColor(GearTier.Wood),
+            Material.Copper => ArmorColor(GearTier.Copper),
+            Material.Iron => ArmorColor(GearTier.Iron),
+            Material.Gold => ArmorColor(GearTier.Gold),
+            Material.Diamond => ArmorColor(GearTier.Diamond),
+            Material.Osmium => ArmorColor(GearTier.Osmium),
+            _ => new Color(60 + cell.Y % 3 * 4, 72 + cell.Y % 3 * 4, 81 + cell.Y % 3 * 4)
+        };
+        if (material == Material.Dirt && cell.Y == 15)
+        {
+            if (cell.X is 0 or 31 || cell.Z is 0 or 31) color = new Color(106, 79, 73);
+            else if (cell.X is >= 12 and < 20 && cell.Z is >= 12 and < 20) color = Color.Lerp(color, new Color(91, 153, 126), .3f);
+        }
+        return color;
+    }
+    private void DrawTurret(Turret turret, bool selected, Vector3 center)
+    {
+        var p = center - new Vector3(0, .48f, 0);
         var ivory = selected ? new Color(197, 255, 229) : new Color(226, 224, 205);
         var accent = new Color(99, 185, 164);
         dynamic.Cylinder(p, .42f, .42f, .12f, new Color(39, 54, 61));
@@ -230,7 +270,7 @@ public sealed class WorldRenderer : IDisposable
         }
         if (turret.UpgradePoints.Values.Any(points => points > 0)) dynamic.Cylinder(p + Vector3.Up * .27f, .305f, .305f, .04f, new Color(235, 189, 105));
     }
-    private void DrawZombie(Zombie zombie, double time)
+    private void DrawZombie(Zombie zombie, double time, float flash)
     {
         int firstVertex = dynamic.Vertices.Count;
         var p = ZombieFeet(zombie);
@@ -251,18 +291,24 @@ public sealed class WorldRenderer : IDisposable
         }
         if (zombie.Kind is ZombieKind.Armed or ZombieKind.ArmedArmored)
             dynamic.Box(p + new Vector3(.35f, .33f, -.09f), p + new Vector3(.46f, 1.10f, .04f), tier);
-        if (zombie.Hp < zombie.MaxHp)
+        if (zombie.CarriedBlocks > 0)
         {
-            dynamic.Box(p + new Vector3(-.3f, 1.42f, -.025f), p + new Vector3(.3f, 1.47f, .025f), new Color(47, 45, 43));
-            dynamic.Box(p + new Vector3(-.3f, 1.43f, -.029f), p + new Vector3(-.3f + .6f * zombie.Hp / zombie.MaxHp, 1.48f, .029f), new Color(233, 126, 106));
+            // The block and its straps share the body's facing transform; local -Z is the back.
+            var block = BlockColor(zombie.CarriedBlockMaterial, null, zombie.Cell);
+            var strap = new Color(69, 50, 34);
+            dynamic.Box(p + new Vector3(-.18f, .44f, -.49f), p + new Vector3(.18f, .9f, -.2f), block);
+            dynamic.Box(p + new Vector3(-.19f, .61f, -.501f), p + new Vector3(.19f, .66f, -.19f), strap);
+            dynamic.Box(p + new Vector3(-.025f, .43f, -.502f), p + new Vector3(.025f, .91f, -.19f), strap);
         }
-        if (zombie.AirRemaining < Balance.AirSeconds)
-        {
-            dynamic.Box(p + new Vector3(-.3f, 1.53f, -.025f), p + new Vector3(.3f, 1.57f, .025f), new Color(35, 46, 60));
-            dynamic.Box(p + new Vector3(-.3f, 1.54f, -.029f), p + new Vector3(-.3f + .6f * zombie.AirRemaining / Balance.AirSeconds, 1.58f, .029f), new Color(107, 185, 231));
-        }
+        if (flash > 0)
+            for (int i = firstVertex; i < dynamic.Vertices.Count; i++)
+            {
+                var vertex = dynamic.Vertices[i];
+                vertex.Color = Color.Lerp(vertex.Color, Color.White, Math.Clamp(flash, 0, 1));
+                dynamic.Vertices[i] = vertex;
+            }
         // Local +Z is the face and shield front. One transform keeps every body part,
-        // equipped item, and status bar aligned while preserving the one-cell body height.
+        // equipped item aligned while preserving the one-cell body height.
         TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(1, ZombieHeightScale, 1) *
             ZombieRotation(zombie) * Matrix.CreateTranslation(p));
     }

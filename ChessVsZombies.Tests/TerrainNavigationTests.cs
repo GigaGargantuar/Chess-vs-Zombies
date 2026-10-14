@@ -75,6 +75,10 @@ public class TerrainNavigationTests
         var game = NewSession();
         // A full-width trench prevents an equally short route around the hole.
         for (int z = 0; z < WorldGrid.Size; z++) Assert.True(game.Dig(new Cell(13, 15, z)));
+        // A supported ceiling prevents jumping across, preserving the climb/drop case.
+        Assert.True(game.Inventory.Add(Material.Dirt, 9));
+        Assert.True(game.BuildBarrier(new Cell(12, 16, 12)));
+        for (int z = 12; z <= 19; z++) Assert.True(game.BuildBarrier(new Cell(12, 17, z)));
         var zombie = StartAt(game, new Cell(12, 16, 15));
         float lowest = zombie.Position.Y;
 

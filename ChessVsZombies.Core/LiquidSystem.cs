@@ -57,7 +57,7 @@ public sealed class LiquidSystem
 {
     public const int UnitsPerBlock = 10;
     public const int WaterCost = 100, MercuryCost = 800, LavaCost = 1000;
-    public const float ObsidianHpPerUnit = 50;
+    public const float ObsidianHpPerUnit = 5;
     public const float StepSeconds = .1f;
     private const double StepDuration = .1d;
     private static readonly LiquidKind[] DensityOrder = [LiquidKind.Mercury, LiquidKind.Lava, LiquidKind.Water];
@@ -69,6 +69,8 @@ public sealed class LiquidSystem
     private readonly List<VaporCloud> _hazards = [];
     private double _accumulator;
     private int _flowTick;
+    /// <summary>Changes only when liquid amounts or positions change, not when a flow timer ticks.</summary>
+    public long Revision { get; private set; }
 
     public LiquidSystem(WorldGrid world) => _world = world ?? throw new ArgumentNullException(nameof(world));
     public IEnumerable<LiquidCell> Cells => _cells.Keys.Union(_world.ObsidianCells.Select(s => s.Cell))
@@ -91,6 +93,7 @@ public sealed class LiquidSystem
         _cells.Remove(to, out var toLiquid);
         if (fromLiquid is not null) _cells[to] = fromLiquid;
         if (toLiquid is not null) _cells[from] = toLiquid;
+        if (fromLiquid is not null || toLiquid is not null) Revision++;
     }
 
     public IEnumerable<LiquidVolume> GetVolumes(Cell cell)
@@ -123,10 +126,14 @@ public sealed class LiquidSystem
         .DefaultIfEmpty(_world.GetObsidian(cell) is { Face: CrustFace.Bottom } crust ? crust.Max.Y : cell.Y).Max();
     public float GetDepth(Vector3 point) => GetLiquidAt(point) is null ? 0 : MathF.Max(0, GetSurfaceHeight(CellAt(point)) - point.Y);
 
+    /// <summary>Checks material, available volume, and crust geometry without changing liquid.</summary>
+    public bool CanAdd(Cell cell, LiquidKind kind, int units) => Enum.IsDefined(kind) && units > 0 &&
+        CanHoldLiquid(cell) && units <= FreeUnits(cell, kind);
+
     /// <summary>All-or-none pour. GameSession additionally rejects cells occupied by turrets.</summary>
     public bool TryAdd(Cell cell, LiquidKind kind, int units)
     {
-        if (!Enum.IsDefined(kind) || units <= 0 || !CanHoldLiquid(cell) || units > FreeUnits(cell, kind)) return false;
+        if (!CanAdd(cell, kind, units)) return false;
         Change(cell, kind, units);
         return true;
     }
@@ -201,9 +208,13 @@ public sealed class LiquidSystem
         _cells.Clear();
         foreach (var entry in liquids) if (entry.Value.Any(n => n > 0)) _cells.Add(entry.Key, entry.Value);
         _hazards.Clear();
-        _hazards.AddRange(state.Hazards);
+        // Old checkpoints stored steam intensity per vaporized unit. Steam now has
+        // one fixed rate per cloud; mercury fumes retain their accumulated intensity.
+        _hazards.AddRange(state.Hazards.Select(cloud => cloud.Kind == DamageKind.Thermal
+            ? cloud with { Dps = Balance.SteamDamagePerSecond } : cloud));
         _accumulator = state.Accumulator;
         _flowTick = state.FlowTick;
+        Revision++;
     }
 
     private void React(Func<Cell, bool>? occupied)
@@ -266,13 +277,14 @@ public sealed class LiquidSystem
     private void AddVapor(Cell center, DamageKind kind, int units)
     {
         var index = _hazards.FindIndex(c => c.Center == center && c.Kind == kind);
-        var dps = units * (kind == DamageKind.Chemical ? 4f : 2f);
+        var dps = kind == DamageKind.Chemical ? units * 4f : Balance.SteamDamagePerSecond;
         var duration = (kind == DamageKind.Chemical ? 8 : 4) + units;
         if (index < 0) _hazards.Add(new VaporCloud(center, kind == DamageKind.Chemical ? 2 : 1, kind, duration, dps, units));
         else
         {
             var old = _hazards[index];
-            _hazards[index] = old with { Dps = old.Dps + dps, RemainingSeconds = MathF.Max(old.RemainingSeconds, duration) + units,
+            _hazards[index] = old with { Dps = kind == DamageKind.Chemical ? old.Dps + dps : Balance.SteamDamagePerSecond,
+                RemainingSeconds = MathF.Max(old.RemainingSeconds, duration) + units,
                 VaporizedUnits = checked(old.VaporizedUnits + units) };
         }
     }
@@ -388,6 +400,8 @@ public sealed class LiquidSystem
     }
     private void Change(Cell cell, LiquidKind kind, int change)
     {
+        if (change == 0) return;
+        Revision++;
         if (!_cells.TryGetValue(cell, out var amounts)) _cells.Add(cell, amounts = new int[3]);
         amounts[(int)kind] += change;
     }

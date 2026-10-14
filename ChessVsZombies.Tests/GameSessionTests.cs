@@ -96,16 +96,16 @@ public class GameSessionTests
     }
 
     [Fact]
-    public void CombatRejectsConstructionAndDoesNotRestartAnActiveWave()
+    public void CombatAllowsTowerInteractionsButRejectsTerrainChangesAndWaveRestart()
     {
         var game = NewSession(new WaveDefinition { Groups = [new() { Count = 1 }] });
         Assert.True(game.Deploy(PieceKind.Pawn, new Cell(2, 16, 2)));
         Assert.True(game.StartLevel());
         int balance = game.Economy.Currency;
-        Assert.False(game.Deploy(PieceKind.Pawn, new Cell(3, 16, 2)));
+        Assert.True(game.Deploy(PieceKind.Pawn, new Cell(3, 16, 2)));
         Assert.False(game.BuildBarrier(new Cell(12, 16, 12)));
         Assert.False(game.Dig(new Cell(3, 15, 3)));
-        Assert.False(game.Remove(new Cell(2, 16, 2)));
+        Assert.True(game.Remove(new Cell(2, 16, 2)));
         Assert.False(game.StartLevel());
         Assert.Equal(balance, game.Economy.Currency);
         Assert.Single(game.Waves);

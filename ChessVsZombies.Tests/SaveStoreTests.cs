@@ -134,7 +134,7 @@ public class SaveStoreTests
             Assert.True(game.Deploy(PieceKind.Pawn, new Cell(11, 16, 12)));
             SaveStore.Save(game, path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-            document["Version"] = 5;
+            SetCheckpointVersion(document, 5);
             document.AsObject().Remove("TerrainPlacements");
             document["Turrets"]![0]!["Cell"]!["X"] = 12;
             string invalid = document.ToJsonString();
@@ -153,7 +153,7 @@ public class SaveStoreTests
         {
             SaveStore.Save(new GameSession(), path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-            document["Version"] = 1;
+            SetCheckpointVersion(document, 1);
             RemoveLiquidFields(document);
             document.AsObject().Remove("Inventory");
             document.AsObject().Remove("DamagedTerrain");
@@ -203,7 +203,7 @@ public class SaveStoreTests
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v1.bak"));
             var saved = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-            Assert.Equal(6, saved["Version"]!.GetValue<int>());
+            Assert.Equal(8, saved["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
             Assert.Equal(901, reloaded.Economy.Currency);
@@ -221,7 +221,7 @@ public class SaveStoreTests
             Assert.True(game.Deploy(PieceKind.Pawn, new Cell(11, 16, 12)));
             SaveStore.Save(game, path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-            document["Version"] = 1;
+            SetCheckpointVersion(document, 1);
             RemoveLiquidFields(document);
             document.AsObject().Remove("Inventory");
             document.AsObject().Remove("DamagedTerrain");
@@ -249,7 +249,7 @@ public class SaveStoreTests
         {
             SaveStore.Save(new GameSession(), path);
             var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-            document["Version"] = version;
+            SetCheckpointVersion(document, version);
             RemoveLiquidFields(document);
             document.AsObject().Remove("Inventory");
             document.AsObject().Remove("DamagedTerrain");
@@ -368,7 +368,7 @@ public class SaveStoreTests
             var stone = new Cell(8, 11, 8);
             SaveStore.Save(new GameSession(), path);
             var document = JsonNode.Parse(File.ReadAllText(path))!;
-            document["Version"] = 3;
+            SetCheckpointVersion(document, 3);
             RemoveLiquidFields(document);
             document.AsObject().Remove("DamagedTerrain");
             document["Inventory"]!["DirtCount"] = 7;
@@ -397,7 +397,7 @@ public class SaveStoreTests
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v3.bak"));
             var upgraded = JsonNode.Parse(File.ReadAllText(path))!;
-            Assert.Equal(6, upgraded["Version"]!.GetValue<int>());
+            Assert.Equal(8, upgraded["Version"]!.GetValue<int>());
             Assert.Empty(upgraded["DamagedTerrain"]!.AsArray());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
@@ -417,7 +417,7 @@ public class SaveStoreTests
         {
             SaveStore.Save(new GameSession(), path);
             var document = JsonNode.Parse(File.ReadAllText(path))!;
-            document["Version"] = 4;
+            SetCheckpointVersion(document, 4);
             RemoveLiquidFields(document);
             document["Inventory"]!["DirtCount"] = 7;
             document["Inventory"]!["StoneCount"] = 3;
@@ -445,7 +445,7 @@ public class SaveStoreTests
 
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v4.bak"));
-            Assert.Equal(6, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
             Assert.Equal(7, reloaded.Inventory.DirtCount);
@@ -493,6 +493,141 @@ public class SaveStoreTests
             var moved = Assert.Single(restored.ExportState().TerrainPlacements!);
             Assert.Equal(landing, moved.Cell);
             Assert.Equal(Material.Dirt, moved.Material);
+        });
+    }
+
+    [Theory]
+    [InlineData(Material.Dirt, 100)]
+    [InlineData(Material.Wood, 250)]
+    [InlineData(Material.Stone, 500)]
+    [InlineData(Material.Copper, 1000)]
+    [InlineData(Material.Iron, 2000)]
+    [InlineData(Material.Gold, 3000)]
+    [InlineData(Material.Diamond, 5000)]
+    [InlineData(Material.Osmium, 8000)]
+    public void ZombieBridgeTerrainOutsidePlayerBuildingBoundsPreservesDamageAndExcavationOnReload(Material material, int maxHp)
+    {
+        WithSavePath(path =>
+        {
+            var game = new GameSession();
+            SaveStore.Save(game, path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            var bridge = new[] { new Cell(0, 16, 8), new Cell(1, 16, 8), new Cell(2, 16, 8) };
+            var gap = new[] { new Cell(1, 15, 8), new Cell(2, 15, 8) };
+            document["Excavated"] = new JsonArray(gap.Select(cell => (JsonNode)SavedCell(cell)).ToArray());
+            document["TerrainPlacements"] = new JsonArray(bridge.Select(cell => (JsonNode)new JsonObject
+            {
+                ["Cell"] = SavedCell(cell), ["Material"] = material.ToString()
+            }).ToArray());
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(bridge[1], 37));
+            File.WriteAllText(path, document.ToJsonString());
+
+            Assert.False(WorldGrid.IsFortificationZone(bridge[0]));
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+            SaveStore.Save(restored, path);
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.NotNull(reloaded);
+
+            foreach (var cell in bridge)
+                Assert.Equal(material, reloaded.World.GetNaturalMaterial(cell));
+            foreach (var cell in gap) Assert.Equal(Material.Air, reloaded.World.GetNaturalMaterial(cell));
+            Assert.Equal(37, reloaded.World.GetTerrainHp(bridge[1]));
+            Assert.True(Balance.IsTerrainMaterial(material));
+            Assert.Equal(maxHp, Balance.BlockHp(material));
+            Assert.Equal(maxHp, reloaded.World.GetTerrainHp(bridge[0]));
+            Assert.Equal(bridge.OrderBy(cell => cell.X), reloaded.ExportState().TerrainPlacements!.Select(placement => placement.Cell).OrderBy(cell => cell.X));
+            Assert.Equal(Balance.StartingCurrency, reloaded.Economy.Currency);
+            Assert.Equal(0, reloaded.Inventory.DirtCount);
+            Assert.Equal(0, reloaded.Inventory.StoneCount);
+        });
+    }
+
+    [Theory]
+    [InlineData(GearTier.Wood, Material.Wood)]
+    [InlineData(GearTier.Stone, Material.Stone)]
+    [InlineData(GearTier.Copper, Material.Copper)]
+    [InlineData(GearTier.Iron, Material.Iron)]
+    [InlineData(GearTier.Gold, Material.Gold)]
+    [InlineData(GearTier.Diamond, Material.Diamond)]
+    [InlineData(GearTier.Osmium, Material.Osmium)]
+    public void EveryZombieStartsWithOneBlockMatchingItsOriginalEquipment(GearTier tier, Material equippedMaterial)
+    {
+        foreach (var kind in Enum.GetValues<ZombieKind>())
+        {
+            var zombie = new Zombie { Kind = kind, Tier = tier };
+            var expected = kind == ZombieKind.Basic ? Material.Dirt : equippedMaterial;
+            Assert.Equal(1, zombie.CarriedBlocks);
+            Assert.Equal(expected, zombie.CarriedBlockMaterial);
+            zombie.Hp = Balance.ZombieHp;
+            Assert.Empty(zombie.ArmorPieces);
+            Assert.Equal(expected, zombie.CarriedBlockMaterial);
+        }
+    }
+
+    [Theory]
+    [InlineData(Material.Wood)]
+    [InlineData(Material.Copper)]
+    [InlineData(Material.Iron)]
+    [InlineData(Material.Gold)]
+    [InlineData(Material.Diamond)]
+    [InlineData(Material.Osmium)]
+    public void UnsupportedGearMaterialBridgeFallsWithItsDamageAndPersists(Material material)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            var origin = new Cell(8, 17, 8);
+            var landing = new Cell(8, 16, 8);
+            var hp = Balance.BlockHp(material) - 17;
+            document["TerrainPlacements"] = new JsonArray(new JsonObject
+            {
+                ["Cell"] = SavedCell(origin), ["Material"] = material.ToString()
+            });
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(origin, hp));
+            File.WriteAllText(path, document.ToJsonString());
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.NotNull(restored);
+
+            restored.Update(.05f);
+
+            Assert.Equal(Material.Air, restored.World.GetNaturalMaterial(origin));
+            Assert.Equal(material, restored.World.GetNaturalMaterial(landing));
+            Assert.Equal(hp, restored.World.GetTerrainHp(landing));
+            Assert.False(restored.Dig(landing));
+            SaveStore.Save(restored, path);
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.NotNull(reloaded);
+            Assert.Equal(material, reloaded.World.GetNaturalMaterial(landing));
+            Assert.Equal(hp, reloaded.World.GetTerrainHp(landing));
+            Assert.Equal(0, reloaded.Inventory.GetCount(material));
+        });
+    }
+
+    [Theory]
+    [InlineData(6, Material.Wood, 100)]
+    [InlineData(6, Material.Osmium, 100)]
+    [InlineData(7, Material.Wood, 251)]
+    [InlineData(7, Material.Copper, 1001)]
+    [InlineData(7, Material.Iron, 2001)]
+    [InlineData(7, Material.Gold, 3001)]
+    [InlineData(7, Material.Diamond, 5001)]
+    [InlineData(7, Material.Osmium, 8001)]
+    public void GearMaterialTerrainRejectsLegacyVersionsAndExcessDurability(int version, Material material, int hp)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            if (version < 8) SetCheckpointVersion(document, version);
+            var cell = new Cell(8, 16, 8);
+            document["TerrainPlacements"] = new JsonArray(new JsonObject
+            {
+                ["Cell"] = SavedCell(cell), ["Material"] = material.ToString()
+            });
+            document["DamagedTerrain"] = new JsonArray(TerrainDamage(cell, hp));
+            AssertRejectedWithoutRewrite(path, document);
         });
     }
 
@@ -585,16 +720,19 @@ public class SaveStoreTests
         });
     }
 
-    [Fact]
-    public void VersionFiveMigrationPreservesExistingStateAndBacksUpItsOriginalFile()
+    [Theory]
+    [InlineData(5)]
+    [InlineData(6)]
+    public void LegacyLiquidMigrationPreservesExistingStateAndBacksUpItsOriginalFile(int version)
     {
         WithSavePath(path =>
         {
             SaveStore.Save(new GameSession(), path);
             var document = JsonNode.Parse(File.ReadAllText(path))!;
             SetFluidFixture(document);
-            document["Version"] = 5;
-            document.AsObject().Remove("TerrainPlacements");
+            SetCheckpointVersion(document, version);
+            if (version < 6) document.AsObject().Remove("TerrainPlacements");
+            document["Liquids"]!["Obsidian"]![0]!["Hp"] = 75;
             document["Inventory"]!["DirtCount"] = 7;
             document["DamagedTerrain"] = new JsonArray(TerrainDamage(new Cell(8, 15, 8), 73));
             string legacy = document.ToJsonString();
@@ -603,21 +741,77 @@ public class SaveStoreTests
             Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
             Assert.NotNull(restored);
             Assert.Equal(legacy, File.ReadAllText(path));
-            Assert.False(File.Exists(path + ".v5.bak"));
+            Assert.False(File.Exists(path + $".v{version}.bak"));
             Assert.Empty(restored.ExportState().TerrainPlacements!);
             Assert.Equal(7, restored.Inventory.DirtCount);
             Assert.Equal(73, restored.World.GetTerrainHp(new Cell(8, 15, 8)));
+            Assert.Equal(7.5f, Assert.Single(restored.World.ObsidianCells).Hp);
             string liquids = System.Text.Json.JsonSerializer.Serialize(restored.Liquids.ExportState());
             SaveStore.Save(restored, path);
 
-            Assert.Equal(legacy, File.ReadAllText(path + ".v5.bak"));
-            Assert.Equal(6, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(legacy, File.ReadAllText(path + $".v{version}.bak"));
+            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
             Assert.Equal(7, reloaded.Inventory.DirtCount);
             Assert.Equal(73, reloaded.World.GetTerrainHp(new Cell(8, 15, 8)));
             Assert.Equal(liquids, System.Text.Json.JsonSerializer.Serialize(reloaded.Liquids.ExportState()));
             Assert.Equal(restored.LiquidInventory.OrderBy(pair => pair.Key), reloaded.LiquidInventory.OrderBy(pair => pair.Key));
+        });
+    }
+
+    [Theory]
+    [InlineData(5, 1, 50f, 5f)]
+    [InlineData(5, 2, 10f, 1f)]
+    [InlineData(5, 10, 500f, 50f)]
+    [InlineData(6, 1, 25f, 2.5f)]
+    [InlineData(6, 2, 100f, 10f)]
+    [InlineData(6, 10, 125f, 12.5f)]
+    public void LegacyObsidianMigrationPreservesDurabilityFractionExactlyOnce(int version, int units, float oldHp, float expectedHp)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            SetFluidFixture(document);
+            SetCheckpointVersion(document, version);
+            if (version < 6) document.AsObject().Remove("TerrainPlacements");
+            document["Liquids"]!["Cells"]![1]!["Mercury"] = 0;
+            document["Liquids"]!["Cells"]![1]!["ObsidianUnits"] = units;
+            document["Liquids"]!["Obsidian"]![0]!["Units"] = units;
+            document["Liquids"]!["Obsidian"]![0]!["Hp"] = oldHp;
+            var original = document.ToJsonString();
+            File.WriteAllText(path, original);
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.Equal(expectedHp, Assert.Single(restored!.World.ObsidianCells).Hp);
+            Assert.Equal(original, File.ReadAllText(path));
+            SaveStore.Save(restored, path);
+            Assert.Equal(original, File.ReadAllText(path + $".v{version}.bak"));
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.Equal(expectedHp, Assert.Single(reloaded!.World.ObsidianCells).Hp);
+        });
+    }
+
+    [Theory]
+    [InlineData(5, 0f)]
+    [InlineData(5, -1f)]
+    [InlineData(5, 100.01f)]
+    [InlineData(6, 100.01f)]
+    [InlineData(7, 10.01f)]
+    [InlineData(7, 75f)]
+    public void ObsidianDurabilityIsValidatedAgainstItsOriginalCheckpointVersion(int version, float hp)
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            SetFluidFixture(document);
+            if (version < 8) SetCheckpointVersion(document, version);
+            if (version < 6) document.AsObject().Remove("TerrainPlacements");
+            document["Liquids"]!["Obsidian"]![0]!["Hp"] = hp;
+            AssertRejectedWithoutRewrite(path, document);
+            Assert.False(File.Exists(path + $".v{version}.bak"));
         });
     }
 
@@ -655,7 +849,7 @@ public class SaveStoreTests
                 case "objective": placement["Cell"] = SavedCell(new Cell(15, 15, 15)); break;
                 case "invalid material": placement["Material"] = "Obsidian"; break;
                 case "missing material": placement.AsObject().Remove("Material"); break;
-                case "legacy placement": document["Version"] = 5; break;
+                case "legacy placement": SetCheckpointVersion(document, 5); break;
             }
             AssertRejectedWithoutRewrite(path, document);
         });
@@ -687,7 +881,7 @@ public class SaveStoreTests
                 case "fractional units": document["LiquidInventory"]!["Water"] = .5; break;
                 case "missing simulation": document.AsObject().Remove("Liquids"); break;
                 case "null simulation": document["Liquids"] = null; break;
-                case "legacy fluid data": document["Version"] = 4; document.AsObject().Remove("TerrainPlacements"); break;
+                case "legacy fluid data": SetCheckpointVersion(document, 4); document.AsObject().Remove("TerrainPlacements"); break;
             }
             AssertRejectedWithoutRewrite(path, document);
         });
@@ -720,7 +914,7 @@ public class SaveStoreTests
             Assert.Equal(new Cell(9, 15, 8), crust.Cell);
             Assert.Equal(2, crust.Units);
             Assert.Equal(CrustFace.West, crust.Face);
-            Assert.Equal(75, crust.Hp);
+            Assert.Equal(7.5f, crust.Hp);
             Assert.Equal(Material.Obsidian, restored.World.GetMaterial(crust.Cell));
             Assert.Equal(0, restored.Inventory.DirtCount);
             Assert.Equal(2, state.Hazards.Count);
@@ -788,7 +982,7 @@ public class SaveStoreTests
                 case "over capacity": first["Water"] = 5; break;
                 case "crust capacity": liquid["Cells"]![1]!["Mercury"] = 9; break;
                 case "crust duplicate": liquid["Obsidian"]!.AsArray().Add(liquid["Obsidian"]![0]!.DeepClone()); break;
-                case "crust HP": liquid["Obsidian"]![0]!["Hp"] = 101; break;
+                case "crust HP": liquid["Obsidian"]![0]!["Hp"] = 10.01f; break;
                 case "crust face": liquid["Obsidian"]![0]!["Face"] = "Invalid"; break;
                 case "cloud radius": liquid["Hazards"]![0]!["Radius"] = 2; break;
                 case "cloud lifetime": liquid["Hazards"]![0]!["RemainingSeconds"] = 0; break;
@@ -864,7 +1058,7 @@ public class SaveStoreTests
                 case "missing HP": document["DamagedTerrain"]![0]!.AsObject().Remove("Hp"); break;
                 case "missing cell": document["DamagedTerrain"]![0]!.AsObject().Remove("Cell"); break;
                 case "null entry": document["DamagedTerrain"] = new JsonArray((JsonNode?)null); break;
-                case "legacy collection": document["Version"] = 3; RemoveLiquidFields(document); break;
+                case "legacy collection": SetCheckpointVersion(document, 3); RemoveLiquidFields(document); break;
                 case "nonfinite HP": document["DamagedTerrain"]![0]!["Hp"] = JsonNode.Parse("1e100"); break;
             }
             AssertRejectedWithoutRewrite(path, document);
@@ -880,6 +1074,17 @@ public class SaveStoreTests
         Assert.True(game.BuyTool(ToolKind.Shovel));
         Assert.True(game.BuyTool(ToolKind.Pickaxe));
         return game;
+    }
+
+    private static void SetCheckpointVersion(JsonNode document, int version)
+    {
+        document["Version"] = version;
+        if (version < 7) document.AsObject().Remove("UpgradeTemplate");
+        if (version < 8)
+        {
+            document["Inventory"]?.AsObject().Remove("AdditionalMaterials");
+            document.AsObject().Remove("PendingBlockDrops");
+        }
     }
 
     private static void RemoveLiquidFields(JsonNode document)
@@ -899,7 +1104,7 @@ public class SaveStoreTests
                 {"Cell":{"X":8,"Y":16,"Z":8},"Water":4,"Mercury":6,"Lava":0,"ObsidianUnits":0,"CrustFace":null},
                 {"Cell":{"X":9,"Y":15,"Z":8},"Water":0,"Mercury":3,"Lava":0,"ObsidianUnits":2,"CrustFace":"West"}
               ],
-              "Obsidian": [{"Cell":{"X":9,"Y":15,"Z":8},"Units":2,"Face":"West","Hp":75}],
+              "Obsidian": [{"Cell":{"X":9,"Y":15,"Z":8},"Units":2,"Face":"West","Hp":7.5}],
               "Hazards": [
                 {"Center":{"X":8,"Y":17,"Z":8},"Radius":1,"Kind":"Thermal","RemainingSeconds":3,"Dps":2,"VaporizedUnits":10},
                 {"Center":{"X":12,"Y":17,"Z":8},"Radius":2,"Kind":"Chemical","RemainingSeconds":6,"Dps":4,"VaporizedUnits":3}
@@ -940,6 +1145,8 @@ public class SaveStoreTests
             File.Delete(path + ".v3.bak");
             File.Delete(path + ".v4.bak");
             File.Delete(path + ".v5.bak");
+            File.Delete(path + ".v6.bak");
+            File.Delete(path + ".v7.bak");
         }
     }
 }

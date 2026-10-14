@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Text.Json.Serialization;
 
 namespace ChessVsZombies.Core;
 
@@ -12,7 +13,7 @@ public readonly record struct Cell(int X, int Y, int Z)
     public override string ToString() => $"{X}, {Y}, {Z}";
 }
 
-public enum Material { Air, Stone, Dirt, Core, Barrier, Obsidian }
+public enum Material { Air, Stone, Dirt, Core, Barrier, Obsidian, Wood, Copper, Iron, Gold, Diamond, Osmium }
 public enum ToolKind { Shovel, Pickaxe }
 public enum PieceKind { Pawn, Knight, Bishop, Rook }
 public enum UpgradeKind { HP, ATK, Orthogonal, PlaneDiagonal, SpaceDiagonal, Jump }
@@ -22,6 +23,7 @@ public enum GamePhase { Building, Combat, Defeat }
 public enum ShotKind { Melee, Pellet, Lob }
 public enum DamageKind { Pierce, Blunt, Chemical, Thermal }
 public enum ArmorSlot { Shield, Chestplate, Helmet }
+public sealed record BlockDrop([property: JsonRequired] Cell Cell, [property: JsonRequired] Material Content);
 
 public static class Balance
 {
@@ -29,19 +31,41 @@ public static class Balance
     public const int TurretHp = 30, BaseAttack = 1, ZombieHp = 10, CoreHp = 200;
     public const int ShovelCost = 100, PickaxeCost = 1000;
     public const int DirtBlockHp = 100, StoneBlockHp = 500;
+    public const int WoodBlockHp = 250, CopperBlockHp = 1000, IronBlockHp = 2000;
+    public const int GoldBlockHp = 3000, DiamondBlockHp = 5000, OsmiumBlockHp = 8000;
     public const int LiquidPurchaseUnits = 10;
     public const float AirSeconds = 10, HeatProtectionSecondsPerPiece = 10;
-    public const float ChemicalDamagePerSecond = 2, LavaDamagePerSecond = 5;
+    public const float ZombieBreathingHeight = .7f;
+    public const float ChemicalDamagePerSecond = 5, LavaDamagePerSecond = 10, SteamDamagePerSecond = 3;
     public const int DuplicatesPerRank = 10;
     public const int HpUpgradePerPoint = 10, AtkUpgradePerPoint = 1;
     // Retained constant names for source compatibility; ranks set caps, never stat bonuses.
     public const int HpUpgradePerRank = HpUpgradePerPoint, AtkUpgradePerRank = AtkUpgradePerPoint;
     public static int PieceCost(PieceKind kind) => kind switch { PieceKind.Pawn => 1, PieceKind.Knight => 2, _ => 4 };
+    public static bool IsTerrainMaterial(Material material) => material is Material.Dirt or Material.Stone or Material.Wood or
+        Material.Copper or Material.Iron or Material.Gold or Material.Diamond or Material.Osmium;
     public static int BlockHp(Material material) => material switch
     {
         Material.Dirt => DirtBlockHp,
         Material.Stone => StoneBlockHp,
-        _ => throw new ArgumentOutOfRangeException(nameof(material), "Only dirt and stone can be reused as defensive blocks.")
+        Material.Wood => WoodBlockHp,
+        Material.Copper => CopperBlockHp,
+        Material.Iron => IronBlockHp,
+        Material.Gold => GoldBlockHp,
+        Material.Diamond => DiamondBlockHp,
+        Material.Osmium => OsmiumBlockHp,
+        _ => throw new ArgumentOutOfRangeException(nameof(material), "Only terrain block materials have block durability.")
+    };
+    public static int BlockSellValue(Material material) => material switch
+    {
+        Material.Wood => 100,
+        Material.Stone => 200,
+        Material.Copper => 300,
+        Material.Iron => 500,
+        Material.Gold => 800,
+        Material.Diamond => 1300,
+        Material.Osmium => 2100,
+        _ => 0
     };
     public static int GearHp(GearTier tier) => new[] { 10, 20, 30, 50, 80, 130, 210 }[(int)tier];
     public static int LiquidCost(LiquidKind kind) => kind switch
@@ -109,6 +133,18 @@ public sealed class Zombie
     public GearTier Tier { get; init; }
     public Vector3 Position { get; set; }
     public Vector3 Facing { get; private set; } = Vector3.UnitZ;
+    public int CarriedBlocks { get; internal set; } = 1;
+    public Material CarriedBlockMaterial => Kind == ZombieKind.Basic ? Material.Dirt : Tier switch
+    {
+        GearTier.Wood => Material.Wood,
+        GearTier.Stone => Material.Stone,
+        GearTier.Copper => Material.Copper,
+        GearTier.Iron => Material.Iron,
+        GearTier.Gold => Material.Gold,
+        GearTier.Diamond => Material.Diamond,
+        GearTier.Osmium => Material.Osmium,
+        _ => throw new ArgumentOutOfRangeException(nameof(Tier))
+    };
     public float BodyHp => _bodyHp;
     public IReadOnlyList<ArmorPiece> ArmorPieces { get { EnsureArmor(); return _armor!; } }
     // Hp remains the complete surviving HP pool for wave accounting and older callers.
@@ -242,27 +278,28 @@ public sealed class Projectile
     public DamageKind DamageKind => Kind == ShotKind.Pellet ? DamageKind.Pierce : DamageKind.Blunt;
     public float Age { get; set; }
     public float Duration { get; init; }
+    public float FlightDuration => Math.Max(.001f, Duration);
     /// <summary>Travel direction at an age on the arc; magnitude is irrelevant to hit coverage.</summary>
     public Vector3 GetTravelDirection(float age)
     {
         var direction = Target - Origin;
         if (Kind == ShotKind.Lob)
         {
-            float t = Math.Clamp(age / Math.Max(.001f, Duration), 0, 1);
+            float t = Math.Max(0, age) / FlightDuration;
             direction.Y += 4 * (1 - 2 * t) * Math.Max(1, Vector3.Distance(Origin, Target) * .4f);
         }
         return direction;
     }
-    public Vector3 Position
+    /// <summary>The launch trajectory continues past its initial aim point without retargeting.</summary>
+    public Vector3 GetPositionAt(float age)
     {
-        get
-        {
-            float t = Math.Clamp(Age / Math.Max(.001f, Duration), 0, 1);
-            var p = Vector3.Lerp(Origin, Target, t);
-            if (Kind == ShotKind.Lob) p.Y += 4 * t * (1 - t) * Math.Max(1, Vector3.Distance(Origin, Target) * .4f);
-            return p;
-        }
+        float t = Math.Max(0, age) / FlightDuration;
+        if (Kind == ShotKind.Melee) t = Math.Min(1, t);
+        var position = Origin + (Target - Origin) * t;
+        if (Kind == ShotKind.Lob) position.Y += 4 * t * (1 - t) * Math.Max(1, Vector3.Distance(Origin, Target) * .4f);
+        return position;
     }
+    public Vector3 Position => GetPositionAt(Age);
 }
 
 public sealed class ZombieGroup

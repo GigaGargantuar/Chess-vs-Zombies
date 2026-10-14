@@ -214,8 +214,8 @@ public class ArmorHitTests
     [InlineData(0, 16)]
     [InlineData(1, 0)]
     [InlineData(2, -16)]
-    [InlineData(3, -16)]
-    public void LobTravelDirectionUsesTheArcDerivativeAtClampedAge(float age, float vertical)
+    [InlineData(3, -32)]
+    public void LobTravelDirectionContinuesPastItsOriginalAimTime(float age, float vertical)
     {
         var projectile = new Projectile { Origin = Vector3.Zero, Target = new Vector3(10, 0, 0), Kind = ShotKind.Lob, Duration = 2 };
 

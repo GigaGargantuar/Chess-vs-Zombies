@@ -31,6 +31,7 @@ public sealed class WorldGrid
     public static bool IsCore(Cell cell) => cell.X is >= 15 and <= 16 && cell.Y is >= 15 and <= 16 && cell.Z is >= 15 and <= 16;
     public static bool IsBuildZone(Cell cell) => cell.X is >= 12 and <= 19 && cell.Y is >= 12 and <= 19 && cell.Z is >= 12 and <= 19;
     public static bool IsTurretZone(Cell cell) => cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30 && !IsBuildZone(cell);
+    public static bool IsFortificationZone(Cell cell) => cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30 && !IsCore(cell);
     public static bool IsSpawnZone(Cell cell) => IsInside(cell) &&
         (cell.X is 0 or 31 || cell.Y is 0 or 31 || cell.Z is 0 or 31);
     public Material GetMaterial(Cell cell) => !IsInside(cell) ? Material.Air :
@@ -50,13 +51,14 @@ public sealed class WorldGrid
                 for (int z = 0; z < Size; z++)
                 {
                     var cell = new Cell(x, y, z);
-                    if (GetMaterial(cell) is Material.Dirt or Material.Stone or Material.Barrier or Material.Obsidian) yield return cell;
+                    var material = GetMaterial(cell);
+                    if (Balance.IsTerrainMaterial(material) || material is Material.Barrier or Material.Obsidian) yield return cell;
                 }
     }
 
     internal bool RestoreTerrainPlacement(Cell cell, Material material)
     {
-        if (!IsInside(cell) || material is not (Material.Dirt or Material.Stone) || GetMaterial(cell) != Material.Air) return false;
+        if (!IsInside(cell) || !Balance.IsTerrainMaterial(material) || GetMaterial(cell) != Material.Air) return false;
         _terrain[cell.X, cell.Y, cell.Z] = material;
         Revision++;
         return true;
@@ -76,7 +78,7 @@ public sealed class WorldGrid
             _obsidian.Remove(from);
             _obsidian.Add(to, crust with { Cell = to });
         }
-        else if (GetNaturalMaterial(from) is Material.Dirt or Material.Stone)
+        else if (Balance.IsTerrainMaterial(GetNaturalMaterial(from)))
         {
             _terrain[to.X, to.Y, to.Z] = _terrain[from.X, from.Y, from.Z];
             _terrain[from.X, from.Y, from.Z] = Material.Air;
@@ -176,13 +178,13 @@ public sealed class WorldGrid
     public float GetTerrainHp(Cell cell)
     {
         var material = GetMaterial(cell);
-        return material is Material.Dirt or Material.Stone ? _terrainHp.GetValueOrDefault(cell, Balance.BlockHp(material)) : 0;
+        return Balance.IsTerrainMaterial(material) ? _terrainHp.GetValueOrDefault(cell, Balance.BlockHp(material)) : 0;
     }
 
     /// <summary>Damages natural terrain; returns true only when a block is destroyed.</summary>
     internal bool DamageTerrain(Cell cell, float damage)
     {
-        if (!float.IsFinite(damage) || damage <= 0 || GetMaterial(cell) is not (Material.Dirt or Material.Stone)) return false;
+        if (!float.IsFinite(damage) || damage <= 0 || !Balance.IsTerrainMaterial(GetMaterial(cell))) return false;
         var remaining = GetTerrainHp(cell) - damage;
         if (remaining <= 0) return Dig(cell);
         _terrainHp[cell] = remaining;
@@ -193,14 +195,14 @@ public sealed class WorldGrid
     internal bool RestoreTerrainHp(Cell cell, float hp)
     {
         var material = GetMaterial(cell);
-        if (material is not (Material.Dirt or Material.Stone) || !float.IsFinite(hp) || hp <= 0 || hp >= Balance.BlockHp(material)) return false;
+        if (!Balance.IsTerrainMaterial(material) || !float.IsFinite(hp) || hp <= 0 || hp >= Balance.BlockHp(material)) return false;
         _terrainHp[cell] = hp;
         return true;
     }
 
     internal bool AddBarrier(Cell cell, Material content = Material.Dirt, float? hp = null)
     {
-        if (content is not (Material.Dirt or Material.Stone) || !IsInside(cell) || GetMaterial(cell) != Material.Air) return false;
+        if (!Balance.IsTerrainMaterial(content) || !IsInside(cell) || GetMaterial(cell) != Material.Air) return false;
         var durability = hp ?? Balance.BlockHp(content);
         if (!float.IsFinite(durability) || durability <= 0 || durability > Balance.BlockHp(content)) return false;
         _barriers.Add(cell, new Barrier { Cell = cell, Content = content, Hp = durability });
@@ -217,7 +219,7 @@ public sealed class WorldGrid
 
     internal bool Dig(Cell cell)
     {
-        if (!IsInside(cell) || GetMaterial(cell) is not (Material.Dirt or Material.Stone)) return false;
+        if (!IsInside(cell) || !Balance.IsTerrainMaterial(GetMaterial(cell))) return false;
         _terrain[cell.X, cell.Y, cell.Z] = Material.Air;
         _terrainHp.Remove(cell);
         Revision++;

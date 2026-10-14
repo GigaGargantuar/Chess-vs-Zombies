@@ -87,7 +87,7 @@ public class LiquidSystemTests
         Assert.Equal(2, crust.Units);
         Assert.Equal(CrustFace.East, crust.Face);
         Assert.Equal(.2f, crust.Max.X - crust.Min.X, 4);
-        Assert.Equal(100, crust.Hp);
+        Assert.Equal(10, crust.Hp);
         Assert.True(world.IsSolidAt(new Vector3(8.9f, 5.5f, 8.5f)));
         Assert.False(world.IsSolidAt(new Vector3(8.5f, 5.5f, 8.5f)));
         Assert.False(world.HasSupport(lava + new Cell(0, 1, 0)));
@@ -100,7 +100,7 @@ public class LiquidSystemTests
         liquids.Update(.4f);
         crust = Assert.Single(world.ObsidianCells);
         Assert.Equal(10, crust.Units);
-        Assert.Equal(500, crust.Hp);
+        Assert.Equal(50, crust.Hp);
         Assert.Equal(0, Total(liquids));
         var cloud = Assert.Single(liquids.Hazards);
         Assert.Equal(5, cloud.VaporizedUnits);
@@ -117,13 +117,21 @@ public class LiquidSystemTests
         var (world, liquids) = Cavity(lava, water);
         Assert.True(liquids.TryAdd(lava, LiquidKind.Lava, 10));
         Assert.True(liquids.TryAdd(water, LiquidKind.Water, 10));
-        liquids.Update(1);
+        liquids.Update(.1f);
+        var firstCloud = Assert.Single(liquids.Hazards);
+        Assert.Equal(5, Assert.Single(world.ObsidianCells).Hp);
+        Assert.Equal(3, firstCloud.Dps);
+        Assert.Equal(1, firstCloud.VaporizedUnits);
+        liquids.Update(.91f);
         Assert.Equal(0, Total(liquids));
         Assert.Equal(10, Assert.Single(world.ObsidianCells).Units);
+        Assert.Equal(50, Assert.Single(world.ObsidianCells).Hp);
         var cloud = Assert.Single(liquids.Hazards);
         Assert.Equal(DamageKind.Thermal, cloud.Kind);
         Assert.Equal(1, cloud.Radius);
         Assert.Equal(10, cloud.VaporizedUnits);
+        Assert.Equal(3, cloud.Dps);
+        Assert.True(cloud.RemainingSeconds > firstCloud.RemainingSeconds);
     }
 
     [Fact]
@@ -213,14 +221,14 @@ public class LiquidSystemTests
         liquids.RestoreState(new LiquidState
         {
             Cells = [new(a, 8, 0, 0, 2, CrustFace.East)],
-            Obsidian = [new(a, 2, CrustFace.East, 100)]
+            Obsidian = [new(a, 2, CrustFace.East, 10)]
         });
         liquids.Update(.2f);
         Assert.Equal(8, liquids.GetUnits(a, LiquidKind.Water));
         Assert.Equal(0, liquids.GetTotalUnits(b));
-        Assert.False(world.DamageObsidian(a, 30));
-        Assert.Equal(70, world.GetObsidian(a)!.Hp);
-        Assert.True(world.DamageObsidian(a, 70));
+        Assert.False(world.DamageObsidian(a, 3));
+        Assert.Equal(7, world.GetObsidian(a)!.Hp);
+        Assert.True(world.DamageObsidian(a, 7));
         liquids.Update(.1f);
         Assert.Equal(4, liquids.GetUnits(a, LiquidKind.Water));
         Assert.Equal(4, liquids.GetUnits(b, LiquidKind.Water));
@@ -235,7 +243,7 @@ public class LiquidSystemTests
         liquids.RestoreState(new LiquidState
         {
             Cells = [new(a, 1, 0, 0, 9, CrustFace.East)],
-            Obsidian = [new(a, 9, CrustFace.East, 450), new(b, 9, CrustFace.West, 450)]
+            Obsidian = [new(a, 9, CrustFace.East, 45), new(b, 9, CrustFace.West, 45)]
         });
         Assert.True(world.BlocksFace(a, b));
         liquids.Update(1);
@@ -248,11 +256,18 @@ public class LiquidSystemTests
     {
         var cell = new Cell(8, 5, 8);
         var (_, liquids) = Cavity(cell);
+        Assert.False(liquids.CanAdd(new Cell(7, 5, 8), LiquidKind.Water, 1));
         Assert.False(liquids.TryAdd(new Cell(7, 5, 8), LiquidKind.Water, 1));
-        liquids.RestoreState(new LiquidState { Obsidian = [new(cell, 2, CrustFace.West, 100)] });
+        liquids.RestoreState(new LiquidState { Obsidian = [new(cell, 2, CrustFace.West, 10)] });
+        Assert.False(liquids.CanAdd(cell, LiquidKind.Water, 9));
         Assert.False(liquids.TryAdd(cell, LiquidKind.Water, 9));
+        Assert.False(liquids.CanAdd(cell, (LiquidKind)100, 1));
+        Assert.False(liquids.CanAdd(cell, LiquidKind.Water, 0));
+        Assert.False(liquids.CanAdd(cell, LiquidKind.Water, -1));
+        Assert.True(liquids.CanAdd(cell, LiquidKind.Water, 8));
         Assert.Equal(0, liquids.GetTotalUnits(cell));
         Assert.True(liquids.TryAdd(cell, LiquidKind.Water, 8));
+        Assert.False(liquids.CanAdd(cell, LiquidKind.Water, 1));
         Assert.False(liquids.TryAdd(cell, LiquidKind.Water, 1));
         Assert.Equal(8, liquids.GetTotalUnits(cell));
     }
@@ -268,9 +283,59 @@ public class LiquidSystemTests
         Assert.Throws<InvalidDataException>(() => liquids.RestoreState(new LiquidState
         {
             Cells = [new(cell, 9, 0, 0, 2, CrustFace.West)],
-            Obsidian = [new(cell, 2, CrustFace.West, 100)]
+            Obsidian = [new(cell, 2, CrustFace.West, 10)]
         }));
         Assert.Empty(world.ObsidianCells);
+        Assert.Equal(before, JsonSerializer.Serialize(liquids.ExportState()));
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(20)]
+    [InlineData(100)]
+    public void RestoringLegacySteamCanonicalizesItsRateWithoutChangingMercuryFumesOrLifetime(float legacySteamDps)
+    {
+        var liquids = new LiquidSystem(new WorldGrid());
+        var state = new LiquidState
+        {
+            Hazards = [new(new Cell(8, 16, 8), 1, DamageKind.Thermal, 17, legacySteamDps, 10),
+                new(new Cell(9, 16, 8), 2, DamageKind.Chemical, 23, 20, 5)]
+        };
+
+        liquids.RestoreState(state);
+
+        var steam = Assert.Single(liquids.Hazards, cloud => cloud.Kind == DamageKind.Thermal);
+        Assert.Equal(3, steam.Dps);
+        Assert.Equal(17, steam.RemainingSeconds);
+        Assert.Equal(10, steam.VaporizedUnits);
+        var mercury = Assert.Single(liquids.Hazards, cloud => cloud.Kind == DamageKind.Chemical);
+        Assert.Equal(20, mercury.Dps);
+        Assert.Equal(23, mercury.RemainingSeconds);
+        Assert.Equal(5, mercury.VaporizedUnits);
+        Assert.Equal(legacySteamDps, state.Hazards[0].Dps); // Restoring does not mutate the parsed checkpoint.
+
+        var serialized = JsonSerializer.Serialize(liquids.ExportState());
+        var restored = new LiquidSystem(new WorldGrid());
+        restored.RestoreState(JsonSerializer.Deserialize<LiquidState>(serialized)!);
+        Assert.Equal(serialized, JsonSerializer.Serialize(restored.ExportState()));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    public void LegacySteamNormalizationDoesNotAcceptInvalidSavedDamageRates(float invalidDps)
+    {
+        var liquids = new LiquidSystem(new WorldGrid());
+        Assert.True(liquids.TryAdd(new Cell(8, 16, 8), LiquidKind.Water, 3));
+        var before = JsonSerializer.Serialize(liquids.ExportState());
+
+        Assert.Throws<InvalidDataException>(() => liquids.RestoreState(new LiquidState
+        {
+            Hazards = [new(new Cell(8, 16, 8), 1, DamageKind.Thermal, 17, invalidDps, 10)]
+        }));
+
         Assert.Equal(before, JsonSerializer.Serialize(liquids.ExportState()));
     }
 

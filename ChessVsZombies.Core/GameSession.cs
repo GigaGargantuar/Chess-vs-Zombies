@@ -3,7 +3,7 @@ using System.Numerics;
 namespace ChessVsZombies.Core;
 
 /// <summary>Rendering-independent building, wave scheduling, navigation, and combat.</summary>
-public sealed class GameSession
+public sealed partial class GameSession
 {
     private static readonly Cell[] Horizontal = [new(1, 0, 0), new(-1, 0, 0), new(0, 0, 1), new(0, 0, -1)];
     private static readonly Cell[] Adjacent = [new(1, 0, 0), new(-1, 0, 0), new(0, 1, 0), new(0, -1, 0), new(0, 0, 1), new(0, 0, -1)];
@@ -19,8 +19,12 @@ public sealed class GameSession
     private readonly Dictionary<Cell, Cell>[] _routes = [[], [], [], []];
     private readonly Dictionary<Cell, Turret> _turretsByCell = [];
     private readonly Dictionary<int, Cell> _stepOrigins = [];
+    private readonly Dictionary<int, float> _jumpHeights = [];
     private readonly Dictionary<int, Vector3> _liquidDestinations = [];
     private readonly Dictionary<int, Vector3> _liquidOrigins = [];
+    private readonly Dictionary<(Vector3 Position, bool SinksInLava, bool SinksInMercury), Vector3?> _buoyantSteps = [];
+    private long _buoyantLiquidRevision = -1;
+    private int _buoyantWorldRevision = -1, _buoyantTopologyRevision = -1;
     private readonly Dictionary<LiquidKind, int> _liquidInventory = Enum.GetValues<LiquidKind>().ToDictionary(kind => kind, _ => 0);
     private List<Cell> _spawnCells = [];
 
@@ -29,6 +33,9 @@ public sealed class GameSession
     public IReadOnlyDictionary<LiquidKind, int> LiquidInventory => _liquidInventory;
     public Economy Economy { get; }
     public BlockInventory Inventory { get; } = new();
+    public FallAnimations Falls { get; } = new();
+    public CombatFeedback Feedback { get; } = new();
+    public UpgradeTemplate UpgradeTemplate { get; private set; } = new();
     public List<Turret> Turrets { get; } = [];
     public List<Zombie> Zombies { get; } = [];
     public List<Projectile> Projectiles { get; } = [];
@@ -37,8 +44,11 @@ public sealed class GameSession
     public int LevelNumber { get; private set; } = 1;
     public LevelDefinition Level { get; private set; }
     public GamePhase Phase { get; private set; } = GamePhase.Building;
+    public bool CanInteractWithTowers => Phase is GamePhase.Building or GamePhase.Combat;
     public string Message { get; private set; } = "Build defenses, collect upgrades, then start the level.";
     public string MigrationNotice { get; internal set; } = string.Empty;
+    /// <summary>Completed buoyant path searches, useful for profiling repeated decision work.</summary>
+    public long BuoyantRouteSearchCount { get; private set; }
 
     public GameSession(int seed = 12345, LevelCatalog? levels = null)
     {
@@ -57,15 +67,25 @@ public sealed class GameSession
         foreach (var kind in Enum.GetValues<LiquidKind>()) _liquidInventory[kind] = 0;
         Economy.Reset();
         Inventory.Reset();
+        Feedback.Reset();
+        UpgradeTemplate = new UpgradeTemplate();
         Turrets.Clear();
         Zombies.Clear();
         Projectiles.Clear();
         Waves.Clear();
         _turretsByCell.Clear();
         _stepOrigins.Clear();
+        _jumpHeights.Clear();
         _liquidDestinations.Clear();
         _liquidOrigins.Clear();
+        _buoyantSteps.Clear();
+        _buoyantLiquidRevision = -1;
+        _buoyantWorldRevision = -1;
+        _buoyantTopologyRevision = -1;
+        BuoyantRouteSearchCount = 0;
+        Falls.Clear();
         _spawnCells.Clear();
+        ResetBridges();
         _random = new Random(_seed);
         _nextId = 1;
         _topologyRevision++;
@@ -82,9 +102,20 @@ public sealed class GameSession
     public bool HasTowerSupport(Cell cell) => WorldGrid.IsInside(cell) && cell.Y > 0 &&
         (World.GetMaterial(cell + new Cell(0, -1, 0)) != Material.Air || TrySelectTurret(cell + new Cell(0, -1, 0)) != null);
 
+    public bool IsOccupiedByZombie(Cell cell)
+    {
+        var min = new Vector3(cell.X, cell.Y, cell.Z);
+        var max = min + Vector3.One;
+        var halfBody = new Vector3(.2f, .39f, .2f);
+        return Zombies.Any(zombie => zombie.Hp > 0 &&
+            zombie.Position.X + halfBody.X > min.X && zombie.Position.X - halfBody.X < max.X &&
+            zombie.Position.Y + halfBody.Y > min.Y && zombie.Position.Y - halfBody.Y < max.Y &&
+            zombie.Position.Z + halfBody.Z > min.Z && zombie.Position.Z - halfBody.Z < max.Z);
+    }
+
     public bool ApplyUpgradeTemplate(Cell cell, UpgradeTemplate template)
     {
-        if (!CanBuild()) return false;
+        if (!CanUseTowers()) return false;
         var turret = TrySelectTurret(cell);
         if (turret == null) return Reject("Aim at a living deployed piece to apply the upgrade template.");
         if (!Economy.TryApplyTemplate(turret, template, out var error)) return Reject(error);
@@ -108,15 +139,11 @@ public sealed class GameSession
             LevelNumber = LevelNumber,
             CoreHp = CoreHp,
             Economy = Economy.ExportState(),
-            Inventory = new BlockInventoryState
-            {
-                DirtCount = Inventory.DirtCount,
-                StoneCount = Inventory.StoneCount,
-                HasShovel = Inventory.HasShovel,
-                HasPickaxe = Inventory.HasPickaxe
-            },
+            UpgradeTemplate = SavedUpgradeTemplate.FromTemplate(UpgradeTemplate),
+            Inventory = Inventory.ExportState(),
+            PendingBlockDrops = _pendingBlockDrops.ToList(),
             Excavated = excavated,
-            TerrainPlacements = World.MovableBlocks().Where(cell => World.GetNaturalMaterial(cell) is Material.Dirt or Material.Stone &&
+            TerrainPlacements = World.MovableBlocks().Where(cell => Balance.IsTerrainMaterial(World.GetNaturalMaterial(cell)) &&
                 World.GetNaturalMaterial(cell) != WorldGrid.InitialMaterial(cell))
                 .Select(cell => new SavedTerrainPlacement { Cell = cell, Material = World.GetNaturalMaterial(cell) }).ToList(),
             DamagedTerrain = World.DamagedTerrain.Select(pair => new SavedTerrainDamage { Cell = pair.Key, Hp = pair.Value }).ToList(),
@@ -139,8 +166,10 @@ public sealed class GameSession
     {
         Reset();
         Economy.ImportState(state.Economy);
+        UpgradeTemplate = state.UpgradeTemplate!.ToTemplate();
         var inventory = state.Inventory!;
-        Inventory.Restore(inventory.DirtCount, inventory.StoneCount, inventory.HasShovel, inventory.HasPickaxe);
+        Inventory.Restore(inventory);
+        _pendingBlockDrops.AddRange(state.PendingBlockDrops!);
         LevelNumber = state.LevelNumber;
         Level = _levels.Get(LevelNumber);
         CoreHp = state.CoreHp;
@@ -165,10 +194,11 @@ public sealed class GameSession
 
     public bool Deploy(PieceKind kind, Cell cell)
     {
-        if (!CanBuild()) return false;
+        if (!CanUseTowers()) return false;
         if (!Enum.IsDefined(kind)) return Reject("Choose a valid piece.");
         if (!WorldGrid.IsTurretZone(cell)) return Reject("Pieces belong inside the 30-cube zone, outside the entire 8-cube block enclosure.");
         if (!IsEmpty(cell)) return Reject("That cell is occupied.");
+        if (IsOccupiedByZombie(cell)) return Reject("A zombie is occupying that cell.");
         if (!HasTowerSupport(cell)) return Reject("Pieces need a solid block or another living tower directly below them.");
         if (!Economy.TrySpend(Balance.PieceCost(kind))) return Reject(Economy.LastMessage);
         Turrets.Add(new Turret { Id = _nextId++, Kind = kind, Cell = cell });
@@ -185,6 +215,18 @@ public sealed class GameSession
         return true;
     }
 
+    public bool SellBlock(Material material)
+    {
+        if (!CanBuild()) return false;
+        int price = Balance.BlockSellValue(material);
+        if (price <= 0) return Reject("Choose a recovered wood, stone, or metal/gem block to sell.");
+        if (Economy.Currency > int.MaxValue - price) return Reject("The wallet cannot hold the full sale value.");
+        if (!Inventory.TrySpend(material)) return Reject($"No {material.ToString().ToLowerInvariant()} blocks available to sell.");
+        Economy.Credit(price);
+        Message = $"Sold 1 {material.ToString().ToLowerInvariant()} block for {price} currency.";
+        return true;
+    }
+
     public bool BuyLiquid(LiquidKind kind)
     {
         if (!CanBuild()) return false;
@@ -195,6 +237,11 @@ public sealed class GameSession
         Message = $"Purchased {Balance.LiquidPurchaseUnits} units of {kind.ToString().ToLowerInvariant()}.";
         return true;
     }
+
+    public bool CanPourLiquid(Cell cell, LiquidKind kind, int units = Balance.LiquidPurchaseUnits) =>
+        Phase == GamePhase.Building && Enum.IsDefined(kind) && units > 0 && WorldGrid.IsInside(cell) &&
+        !WorldGrid.IsCore(cell) && TrySelectTurret(cell) == null && _liquidInventory.GetValueOrDefault(kind) >= units &&
+        Liquids.CanAdd(cell, kind, units);
 
     public bool PourLiquid(Cell cell, LiquidKind kind, int units = Balance.LiquidPurchaseUnits)
     {
@@ -212,8 +259,8 @@ public sealed class GameSession
     public bool BuildBarrier(Cell cell, Material material = Material.Dirt)
     {
         if (!CanBuild()) return false;
-        if (material is not (Material.Dirt or Material.Stone)) return Reject("Choose a dirt or stone block from inventory.");
-        if (!WorldGrid.IsBuildZone(cell) || WorldGrid.IsCore(cell)) return Reject("Blocks belong inside the centered 8 x 8 x 8 core enclosure.");
+        if (!Balance.IsTerrainMaterial(material)) return Reject("Choose a terrain material from inventory.");
+        if (!WorldGrid.IsFortificationZone(cell)) return Reject("Blocks can be built in the core enclosure and turret area, outside the core and spawn shell.");
         if (!IsEmpty(cell)) return Reject("That cell is occupied.");
         if (!World.HasOrthogonalBlockSupport(cell)) return Reject("Blocks need a supporting block on one of their six faces.");
         if (!Inventory.TrySpend(material)) return Reject($"No {material.ToString().ToLowerInvariant()} blocks available. Excavate some first.");
@@ -230,7 +277,7 @@ public sealed class GameSession
     {
         if (!CanBuild()) return false;
         var material = World.GetMaterial(cell);
-        if (material is not (Material.Dirt or Material.Stone)) return Reject("Choose a dirt or stone block to excavate.");
+        if (!Balance.IsTerrainMaterial(material)) return Reject("Choose a material block to excavate.");
         if (!Inventory.CanExcavate(material, out var error)) return Reject(error);
         if (!Inventory.Add(material)) return Reject("Block inventory is full.");
         if (!World.Dig(cell))
@@ -245,10 +292,10 @@ public sealed class GameSession
 
     public bool Remove(Cell cell)
     {
-        if (!CanBuild()) return false;
         var turret = TrySelectTurret(cell);
         if (turret != null)
         {
+            if (!CanUseTowers()) return false;
             Turrets.Remove(turret);
             Economy.Credit(Balance.PieceCost(turret.Kind));
             _topologyRevision++;
@@ -256,6 +303,7 @@ public sealed class GameSession
             Message = $"Recovered {Balance.PieceCost(turret.Kind)} currency. Equipped components were consumed.";
             return true;
         }
+        if (!CanBuild()) return false;
         var barrier = World.GetBarrier(cell);
         if (barrier == null) return Reject("Choose a placed piece or defensive block to remove.");
         if (!Inventory.Add(barrier.Content)) return Reject("Block inventory is full.");
@@ -270,9 +318,7 @@ public sealed class GameSession
         if (Phase != GamePhase.Building) return Reject("The current level is already running.");
         LevelCatalog.Validate(Level);
         RebuildNavigation();
-        _spawnCells = FindSpawnCells();
-        _spawnCells.RemoveAll(cell => !_routes.Any(route => route.ContainsKey(cell)));
-        if (_spawnCells.Count == 0) return Reject("The outer spawn shell needs a supported route to the core. Zombies can climb one tile and breach terrain.");
+        RefreshSpawnCells();
         Waves.Clear();
         for (var i = 0; i < Level.Waves.Count; i++)
         {
@@ -285,7 +331,6 @@ public sealed class GameSession
                 Started = i == 0
             });
         }
-        Projectiles.Clear();
         Phase = GamePhase.Combat;
         Message = $"Level {LevelNumber}: {Level.Name}. Defend the core!";
         return true;
@@ -293,16 +338,26 @@ public sealed class GameSession
 
     public void Update(float deltaSeconds)
     {
-        if (Phase == GamePhase.Defeat || !float.IsFinite(deltaSeconds) || deltaSeconds <= 0) return;
+        if (!float.IsFinite(deltaSeconds) || deltaSeconds <= 0) return;
+        if (Phase == GamePhase.Defeat) { Feedback.Update(deltaSeconds); Falls.Update(deltaSeconds, World, Turrets); return; }
         // Substeps preserve collision and wave boundaries after a slow rendered frame.
         while (deltaSeconds > 0 && Phase != GamePhase.Defeat)
         {
             var step = Math.Min(deltaSeconds, .05f);
+            Feedback.Update(step);
+            Falls.Update(step, World, Turrets);
             SettleDefenses();
+            ResolveBlockDrops();
             Liquids.Update(step, cell => TrySelectTurret(cell) != null);
             SettleDefenses();
             if (Phase == GamePhase.Combat) Step(step);
+            else UpdateProjectiles(step);
             deltaSeconds -= step;
+        }
+        if (deltaSeconds > 0)
+        {
+            Feedback.Update(deltaSeconds);
+            Falls.Update(deltaSeconds, World, Turrets);
         }
     }
 
@@ -320,13 +375,18 @@ public sealed class GameSession
     {
         if (damage <= 0 || zombie.Hp <= 0) return;
         var before = zombie.Hp;
+        var bodyBefore = zombie.BodyHp;
+        var armorBefore = zombie.ArmorPieces.Sum(piece => piece.Hp);
         var sankInLava = zombie.SinksIn(LiquidKind.Lava);
         var sankInMercury = zombie.SinksIn(LiquidKind.Mercury);
         zombie.ApplyDamage(damage, kind, shot, incomingDirection);
+        var durabilityLost = (bodyBefore - zombie.BodyHp) + (armorBefore - zombie.ArmorPieces.Sum(piece => piece.Hp));
+        Feedback.Record(zombie.Id, zombie.Position, durabilityLost, kind);
         if (zombie.Hp > 0 && (sankInLava != zombie.SinksIn(LiquidKind.Lava) || sankInMercury != zombie.SinksIn(LiquidKind.Mercury)))
             ClearZombieMovement(zombie);
         // Body death discards any remaining armor from the wave's live HP pool.
         var actual = before - zombie.Hp;
+        if (zombie.Hp <= 0) QueueDeathBlock(zombie);
         if (zombie.WaveIndex >= 0 && zombie.WaveIndex < Waves.Count)
         {
             var wave = Waves[zombie.WaveIndex];
@@ -374,11 +434,15 @@ public sealed class GameSession
         foreach (var zombie in Zombies)
             if (zombie.Hp <= 0)
             {
+                QueueDeathBlock(zombie);
+                Falls.CancelZombie(zombie);
                 _stepOrigins.Remove(zombie.Id);
+                _jumpHeights.Remove(zombie.Id);
                 _liquidDestinations.Remove(zombie.Id);
                 _liquidOrigins.Remove(zombie.Id);
             }
         Zombies.RemoveAll(zombie => zombie.Hp <= 0);
+        ResolveBlockDrops();
 
         if (CoreHp <= 0)
         {
@@ -394,15 +458,16 @@ public sealed class GameSession
             LevelNumber++;
             Level = _levels.Get(LevelNumber);
             Phase = GamePhase.Building;
-            Projectiles.Clear();
             Message = $"Level complete! {reward} currency from surviving pieces. Prepare level {LevelNumber}.";
         }
     }
 
     private bool Spawn(WaveState wave)
     {
+        if (_spawnWorldRevision != World.Revision || _spawnTopologyRevision != _topologyRevision || _spawnLiquidRevision != Liquids.Revision)
+            RefreshSpawnCells();
         var group = WaveSpawnPlanner.SelectGroup(Level.Waves[wave.Index], wave.Spawned);
-        var available = _spawnCells.Where(cell => World.GetMaterial(cell) == Material.Air && TrySelectTurret(cell) == null && World.HasSupport(cell)).ToArray();
+        var available = _spawnCells.Where(cell => IsEmpty(cell) && World.HasSupport(cell) && IsBodyClear(cell.Center)).ToArray();
         if (available.Length == 0) return false;
         var cell = available[_random.Next(available.Length)];
         var hp = LevelCatalog.ZombieMaxHp(group.Kind, group.Tier);
@@ -478,80 +543,78 @@ public sealed class GameSession
         }
     }
 
-    private void UpdateProjectiles(float dt)
-    {
-        for (var i = Projectiles.Count - 1; i >= 0; i--)
-        {
-            var projectile = Projectiles[i];
-            var startAge = projectile.Age;
-            var start = projectile.Position;
-            projectile.Age += dt;
-            var end = projectile.Position;
-            if (projectile.Kind == ShotKind.Melee)
-            {
-                if (projectile.Age >= projectile.Duration) Projectiles.RemoveAt(i);
-                continue;
-            }
-            // Sample the swept segment, including the arc, rather than testing only its endpoint.
-            var steps = Math.Max(1, (int)MathF.Ceiling(Vector3.Distance(start, end) / .12f));
-            var stopped = false;
-            for (var sample = 1; sample <= steps && !stopped; sample++)
-            {
-                var position = Vector3.Lerp(start, end, sample / (float)steps);
-                var cell = ToCell(position);
-                if (!WorldGrid.IsInside(cell) || IsShotObstacle(position))
-                {
-                    stopped = true;
-                    break;
-                }
-                foreach (var zombie in Zombies)
-                    if (zombie.Hp > 0 && Vector3.DistanceSquared(position, zombie.Position) <= .25f)
-                    {
-                        var hitAge = startAge + (Math.Min(projectile.Age, projectile.Duration) - startAge) * sample / steps;
-                        DamageZombie(zombie, projectile.Damage, projectile.DamageKind, projectile.Kind, projectile.GetTravelDirection(hitAge));
-                        stopped = true;
-                        break;
-                    }
-            }
-            if (stopped || projectile.Age >= projectile.Duration) Projectiles.RemoveAt(i);
-        }
-    }
-
     private void UpdateZombie(Zombie zombie, float dt)
     {
         // Another zombie may have destroyed a support or obstruction earlier in
         // this same simulation slice. Do not select a new step from that old field.
         if (_navigationRevision != _topologyRevision || _navigationWorldRevision != World.Revision) RebuildNavigation();
         zombie.Cooldown = Math.Max(0, zombie.Cooldown - dt);
-        if (UpdateBuoyancy(zombie, dt)) return;
+        if (TryFindBodyObstacle(zombie.Position, zombie.Position, out var enclosingSolid))
+        {
+            // A reaction can grow a thin crust through a living body. Break that
+            // actual obstruction at the usual attack cadence before moving again.
+            ClearZombieMovement(zombie);
+            AttackObstacle(zombie, enclosingSolid);
+            return;
+        }
+        if (UpdateBuoyancy(zombie, dt))
+        {
+            Falls.CancelZombie(zombie);
+            return;
+        }
         if (zombie.NextCell is { } movingTo)
         {
             if (!_stepOrigins.TryGetValue(zombie.Id, out var movingFrom))
                 _stepOrigins[zombie.Id] = movingFrom = zombie.Cell;
-            var intermediate = StepClearance(movingFrom, movingTo);
-            if (!IsValidStep(movingFrom, movingTo) || !HasZombieSupport(movingFrom) || !HasZombieSupport(movingTo) || IsZombieObstacle(movingTo) ||
-                (intermediate.HasValue && IsZombieObstacle(intermediate.Value)))
+            if (IsJumpStep(movingFrom, movingTo))
             {
+                if (_jumpHeights.TryGetValue(zombie.Id, out var height) && HasZombieSupport(movingTo) && !IsZombieObstacle(movingTo))
+                {
+                    float progress = Math.Min(1, zombie.MoveProgress + dt * NavigationCosts.WalkTilesPerSecond / 2);
+                    if (IsJumpArcClear(movingFrom, movingTo, height, zombie.MoveProgress, progress))
+                    {
+                        Falls.CancelZombie(zombie);
+                        var position = JumpPosition(movingFrom, movingTo, height, progress);
+                        zombie.FaceToward(position - zombie.Position);
+                        zombie.Position = position;
+                        zombie.MoveProgress = progress;
+                        if (progress >= 1) ClearZombieMovement(zombie);
+                        return;
+                    }
+                }
+                // A changed landing or a new obstruction interrupts the flight at its
+                // current position; ordinary falling handles the unsupported body.
                 ClearZombieMovement(zombie);
             }
             else
             {
-                var remaining = dt * .85f;
-                // Climb vertically before crossing the ledge; descend only after crossing
-                // above the lower destination. A diagonal chord would cut through its corner.
-                if (intermediate.HasValue && zombie.MoveProgress < 1)
+                var intermediate = StepClearance(movingFrom, movingTo);
+                if (!IsValidStep(movingFrom, movingTo) || !HasZombieSupport(movingFrom) || !HasZombieSupport(movingTo) || IsZombieObstacle(movingTo) ||
+                    (intermediate.HasValue && IsZombieObstacle(intermediate.Value)))
                 {
-                    if (!MoveToward(zombie, intermediate.Value.Center, ref remaining)) return;
-                    zombie.MoveProgress = 1;
+                    ClearZombieMovement(zombie);
                 }
-                if (!MoveToward(zombie, movingTo.Center, ref remaining)) return;
-                zombie.NextCell = null;
-                _stepOrigins.Remove(zombie.Id);
-                return;
+                else
+                {
+                    Falls.CancelZombie(zombie);
+                    var remaining = dt * NavigationCosts.WalkTilesPerSecond;
+                    // Climb vertically before crossing the ledge; descend only after crossing
+                    // above the lower destination. A diagonal chord would cut through its corner.
+                    if (intermediate.HasValue && zombie.MoveProgress < 1)
+                    {
+                        if (!MoveToward(zombie, intermediate.Value.Center, ref remaining)) return;
+                        zombie.MoveProgress = 1;
+                    }
+                    if (!MoveToward(zombie, movingTo.Center, ref remaining)) return;
+                    zombie.NextCell = null;
+                    _stepOrigins.Remove(zombie.Id);
+                    return;
+                }
             }
         }
 
         _stepOrigins.Remove(zombie.Id);
+        _jumpHeights.Remove(zombie.Id);
         var current = zombie.Cell;
         if (!TrySolidFloor(zombie.Position, out var floorHeight))
         {
@@ -562,9 +625,27 @@ public sealed class GameSession
         {
             // Slabs land bodies on their actual upper face; a side crust outside
             // the feet cannot suspend a unit over the remaining empty space.
-            zombie.Position = new Vector3(zombie.Position.X, Math.Max(floorHeight, zombie.Position.Y - dt * 6), zombie.Position.Z);
+            var landing = new Vector3(zombie.Position.X, floorHeight, zombie.Position.Z);
+            var fallPosition = Falls.AdvanceZombieFall(zombie, landing, dt);
+            var origin = zombie.Position;
+            var samples = Math.Max(1, (int)MathF.Ceiling(Vector3.Distance(origin, fallPosition) / .05f));
+            for (var sample = 1; sample <= samples; sample++)
+            {
+                var position = Vector3.Lerp(origin, fallPosition, sample / (float)samples);
+                if (TryFindBodyObstacle(zombie.Position, position, out var fallBlocker))
+                {
+                    Falls.CancelZombie(zombie);
+                    AttackObstacle(zombie, fallBlocker);
+                    break;
+                }
+                if (!IsBodyClear(position)) { Falls.CancelZombie(zombie); break; }
+                zombie.Position = position;
+            }
             return;
         }
+        Falls.CancelZombie(zombie);
+        if (RecoverSupportedPosition(zombie, floorHeight, dt)) return;
+        if (TryLeaveFractionalSupport(zombie)) return;
         if (FaceNearbyCore(zombie))
         {
             if (zombie.Cooldown <= 0)
@@ -574,12 +655,30 @@ public sealed class GameSession
             }
             return;
         }
-        if (!_routes[zombie.Lane % 4].TryGetValue(current, out var next))
+        if (!_routes[zombie.Lane % 4].TryGetValue(current, out var next) && !TryGetBridgeStep(current, out next))
         {
             // A collapse can temporarily isolate a node; terrain is still destructible.
             // Prefer horizontal exits so a waiting zombie does not dig out its own footing.
             foreach (var direction in Horizontal.Concat(new[] { new Cell(0, 1, 0) }))
                 if (AttackObstacle(zombie, current + direction)) break;
+            return;
+        }
+        if (!HasZombieSupport(next))
+        {
+            TryBuildBridge(zombie, current, next);
+            return;
+        }
+        if (IsJumpStep(current, next))
+        {
+            if (Vector3.DistanceSquared(zombie.Position, current.Center) < .000001f && CanPlanJump(current, next, out var height))
+            {
+                Falls.CancelZombie(zombie);
+                zombie.NextCell = next;
+                zombie.MoveProgress = 0;
+                _stepOrigins[zombie.Id] = current;
+                _jumpHeights[zombie.Id] = height;
+                zombie.FaceToward(next.Center - zombie.Position);
+            }
             return;
         }
         var clearance = StepClearance(current, next);
@@ -597,8 +696,10 @@ public sealed class GameSession
 
     private void UpdateLiquidExposure(Zombie zombie, float dt)
     {
-        var head = zombie.Position + new Vector3(0, .4f, 0);
-        if (Liquids.GetLiquidAt(head).HasValue)
+        // Position is the body's center, half a block above its feet. Reaching
+        // the breathing point counts as submerged, including an exact liquid surface.
+        var head = zombie.Position + Vector3.UnitY * (Balance.ZombieBreathingHeight - .5f);
+        if (Liquids.GetLiquidAt(head).HasValue || Liquids.GetLiquidAt(head - Vector3.UnitY * .00001f).HasValue)
         {
             zombie.AirRemaining = Math.Max(0, zombie.AirRemaining - dt);
             if (zombie.AirRemaining <= .0001f)
@@ -635,7 +736,8 @@ public sealed class GameSession
         {
             ClearZombieMovement(zombie);
             var rising = new Vector3(zombie.Position.X, Math.Min(risingSurface + .4f, zombie.Position.Y + dt * 2), zombie.Position.Z);
-            if (IsBodyClear(rising)) zombie.Position = rising;
+            if (TryFindBodyObstacle(zombie.Position, rising, out var ceiling)) AttackObstacle(zombie, ceiling);
+            else if (IsBodyClear(rising)) zombie.Position = rising;
             return true;
         }
         if (_liquidDestinations.TryGetValue(zombie.Id, out var target))
@@ -658,12 +760,12 @@ public sealed class GameSession
                 var offset = waypoint - zombie.Position;
                 var length = offset.Length();
                 var next = length <= dt * .85f ? waypoint : zombie.Position + offset / length * (dt * .85f);
-                if (!IsBodyClear(next))
+                if (TryFindBodyObstacle(zombie.Position, next, out var blocker))
                 {
-                    _liquidDestinations.Remove(zombie.Id);
-                    _liquidOrigins.Remove(zombie.Id);
+                    AttackObstacle(zombie, blocker);
                     return true;
                 }
+                if (!IsBodyClear(next)) return true;
                 zombie.FaceToward(next - zombie.Position);
                 zombie.Position = next;
                 if (Vector3.DistanceSquared(zombie.Position, target) < .000001f)
@@ -692,6 +794,11 @@ public sealed class GameSession
         _stepOrigins.Remove(zombie.Id);
         var desiredY = surface + .4f;
         var vertical = new Vector3(zombie.Position.X, zombie.Position.Y + Math.Clamp(desiredY - zombie.Position.Y, -dt * 2, dt * 2), zombie.Position.Z);
+        if (TryFindBodyObstacle(zombie.Position, vertical, out var surfaceBlocker))
+        {
+            AttackObstacle(zombie, surfaceBlocker);
+            return true;
+        }
         if (!IsBodyClear(vertical)) return true;
         zombie.Position = vertical;
         if (Math.Abs(zombie.Position.Y - desiredY) > .001f) return true;
@@ -717,9 +824,11 @@ public sealed class GameSession
 
     private void ClearZombieMovement(Zombie zombie)
     {
+        Falls.CancelZombie(zombie);
         zombie.NextCell = null;
         zombie.MoveProgress = 0;
         _stepOrigins.Remove(zombie.Id);
+        _jumpHeights.Remove(zombie.Id);
         _liquidDestinations.Remove(zombie.Id);
         _liquidOrigins.Remove(zombie.Id);
     }
@@ -738,6 +847,20 @@ public sealed class GameSession
 
     private Vector3? FindBuoyantRouteStep(Zombie zombie)
     {
+        // Share successful and failed decisions at identical physical positions.
+        // Timer-only liquid ticks must not make waiting crowds repeat the whole BFS.
+        // Every geometry, occupancy, or buoyancy change invalidates the relevant result.
+        if (_buoyantLiquidRevision != Liquids.Revision || _buoyantWorldRevision != World.Revision ||
+            _buoyantTopologyRevision != _topologyRevision)
+        {
+            _buoyantSteps.Clear();
+            _buoyantLiquidRevision = Liquids.Revision;
+            _buoyantWorldRevision = World.Revision;
+            _buoyantTopologyRevision = _topologyRevision;
+        }
+        var key = (zombie.Position, zombie.SinksIn(LiquidKind.Lava), zombie.SinksIn(LiquidKind.Mercury));
+        if (_buoyantSteps.TryGetValue(key, out var cached)) return cached;
+        BuoyantRouteSearchCount++;
         var start = zombie.Cell;
         var positions = new Dictionary<Cell, Vector3> { [start] = zombie.Position };
         var previous = new Dictionary<Cell, Cell>();
@@ -768,9 +891,9 @@ public sealed class GameSession
                     if (distance < bestDistance) { bestDistance = distance; best = next; }
                 }
         }
-        if (best == start) return null;
+        if (best == start) { _buoyantSteps[key] = null; return null; }
         while (previous[best] != start) best = previous[best];
-        return positions[best];
+        return _buoyantSteps[key] = positions[best];
     }
 
     private bool TryBuoyantSurface(Zombie zombie, Vector3 position, out float surface)
@@ -788,45 +911,156 @@ public sealed class GameSession
         return float.IsFinite(surface);
     }
 
-    private bool HasSolidFooting(Vector3 position) => World.IsSolidAt(position - new Vector3(0, .51f, 0)) ||
-        TrySelectTurret(ToCell(position - new Vector3(0, .51f, 0))) != null;
+    private bool HasSolidFooting(Vector3 position) => TrySolidFloor(position, out var height) &&
+        Math.Abs(position.Y - height) <= .011f;
 
     private bool TrySolidFloor(Vector3 position, out float height)
     {
-        var column = ToCell(position);
-        for (var y = Math.Min(column.Y, WorldGrid.Size - 1); y >= 0; y--)
-        {
-            var cell = new Cell(column.X, y, column.Z);
-            float? top = null;
-            if (World.GetObsidian(cell) is { } crust)
+        // A body can land on a bank while its center is over the hole. Inspect
+        // the whole footprint so the descent target agrees with body collision.
+        height = float.NegativeInfinity;
+        for (var x = Math.Max(0, (int)MathF.Floor(position.X - .2f)); x <= Math.Min(WorldGrid.Size - 1, (int)MathF.Ceiling(position.X + .2f) - 1); x++)
+            for (var z = Math.Max(0, (int)MathF.Floor(position.Z - .2f)); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Ceiling(position.Z + .2f) - 1); z++)
+                for (var y = Math.Min((int)MathF.Floor(position.Y), WorldGrid.Size - 1); y >= 0; y--)
+                {
+                    var cell = new Cell(x, y, z);
+                    float? top = null;
+                    if (World.GetObsidian(cell) is { } crust)
+                    {
+                        if (position.X + .2f > crust.Min.X && position.X - .2f < crust.Max.X &&
+                            position.Z + .2f > crust.Min.Z && position.Z - .2f < crust.Max.Z)
+                            top = crust.Max.Y;
+                    }
+                    else if (World.GetMaterial(cell) != Material.Air || TrySelectTurret(cell) != null) top = y + 1;
+                    if (!top.HasValue || top.Value + .5f > position.Y + .001f) continue;
+                    height = Math.Max(height, top.Value + .5f);
+                    break;
+                }
+        return float.IsFinite(height);
+    }
+
+    private bool RecoverSupportedPosition(Zombie zombie, float floorHeight, float dt)
+    {
+        var currentCenter = zombie.Cell.Center;
+        if (Math.Abs(zombie.Position.X - currentCenter.X) < .00001f &&
+            Math.Abs(zombie.Position.Z - currentCenter.Z) < .00001f) return false;
+
+        // An interrupted traversal may finish with only its edge on the bank,
+        // outside any route node. Walk back onto that real support; never snap
+        // to a grid center or restart a jump from an unsupported launch point.
+        Vector3? destination = null;
+        var distance = float.PositiveInfinity;
+        for (var x = Math.Max(0, (int)MathF.Floor(zombie.Position.X - .2f)); x <= Math.Min(WorldGrid.Size - 1, (int)MathF.Ceiling(zombie.Position.X + .2f) - 1); x++)
+            for (var z = Math.Max(0, (int)MathF.Floor(zombie.Position.Z - .2f)); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Ceiling(zombie.Position.Z + .2f) - 1); z++)
             {
-                if (position.X >= crust.Min.X && position.X < crust.Max.X && position.Z >= crust.Min.Z && position.Z < crust.Max.Z)
-                    top = crust.Max.Y;
+                var candidate = new Vector3(x + .5f, floorHeight, z + .5f);
+                var foot = candidate - Vector3.UnitY * .51f;
+                if ((!World.IsSolidAt(foot) && TrySelectTurret(ToCell(foot)) == null) || !IsBodyClear(candidate)) continue;
+                var candidateDistance = Vector3.DistanceSquared(zombie.Position, candidate);
+                if (candidateDistance >= distance) continue;
+                var samples = Math.Max(1, (int)MathF.Ceiling(MathF.Sqrt(candidateDistance) / .05f));
+                bool clear = true;
+                for (var sample = 1; sample <= samples; sample++)
+                {
+                    var point = Vector3.Lerp(zombie.Position, candidate, sample / (float)samples);
+                    if (!IsBodyClear(point) || !TrySolidFloor(point, out var supportingHeight) ||
+                        Math.Abs(supportingHeight - floorHeight) > .001f) { clear = false; break; }
+                }
+                if (!clear) continue;
+                destination = candidate;
+                distance = candidateDistance;
             }
-            else if (World.GetMaterial(cell) != Material.Air || TrySelectTurret(cell) != null) top = y + 1;
-            if (top.HasValue && top.Value + .5f <= position.Y + .001f)
-            { height = top.Value + .5f; return true; }
-        }
-        height = 0;
-        return false;
+        if (!destination.HasValue) return false;
+        var remaining = dt * NavigationCosts.WalkTilesPerSecond;
+        MoveToward(zombie, destination.Value, ref remaining);
+        return true;
     }
 
     private bool IsBodyClear(Vector3 position)
     {
-        foreach (var x in new[] { -.2f, .2f })
-            foreach (var z in new[] { -.2f, .2f })
-                foreach (var y in new[] { -.39f, .39f })
+        var body = new Vector3(.2f, .39f, .2f);
+        var min = position - body;
+        var max = position + body;
+        return min.X >= 0 && min.Y >= 0 && min.Z >= 0 && max.X <= WorldGrid.Size && max.Y <= WorldGrid.Size && max.Z <= WorldGrid.Size &&
+            !TryFindBodyObstacle(position, position, out _);
+    }
+
+    private bool TryFindBodyObstacle(Vector3 from, Vector3 to, out Cell obstacle, HashSet<Cell>? candidates = null)
+    {
+        // Slabs can lie entirely between the eight body corners. Sweep the full
+        // body bounds against each actual solid volume, including internal crusts.
+        var body = new Vector3(.2f, .39f, .2f);
+        var boundsMin = Vector3.Min(from, to) - body;
+        var boundsMax = Vector3.Max(from, to) + body;
+        var firstContact = float.PositiveInfinity;
+        obstacle = default;
+        for (int x = Math.Max(0, (int)MathF.Floor(boundsMin.X)); x <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(boundsMax.X)); x++)
+            for (int y = Math.Max(0, (int)MathF.Floor(boundsMin.Y)); y <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(boundsMax.Y)); y++)
+                for (int z = Math.Max(0, (int)MathF.Floor(boundsMin.Z)); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(boundsMax.Z)); z++)
                 {
-                    var point = position + new Vector3(x, y, z);
-                    if (!WorldGrid.IsInside(ToCell(point)) || World.IsSolidAt(point) || TrySelectTurret(ToCell(point)) != null) return false;
+                    var cell = new Cell(x, y, z);
+                    if (candidates != null && !candidates.Contains(cell)) continue;
+                    if (World.GetMaterial(cell) == Material.Air && !HasLiveIndexedTurret(cell)) continue;
+                    var min = new Vector3(x, y, z);
+                    var max = min + Vector3.One;
+                    if (World.GetObsidian(cell) is { } crust) { min = crust.Min; max = crust.Max; }
+                    min -= body;
+                    max += body;
+                    float enter = 0, leave = 1;
+                    var movement = to - from;
+                    if (!JumpAxisInterval(from.X, movement.X, min.X + .00001f, max.X - .00001f, ref enter, ref leave) ||
+                        !JumpAxisInterval(from.Y, movement.Y, min.Y + .00001f, max.Y - .00001f, ref enter, ref leave) ||
+                        !JumpAxisInterval(from.Z, movement.Z, min.Z + .00001f, max.Z - .00001f, ref enter, ref leave) || enter >= firstContact) continue;
+                    firstContact = enter;
+                    obstacle = cell;
                 }
+        return float.IsFinite(firstContact);
+    }
+
+    private bool TryLeaveFractionalSupport(Zombie zombie)
+    {
+        if (Math.Abs(zombie.Position.Y - zombie.Cell.Center.Y) <= .001f && HasZombieSupport(zombie.Cell)) return false;
+        Vector3? destination = null;
+        var bestDistance = float.PositiveInfinity;
+        foreach (var direction in Horizontal)
+            foreach (var dy in new[] { 0, -1, 1 })
+            {
+                var next = zombie.Cell + direction + new Cell(0, dy, 0);
+                if (!HasZombieSupport(next) || IsZombieObstacle(next) ||
+                    (!_routes[zombie.Lane % 4].ContainsKey(next) && !TryGetBridgeStep(next, out _))) continue;
+                var candidate = next.Center;
+                if (Math.Abs(candidate.Y - zombie.Position.Y) > 1.001f || !IsBodyClear(candidate)) continue;
+                var crossingY = Math.Max(zombie.Position.Y, candidate.Y);
+                var aboveOrigin = new Vector3(zombie.Position.X, crossingY, zombie.Position.Z);
+                var aboveTarget = new Vector3(candidate.X, crossingY, candidate.Z);
+                if (TryFindBodyObstacle(zombie.Position, aboveOrigin, out _) ||
+                    TryFindBodyObstacle(aboveOrigin, aboveTarget, out _) || TryFindBodyObstacle(aboveTarget, candidate, out _)) continue;
+                var distance = Vector3.DistanceSquared(candidate, new Vector3(16, 16, 16));
+                if (distance >= bestDistance) continue;
+                bestDistance = distance;
+                destination = candidate;
+            }
+        if (!destination.HasValue) return false;
+        // Reuse the physical climb/cross/descend movement used by shoreline steps.
+        // The starting slab is valid footing even when its top is between grid levels.
+        _liquidOrigins[zombie.Id] = zombie.Position;
+        _liquidDestinations[zombie.Id] = destination.Value;
+        zombie.FaceToward(destination.Value - zombie.Position);
         return true;
     }
 
-    private static bool MoveToward(Zombie zombie, Vector3 destination, ref float remaining)
+    private bool MoveToward(Zombie zombie, Vector3 destination, ref float remaining)
     {
         var offset = destination - zombie.Position;
         var distance = offset.Length();
+        var next = distance <= remaining || distance <= .000001f ? destination :
+            remaining > 0 ? zombie.Position + offset / distance * remaining : zombie.Position;
+        if (TryFindBodyObstacle(zombie.Position, next, out var blocker))
+        {
+            AttackObstacle(zombie, blocker);
+            remaining = 0;
+            return false;
+        }
         if (remaining > 0) zombie.FaceToward(offset);
         if (distance <= remaining)
         {
@@ -844,7 +1078,7 @@ public sealed class GameSession
         var barrier = World.GetBarrier(cell);
         var turret = TrySelectTurret(cell);
         var terrain = World.GetMaterial(cell);
-        var breakableTerrain = terrain is Material.Dirt or Material.Stone;
+        var breakableTerrain = Balance.IsTerrainMaterial(terrain);
         var obsidian = terrain == Material.Obsidian;
         if (barrier == null && turret == null && !breakableTerrain && !obsidian) return false;
         zombie.FaceToward(cell.Center - zombie.Position);
@@ -873,8 +1107,31 @@ public sealed class GameSession
         else if (breakableTerrain && World.DamageTerrain(cell, zombie.Attack))
             SettleDefenses();
         else if (obsidian && World.DamageObsidian(cell, zombie.Attack))
+        {
+            ShatterObsidian(cell);
             SettleDefenses();
+        }
         return true;
+    }
+
+    private void ShatterObsidian(Cell cell)
+    {
+        const float damage = 20;
+        var center = cell.Center;
+        var min = center - new Vector3(1.5f);
+        var max = center + new Vector3(1.5f);
+        var halfBody = new Vector3(.2f, .39f, .2f);
+        foreach (var target in Zombies)
+        {
+            if (target.Hp <= 0) continue;
+            var bodyMin = target.Position - halfBody;
+            var bodyMax = target.Position + halfBody;
+            if (bodyMax.X <= min.X || bodyMin.X >= max.X || bodyMax.Y <= min.Y || bodyMin.Y >= max.Y ||
+                bodyMax.Z <= min.Z || bodyMin.Z >= max.Z) continue;
+            // Shards travel from the broken cell into each body. A body at the
+            // source has no incident direction, so its shield has no coverage.
+            DamageZombie(target, damage, DamageKind.Pierce, ShotKind.Pellet, target.Position - center);
+        }
     }
 
     private void SettleDefenses()
@@ -882,9 +1139,11 @@ public sealed class GameSession
         // Health is public state and can be changed outside AttackObstacle. Retire
         // every dead piece before trusting the topology/settlement revision cache.
         if (Turrets.RemoveAll(turret => turret.Hp <= 0) > 0) _topologyRevision++;
+        Falls.Prune(World, Turrets);
         if (_settledWorldRevision == World.Revision && _settledTopologyRevision == _topologyRevision) return;
         // Blocks retain holes, overhangs, and ceilings whenever any orthogonal block
         // occupies a neighboring cell. Towers rely only on vertical support and settle bottom first.
+        var movedSolids = new HashSet<Cell>();
         bool moved;
         do
         {
@@ -900,9 +1159,12 @@ public sealed class GameSession
                     cell = below;
                     moved = true;
                 }
+                Falls.RecordBlockDrop(origin, cell, World);
+                if (origin != cell) movedSolids.Add(cell);
             }
             foreach (var turret in Turrets.Where(t => t.Hp > 0).OrderBy(t => t.Cell.Y).ThenBy(t => t.Id).ToArray())
             {
+                var origin = turret.Cell;
                 while (turret.Cell.Y > 0)
                 {
                     var below = turret.Cell + new Cell(0, -1, 0);
@@ -912,15 +1174,18 @@ public sealed class GameSession
                     _topologyRevision++;
                     moved = true;
                 }
+                Falls.RecordTurretDrop(turret, origin);
+                if (origin != turret.Cell) movedSolids.Add(turret.Cell);
             }
         } while (moved);
         _turretsByCell.Clear();
         foreach (var turret in Turrets)
             if (turret.Hp > 0) _turretsByCell[turret.Cell] = turret;
-        // Falling blocks and pieces crush units beneath them instead of leaving a
-        // live zombie embedded inside an intact obstruction.
+        // Preserve crushing by solids that actually fell. A stationary crust
+        // growing around a unit is an obstruction it can attack, not an instant kill.
         foreach (var zombie in Zombies)
-            if (zombie.Hp > 0 && !IsBodyClear(zombie.Position)) DamageZombie(zombie, zombie.Hp);
+            if (zombie.Hp > 0 && movedSolids.Count > 0 && TryFindBodyObstacle(zombie.Position, zombie.Position, out _, movedSolids))
+                DamageZombie(zombie, zombie.Hp);
         _settledWorldRevision = World.Revision;
         _settledTopologyRevision = _topologyRevision;
     }
@@ -930,63 +1195,112 @@ public sealed class GameSession
         _turretsByCell.Clear();
         foreach (var turret in Turrets)
             if (turret.Hp > 0) _turretsByCell[turret.Cell] = turret;
-        var nodes = new HashSet<Cell>();
+        const int cellCount = WorldGrid.Size * WorldGrid.Size * WorldGrid.Size;
+        const int edgesPerNode = 16;
+        // Rows are one-based so a zero lookup means no node. Keep the original
+        // x/y/z insertion order: it also determines equal-cost goal tie ordering.
+        var nodeRows = new int[cellCount];
+        var nodes = new List<Cell>(cellCount / 2);
+        var goals = new List<Cell>();
+        static int Index(Cell cell) => (cell.X * WorldGrid.Size + cell.Y) * WorldGrid.Size + cell.Z;
+        bool IsNode(Cell cell) => WorldGrid.IsInside(cell) && nodeRows[Index(cell)] != 0;
         for (var x = 0; x < WorldGrid.Size; x++)
             for (var y = 1; y < WorldGrid.Size; y++)
                 for (var z = 0; z < WorldGrid.Size; z++)
                 {
                     var cell = new Cell(x, y, z);
-                    if (HasZombieSupport(cell) && World.GetMaterial(cell) != Material.Core) nodes.Add(cell);
+                    if (!HasZombieSupport(cell) || World.GetMaterial(cell) == Material.Core) continue;
+                    nodeRows[Index(cell)] = nodes.Count + 1;
+                    nodes.Add(cell);
+                    foreach (var direction in Adjacent)
+                        if (WorldGrid.IsCore(cell + direction)) { goals.Add(cell); break; }
                 }
-        var goals = nodes.Where(cell => Adjacent.Any(direction => WorldGrid.IsCore(cell + direction))).ToArray();
         // All lanes use the same physical edges. Evaluate clearance and breach
-        // costs once per topology rebuild rather than four times during search.
-        var incoming = new Dictionary<Cell, List<(Cell Previous, float Cost)>>(nodes.Count);
-        var breachCosts = new Dictionary<Cell, float>();
+        // costs once, using fixed slots instead of a dictionary/list per cell.
+        // Slots retain Horizontal/dy/jump order from the original incoming graph.
+        var edgeCosts = new float[nodes.Count * edgesPerNode];
+        Array.Fill(edgeCosts, float.NaN);
+        var edgeOffsets = new int[edgesPerNode];
+        int offsetSlot = 0;
+        foreach (var horizontal in Horizontal)
+        {
+            for (int dy = -1; dy <= 1; dy++) edgeOffsets[offsetSlot++] = Index(horizontal + new Cell(0, dy, 0));
+            edgeOffsets[offsetSlot++] = Index(horizontal + horizontal);
+        }
+        var breachCosts = new float[cellCount];
+        Array.Fill(breachCosts, float.NaN);
+        // Four approach fields remain shared. The strongest configured zombie is
+        // an optimistic level-wide digging estimate, not per-unit risk learning.
+        var referenceAttack = Level.Waves.SelectMany(wave => wave.Groups)
+            .Select(group => LevelCatalog.ZombieAttack(group.Kind, group.Tier)).DefaultIfEmpty(Balance.BaseAttack).Max();
         float CachedBreachCost(Cell cell)
         {
-            if (!breachCosts.TryGetValue(cell, out var cost)) breachCosts[cell] = cost = BreachCost(cell);
+            ref var cost = ref breachCosts[Index(cell)];
+            if (float.IsNaN(cost)) cost = BreachCost(cell, referenceAttack);
             return cost;
         }
-        foreach (var cell in nodes)
+        for (int row = 0; row < nodes.Count; row++)
         {
-            var edges = new List<(Cell Previous, float Cost)>(12);
+            var cell = nodes[row];
+            int slot = row * edgesPerNode;
             foreach (var horizontal in Horizontal)
-                for (var dy = -1; dy <= 1; dy++)
+            {
+                for (var dy = -1; dy <= 1; dy++, slot++)
                 {
                     var previous = cell + horizontal + new Cell(0, dy, 0);
-                    if (!nodes.Contains(previous) || !CanPlanStep(previous, cell)) continue;
+                    if (!IsNode(previous) || !CanPlanStep(previous, cell)) continue;
                     var clearance = StepClearance(previous, cell);
-                    var cost = (cell.Y == previous.Y ? 1f : 2f) + CachedBreachCost(cell) +
+                    edgeCosts[slot] = (cell.Y == previous.Y ? 1f : 2f) + CachedBreachCost(cell) +
                         (clearance.HasValue ? CachedBreachCost(clearance.Value) : 0f);
-                    edges.Add((previous, cost));
                 }
-            incoming.Add(cell, edges);
+                var launch = cell + horizontal + horizontal;
+                if (IsNode(launch) && CanPlanJump(launch, cell, out _))
+                    // Two metres at the same horizontal speed as walking.
+                    edgeCosts[slot] = 2f;
+                slot++;
+            }
         }
+        var costs = new float[cellCount];
+        var nextIndices = new int[cellCount];
+        var routeOrder = new List<int>(nodes.Count);
+        var frontier = new PriorityQueue<int, float>(nodes.Count);
         for (var lane = 0; lane < 4; lane++)
         {
             _routes[lane].Clear();
-            var costs = new Dictionary<Cell, float>();
-            var frontier = new PriorityQueue<Cell, float>();
+            Array.Fill(costs, float.NaN);
+            Array.Fill(nextIndices, -1);
+            routeOrder.Clear();
+            frontier.Clear();
             foreach (var goal in goals)
             {
                 var preferred = lane switch { 0 => goal.X == 14, 1 => goal.X == 17, 2 => goal.Z == 14, _ => goal.Z == 17 };
                 var cost = preferred ? 0f : 8f;
-                costs[goal] = cost;
-                frontier.Enqueue(goal, cost);
+                int index = Index(goal);
+                costs[index] = cost;
+                frontier.Enqueue(index, cost);
             }
-            while (frontier.TryDequeue(out var cell, out var distance))
+            while (frontier.TryDequeue(out var index, out var distance))
             {
-                if (distance > costs[cell]) continue;
-                foreach (var (previous, edgeCost) in incoming[cell])
+                if (distance > costs[index]) continue;
+                int edgeStart = (nodeRows[index] - 1) * edgesPerNode;
+                for (int slot = 0; slot < edgesPerNode; slot++)
                 {
+                    float edgeCost = edgeCosts[edgeStart + slot];
+                    if (float.IsNaN(edgeCost)) continue;
+                    int previous = index + edgeOffsets[slot];
                     var cost = distance + edgeCost;
-                    if (costs.TryGetValue(previous, out var known) && known <= cost) continue;
+                    var known = costs[previous];
+                    if (!float.IsNaN(known) && known <= cost) continue;
                     costs[previous] = cost;
-                    _routes[lane][previous] = cell;
+                    if (nextIndices[previous] < 0) routeOrder.Add(previous);
+                    nextIndices[previous] = index;
                     frontier.Enqueue(previous, cost);
                 }
             }
+            // Publish once per reached cell, preserving first-discovery insertion
+            // order and avoiding dictionary writes during every relaxation.
+            foreach (var previous in routeOrder)
+                _routes[lane][nodes[nodeRows[previous] - 1]] = nodes[nodeRows[nextIndices[previous]] - 1];
         }
         _navigationRevision = _topologyRevision;
         _navigationWorldRevision = World.Revision;
@@ -1002,6 +1316,72 @@ public sealed class GameSession
     private static Cell? StepClearance(Cell from, Cell to) => to.Y > from.Y
         ? from + new Cell(0, 1, 0) : to.Y < from.Y ? to + new Cell(0, 1, 0) : null;
 
+    private static bool IsJumpStep(Cell from, Cell to)
+    {
+        var delta = to - from;
+        return WorldGrid.IsInside(from) && WorldGrid.IsInside(to) && delta.Y == 0 &&
+            (Math.Abs(delta.X) == 2 && delta.Z == 0 || Math.Abs(delta.Z) == 2 && delta.X == 0);
+    }
+
+    private bool CanPlanJump(Cell from, Cell to, out float height)
+    {
+        height = 0;
+        if (!IsJumpStep(from, to) || !HasZombieSupport(from) || !HasZombieSupport(to) ||
+            IsZombieObstacle(from) || IsZombieObstacle(to)) return false;
+        var middle = new Cell((from.X + to.X) / 2, from.Y, (from.Z + to.Z) / 2);
+        if (HasLiveIndexedTurret(middle)) height = 2f;
+        else if (!IsZombieObstacle(middle) && !HasZombieSupport(middle)) height = 1f;
+        else return false;
+        return IsJumpArcClear(from, to, height, 0, 1);
+    }
+
+    private static Vector3 JumpPosition(Cell from, Cell to, float height, float progress) =>
+        Vector3.Lerp(from.Center, to.Center, progress) + Vector3.UnitY * (4 * height * progress * (1 - progress));
+
+    private bool IsJumpArcClear(Cell from, Cell to, float height, float start, float end)
+    {
+        // Sweep the whole body through the parabola. Testing only frame endpoints or
+        // body corners could skip a thin crust, a tower edge, or a low ceiling.
+        var body = new Vector3(.2f, .39f, .2f);
+        var first = JumpPosition(from, to, height, start);
+        var last = JumpPosition(from, to, height, end);
+        var boundsMin = Vector3.Min(first, last) - body;
+        var boundsMax = Vector3.Max(first, last) + body;
+        if (start <= .5f && end >= .5f) boundsMax.Y = from.Center.Y + height + body.Y;
+        if (boundsMin.X < 0 || boundsMin.Y < 0 || boundsMin.Z < 0 ||
+            boundsMax.X > WorldGrid.Size || boundsMax.Y > WorldGrid.Size || boundsMax.Z > WorldGrid.Size) return false;
+        for (int x = (int)MathF.Floor(boundsMin.X); x <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(boundsMax.X)); x++)
+            for (int y = (int)MathF.Floor(boundsMin.Y); y <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(boundsMax.Y)); y++)
+                for (int z = (int)MathF.Floor(boundsMin.Z); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(boundsMax.Z)); z++)
+                {
+                    var cell = new Cell(x, y, z);
+                    var material = World.GetMaterial(cell);
+                    if (material == Material.Air && !HasLiveIndexedTurret(cell)) continue;
+                    var min = new Vector3(x, y, z);
+                    var max = min + Vector3.One;
+                    if (World.GetObsidian(cell) is { } crust) { min = crust.Min; max = crust.Max; }
+                    min -= body;
+                    max += body;
+                    float a = start, b = end;
+                    if (!JumpAxisInterval(from.Center.X, to.X - from.X, min.X, max.X, ref a, ref b) ||
+                        !JumpAxisInterval(from.Center.Z, to.Z - from.Z, min.Z, max.Z, ref a, ref b)) continue;
+                    float ya = JumpPosition(from, to, height, a).Y, yb = JumpPosition(from, to, height, b).Y;
+                    float lowest = Math.Min(ya, yb), highest = Math.Max(ya, yb);
+                    if (a <= .5f && b >= .5f) highest = from.Center.Y + height;
+                    if (lowest < max.Y - .00001f && highest > min.Y + .00001f) return false;
+                }
+        return true;
+    }
+
+    private static bool JumpAxisInterval(float origin, float delta, float min, float max, ref float a, ref float b)
+    {
+        if (delta == 0) return origin > min && origin < max;
+        float first = (min - origin) / delta, last = (max - origin) / delta;
+        a = Math.Max(a, Math.Min(first, last));
+        b = Math.Min(b, Math.Max(first, last));
+        return a <= b;
+    }
+
     private bool CanPlanStep(Cell from, Cell to)
     {
         if (!IsValidStep(from, to) || World.GetMaterial(to) == Material.Core) return false;
@@ -1011,13 +1391,13 @@ public sealed class GameSession
         return !clearance.HasValue || (WorldGrid.IsInside(clearance.Value) && World.GetMaterial(clearance.Value) != Material.Core);
     }
 
-    private float BreachCost(Cell cell)
+    private float BreachCost(Cell cell, int referenceAttack)
     {
         var hp = World.GetBarrier(cell)?.Hp ?? World.GetObsidian(cell)?.Hp ?? World.GetTerrainHp(cell);
         if (_turretsByCell.TryGetValue(cell, out var turret)) hp += turret.Hp;
-        // Shared route fields estimate breach effort from remaining durability.
-        // Open detours stay available; stronger stone is costlier to tunnel through.
-        return hp * .1f;
+        // Destination blocks and required headroom are charged independently by
+        // the edge builder. All finite breaches remain available when needed.
+        return NavigationCosts.Breach(hp, referenceAttack);
     }
 
     private List<Cell> FindSpawnCells()
@@ -1049,7 +1429,8 @@ public sealed class GameSession
     private bool HasZombieSupport(Cell cell) => WorldGrid.IsInside(cell) && World.IsSolidAt(cell.Center - new Vector3(0, .51f, 0)) ||
         (WorldGrid.IsInside(cell) && cell.Y > 0 && HasLiveIndexedTurret(cell + new Cell(0, -1, 0)));
     private bool IsEmpty(Cell cell) => World.GetMaterial(cell) == Material.Air && TrySelectTurret(cell) == null && Liquids.GetTotalUnits(cell) == 0;
-    private bool CanBuild() => Phase == GamePhase.Building || Reject("Construction and excavation are available between levels.");
+    private bool CanUseTowers() => CanInteractWithTowers || Reject("Retry the level before interacting with towers.");
+    private bool CanBuild() => Phase == GamePhase.Building || Reject("Terrain changes and supply purchases are available between levels.");
     private bool Reject(string message) { Message = message; return false; }
     private static Cell ToCell(Vector3 position) => new((int)MathF.Floor(position.X), (int)MathF.Floor(position.Y), (int)MathF.Floor(position.Z));
 }

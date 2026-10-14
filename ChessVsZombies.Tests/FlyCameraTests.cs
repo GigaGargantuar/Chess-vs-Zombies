@@ -13,7 +13,7 @@ public class FlyCameraTests
         var liquids = new LiquidSystem(world);
         liquids.RestoreState(new LiquidState
         {
-            Obsidian = [new ObsidianCell(new Cell(7, 16, 7), 2, CrustFace.West, 100)]
+            Obsidian = [new ObsidianCell(new Cell(7, 16, 7), 2, CrustFace.West, 10)]
         });
         var clearSide = new FlyCamera(new Vector3(7.7f, 16.5f, 7.2f), 0, 0);
         clearSide.MovePrecise(Vector3.UnitZ, .5f, world.IsSolidAt);

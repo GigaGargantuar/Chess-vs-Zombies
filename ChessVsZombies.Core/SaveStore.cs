@@ -77,13 +77,39 @@ public sealed class BlockInventoryState
     public bool HasShovel { get; set; }
     [JsonRequired]
     public bool HasPickaxe { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<Material, int>? AdditionalMaterials { get; set; }
+}
+
+public sealed class SavedUpgradeTemplate
+{
+    [JsonRequired]
+    public Dictionary<UpgradeKind, int> Points { get; set; } = [];
+    [JsonRequired]
+    public bool UseJumpPattern { get; set; }
+    [JsonRequired]
+    public List<Cell> JumpPattern { get; set; } = [];
+
+    internal static SavedUpgradeTemplate FromTemplate(UpgradeTemplate template) => new()
+    {
+        Points = new Dictionary<UpgradeKind, int>(template.Points),
+        UseJumpPattern = template.UseJumpPattern,
+        JumpPattern = template.JumpPattern.ToList()
+    };
+
+    internal UpgradeTemplate ToTemplate() => new()
+    {
+        Points = new Dictionary<UpgradeKind, int>(Points),
+        UseJumpPattern = UseJumpPattern,
+        JumpPattern = JumpPattern.ToList()
+    };
 }
 
 /// <summary>A preparation-phase checkpoint. Active waves restart from this snapshot.</summary>
 public sealed class CampaignState
 {
     [JsonRequired]
-    public int Version { get; set; } = 6;
+    public int Version { get; set; } = 8;
     [JsonRequired]
     public EconomyState Economy { get; set; } = new();
     [JsonRequired]
@@ -106,11 +132,16 @@ public sealed class CampaignState
     public LiquidState? Liquids { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<SavedTerrainPlacement>? TerrainPlacements { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SavedUpgradeTemplate? UpgradeTemplate { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<BlockDrop>? PendingBlockDrops { get; set; }
 }
 
 public static class SaveStore
 {
     private const int LegacyBarrierHp = 40;
+    private const float LegacyObsidianHpPerUnit = 50;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -166,6 +197,34 @@ public static class SaveStore
         }
     }
 
+    /// <summary>Saves committed template edits without replacing the prepared battlefield during combat.</summary>
+    public static bool TrySaveUpgradeTemplate(UpgradeTemplate template, string path, out string error)
+    {
+        try
+        {
+            ArgumentNullException.ThrowIfNull(template);
+            var saved = SavedUpgradeTemplate.FromTemplate(template);
+            ValidateUpgradeTemplate(saved);
+            if (!TryLoad(path, out var prepared, out error))
+            {
+                if (string.IsNullOrEmpty(error)) error = "No preparation checkpoint is available to save this template.";
+                return false;
+            }
+            var copy = saved.ToTemplate();
+            prepared!.UpgradeTemplate.Points = copy.Points;
+            prepared.UpgradeTemplate.UseJumpPattern = copy.UseJumpPattern;
+            prepared.UpgradeTemplate.JumpPattern = copy.JumpPattern;
+            Save(prepared, path);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception) when (IsSaveException(exception))
+        {
+            error = $"Could not save upgrade template: {exception.Message}";
+            return false;
+        }
+    }
+
     /// <summary>A missing file returns false with no error. Failed loads never modify the file.</summary>
     public static bool TryLoad(string path, out GameSession? session, out string error, LevelCatalog? levels = null)
     {
@@ -188,6 +247,10 @@ public static class SaveStore
                 migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateLiquids(state, originalVersion) }.Where(text => text.Length > 0));
             if (state.Version < 6)
                 migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateTerrainPlacements(state, originalVersion) }.Where(text => text.Length > 0));
+            if (state.Version < 7)
+                migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateUpgradeTemplate(state, originalVersion) }.Where(text => text.Length > 0));
+            if (state.Version < 8)
+                migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateMaterialInventory(state, originalVersion) }.Where(text => text.Length > 0));
             Validate(state);
             var restored = new GameSession(levels: levels);
             restored.RestoreCheckpoint(state);
@@ -208,7 +271,7 @@ public static class SaveStore
 
     private static void Validate(CampaignState state)
     {
-        if (state.Version is not (1 or 2 or 3 or 4 or 5 or 6)) throw new InvalidDataException($"Unsupported checkpoint version {state.Version}.");
+        if (state.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8)) throw new InvalidDataException($"Unsupported checkpoint version {state.Version}.");
         var legacy = state.Version == 1;
         var legacyBlocks = state.Version < 3;
         if (state.LevelNumber < 1 || !float.IsFinite(state.CoreHp) || state.CoreHp <= 0 || state.CoreHp > Balance.CoreHp)
@@ -219,20 +282,30 @@ public static class SaveStore
             throw new InvalidDataException("The block inventory does not match the checkpoint version.");
         if (state.Inventory != null && (state.Inventory.DirtCount < 0 || state.Inventory.StoneCount < 0))
             throw new InvalidDataException("Saved block inventory counts must be nonnegative.");
+        if (state.Version < 8 ? state.Inventory?.AdditionalMaterials != null : state.Inventory?.AdditionalMaterials == null)
+            throw new InvalidDataException("The additional material inventory does not match the checkpoint version.");
+        if (state.Version >= 8) new BlockInventory().Restore(state.Inventory!);
+        if (state.Version < 8 ? state.PendingBlockDrops != null : state.PendingBlockDrops == null)
+            throw new InvalidDataException("Pending block drops do not match the checkpoint version.");
+        if (state.PendingBlockDrops?.Any(drop => drop is null || !WorldGrid.IsInside(drop.Cell) || !Balance.IsTerrainMaterial(drop.Content)) == true)
+            throw new InvalidDataException("A pending block drop needs an in-grid location and a terrain material.");
         if (state.Version < 4 ? state.DamagedTerrain != null : state.DamagedTerrain == null)
             throw new InvalidDataException("The natural terrain damage data does not match the checkpoint version.");
         if (state.Version < 5 ? state.LiquidInventory != null || state.Liquids != null : state.LiquidInventory == null || state.Liquids == null)
             throw new InvalidDataException("The liquid inventory or simulation data does not match the checkpoint version.");
         if (state.Version < 6 ? state.TerrainPlacements != null : state.TerrainPlacements == null)
             throw new InvalidDataException("The moved terrain data does not match the checkpoint version.");
+        if (state.Version < 7 ? state.UpgradeTemplate != null : state.UpgradeTemplate == null)
+            throw new InvalidDataException("The upgrade template does not match the checkpoint version.");
+        if (state.UpgradeTemplate != null) ValidateUpgradeTemplate(state.UpgradeTemplate);
         if (state.LiquidInventory != null && (state.LiquidInventory.Count != Enum.GetValues<LiquidKind>().Length ||
             state.LiquidInventory.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value < 0) ||
             Enum.GetValues<LiquidKind>().Any(kind => !state.LiquidInventory.ContainsKey(kind))))
             throw new InvalidDataException("The liquid inventory requires a nonnegative unit count for each liquid kind.");
         if (state.Excavated.Count > 16 * WorldGrid.Size * WorldGrid.Size ||
-            state.DamagedTerrain?.Count > 16 * WorldGrid.Size * WorldGrid.Size ||
+            state.DamagedTerrain?.Count > (state.Version >= 8 ? WorldGrid.Size : 16) * WorldGrid.Size * WorldGrid.Size ||
             state.TerrainPlacements?.Count > WorldGrid.Size * WorldGrid.Size * WorldGrid.Size ||
-            state.Barriers.Count > (state.Version >= 6 ? 8 * 20 * 8 : 8 * 8 * 8) ||
+            state.Barriers.Count > (state.Version >= 7 ? 30 * 31 * 30 : state.Version >= 6 ? 8 * 20 * 8 : 8 * 8 * 8) ||
             state.Turrets.Count > (state.Version >= 6 ? 30 * 31 * 30 : 30 * 30 * 30))
             throw new InvalidDataException("A saved collection exceeds the battlefield's capacity.");
 
@@ -250,17 +323,17 @@ public static class SaveStore
         foreach (var placement in state.TerrainPlacements ?? [])
         {
             if (placement is null || !WorldGrid.IsInside(placement.Cell) ||
-                placement.Material is not (Material.Dirt or Material.Stone) ||
+                !(state.Version >= 8 ? Balance.IsTerrainMaterial(placement.Material) : placement.Material is Material.Dirt or Material.Stone) ||
                 WorldGrid.InitialMaterial(placement.Cell) == placement.Material ||
                 !placedCells.Add(placement.Cell) || !world.RestoreTerrainPlacement(placement.Cell, placement.Material))
-                throw new InvalidDataException("Moved terrain must identify a unique, cleared cell with a dirt or stone material different from the initial terrain.");
+                throw new InvalidDataException("Placed terrain must identify a unique, cleared cell with a valid terrain material different from the initial terrain.");
         }
 
         var damagedCells = new HashSet<Cell>();
         foreach (var damage in state.DamagedTerrain ?? [])
         {
             if (damage is null || !damagedCells.Add(damage.Cell) || !world.RestoreTerrainHp(damage.Cell, damage.Hp))
-                throw new InvalidDataException("Saved terrain damage must identify a unique, existing dirt or stone block with positive HP below its maximum.");
+                throw new InvalidDataException("Saved terrain damage must identify a unique, existing terrain block with positive HP below its maximum.");
         }
 
         foreach (var barrier in state.Barriers)
@@ -268,7 +341,9 @@ public static class SaveStore
             if (barrier is null || !IsValidBarrierCell(barrier.Cell, state.Version) || WorldGrid.IsCore(barrier.Cell) ||
                 !float.IsFinite(barrier.Hp) || barrier.Hp <= 0)
                 throw new InvalidDataException("A saved defensive block has invalid placement or HP.");
-            if (legacyBlocks ? barrier.Content != null : barrier.Content is not (Material.Dirt or Material.Stone))
+            if (legacyBlocks ? barrier.Content != null : state.Version >= 8
+                ? !barrier.Content.HasValue || !Balance.IsTerrainMaterial(barrier.Content.Value)
+                : barrier.Content is not (Material.Dirt or Material.Stone))
                 throw new InvalidDataException("A saved defensive block has invalid material data.");
             var material = barrier.Content ?? Material.Dirt;
             var maxHp = legacyBlocks ? LegacyBarrierHp : Balance.BlockHp(material);
@@ -279,7 +354,8 @@ public static class SaveStore
         // Use the simulation's own restore validation so capacity, crust geometry,
         // reaction clouds, and future fluid rules cannot diverge from checkpoint checks.
         var liquids = new LiquidSystem(world);
-        if (state.Liquids != null) liquids.RestoreState(state.Liquids);
+        if (state.Liquids != null) liquids.RestoreState(state.Version is 5 or 6
+            ? ConvertLegacyObsidianDurability(state.Liquids) : state.Liquids);
 
         var cells = new HashSet<Cell>();
         var ids = new HashSet<int>();
@@ -342,9 +418,11 @@ public static class SaveStore
             ? cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30
             : WorldGrid.IsTurretZone(cell);
 
-    private static bool IsValidBarrierCell(Cell cell, int version) => version >= 6
-        ? cell.X is >= 12 and <= 19 && cell.Y is >= 0 and <= 19 && cell.Z is >= 12 and <= 19
-        : WorldGrid.IsBuildZone(cell);
+    private static bool IsValidBarrierCell(Cell cell, int version) => version >= 7
+        ? cell.X is >= 1 and <= 30 && cell.Y is >= 0 and <= 30 && cell.Z is >= 1 and <= 30
+        : version >= 6
+            ? cell.X is >= 12 and <= 19 && cell.Y is >= 0 and <= 19 && cell.Z is >= 12 and <= 19
+            : WorldGrid.IsBuildZone(cell);
 
     private static bool IsInnatelyInfinite(PieceKind piece, UpgradeKind kind) =>
         (piece == PieceKind.Rook && kind == UpgradeKind.Orthogonal) ||
@@ -446,6 +524,68 @@ public static class SaveStore
             ? " The original version 5 file is backed up on the next save." : string.Empty);
     }
 
+    private static string MigrateUpgradeTemplate(CampaignState state, int originalVersion)
+    {
+        if (originalVersion is 5 or 6)
+            state.Liquids = ConvertLegacyObsidianDurability(state.Liquids!);
+        state.UpgradeTemplate = SavedUpgradeTemplate.FromTemplate(new UpgradeTemplate());
+        state.Version = 7;
+        return "Upgrade templates are now saved; this older checkpoint starts with an empty template." +
+            (originalVersion is 5 or 6 ? " Obsidian durability was rescaled with its remaining durability fraction preserved." : string.Empty) + (originalVersion == 6
+            ? " The original version 6 file is backed up on the next save." : string.Empty);
+    }
+
+    private static LiquidState ConvertLegacyObsidianDurability(LiquidState source)
+    {
+        // Validate the original durability before rescaling it. Validation uses a
+        // copy so the subsequent migration cannot scale the same saved HP twice.
+        if (source.Obsidian is null) throw new InvalidDataException("Liquid snapshot is missing its obsidian collection.");
+        var obsidian = new List<ObsidianCell>(source.Obsidian.Count);
+        foreach (var crust in source.Obsidian)
+        {
+            if (crust is null || crust.Units is < 1 or > LiquidSystem.UnitsPerBlock ||
+                !float.IsFinite(crust.Hp) || crust.Hp <= 0 || crust.Hp > crust.Units * LegacyObsidianHpPerUnit)
+                throw new InvalidDataException("Invalid legacy obsidian durability.");
+            // Keep a positive representable value for extremely small surviving
+            // durability rather than removing a block through floating-point underflow.
+            var hp = Math.Max(float.Epsilon, (float)((double)crust.Hp * LiquidSystem.ObsidianHpPerUnit / LegacyObsidianHpPerUnit));
+            obsidian.Add(crust with { Hp = hp });
+        }
+        return new LiquidState
+        {
+            Cells = source.Cells,
+            Obsidian = obsidian,
+            Hazards = source.Hazards,
+            Accumulator = source.Accumulator,
+            FlowTick = source.FlowTick
+        };
+    }
+
+    private static string MigrateMaterialInventory(CampaignState state, int originalVersion)
+    {
+        state.Inventory!.AdditionalMaterials = Enum.GetValues<Material>()
+            .Where(material => Balance.IsTerrainMaterial(material) && material is not (Material.Dirt or Material.Stone))
+            .ToDictionary(material => material, _ => 0);
+        state.PendingBlockDrops = [];
+        state.Version = 8;
+        return "Gear-material inventory is now saved; new material counts start at zero." + (originalVersion == 7
+            ? " The original version 7 file is backed up on the next save." : string.Empty);
+    }
+
+    private static void ValidateUpgradeTemplate(SavedUpgradeTemplate template)
+    {
+        // A reusable request can exceed current inventory, collection caps, or the
+        // aimed piece's range. Only its data shape is validated here; application
+        // decides which points and pattern the particular piece can actually use.
+        if (template.Points is null || template.JumpPattern is null ||
+            template.Points.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value < 0))
+            throw new InvalidDataException("Saved template counts must be nonnegative and use known upgrade types.");
+        if (template.JumpPattern.Count == 0 || template.JumpPattern.Distinct().Count() != template.JumpPattern.Count)
+            throw new InvalidDataException("A saved template jump pattern must contain unique destinations.");
+        if (template.JumpPattern.Any(offset => JumpDistance(offset) is < 2 or > int.MaxValue))
+            throw new InvalidDataException("A saved template jump destination is too close or has unsupported coordinates.");
+    }
+
     private static long JumpDistance(Cell offset) => Math.Max(Math.Abs((long)offset.X), Math.Max(Math.Abs((long)offset.Y), Math.Abs((long)offset.Z)));
 
     private static void PreserveLegacyBackup(string path)
@@ -454,7 +594,7 @@ public static class SaveStore
         using var document = JsonDocument.Parse(existing);
         if (document.RootElement.ValueKind != JsonValueKind.Object) return;
         var version = document.RootElement.EnumerateObject().FirstOrDefault(property => property.Name.Equals("Version", StringComparison.OrdinalIgnoreCase));
-        if (version.Value.ValueKind != JsonValueKind.Number || !version.Value.TryGetInt32(out var number) || number is not (1 or 2 or 3 or 4 or 5)) return;
+        if (version.Value.ValueKind != JsonValueKind.Number || !version.Value.TryGetInt32(out var number) || number is not (1 or 2 or 3 or 4 or 5 or 6 or 7)) return;
         var backup = path + $".v{number}.bak";
         if (File.Exists(backup)) backup = path + $".v{number}.{Guid.NewGuid():N}.bak";
         File.Copy(path, backup);

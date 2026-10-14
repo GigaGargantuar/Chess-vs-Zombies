@@ -38,9 +38,14 @@ public class StructuralSupportTests
         levels.Set(new LevelDefinition { Number = 1, Name = "Tower collapse", Waves =
             [new() { Groups = [new() { Count = 1, Kind = ZombieKind.Armed, Tier = GearTier.Osmium }] }] });
         var game = new GameSession(levels: levels);
-        Assert.True(game.Deploy(PieceKind.Pawn, new Cell(11, 16, 15)));
-        Assert.True(game.Deploy(PieceKind.Knight, new Cell(11, 17, 15)));
-        Assert.True(game.Deploy(PieceKind.Bishop, new Cell(11, 18, 15)));
+        // Confine the approach so this regression exercises destruction rather
+        // than the newly available safer detours and tower jumps.
+        Assert.True(game.BuyTool(ToolKind.Shovel));
+        for (int x = 10; x <= 15; x++) Assert.True(game.Dig(new Cell(x, 14, 15)));
+        Assert.True(game.Dig(new Cell(11, 15, 15)));
+        Assert.True(game.Deploy(PieceKind.Pawn, new Cell(11, 14, 15)));
+        Assert.True(game.Deploy(PieceKind.Knight, new Cell(11, 15, 15)));
+        Assert.True(game.Deploy(PieceKind.Bishop, new Cell(11, 16, 15)));
         var bottom = game.Turrets[0];
         bottom.Hp = 1; // Make the direct breach cheaper than an open detour.
         var middle = game.Turrets[1];
@@ -48,15 +53,15 @@ public class StructuralSupportTests
         Assert.True(game.StartLevel());
         game.Update(.01f);
         var zombie = Assert.Single(game.Zombies);
-        zombie.Position = new Cell(10, 16, 15).Center;
+        zombie.Position = new Cell(10, 14, 15).Center;
         zombie.NextCell = null;
         zombie.Cooldown = 0;
         zombie.Lane = 0;
         int currency = game.Economy.Currency;
         game.Update(.01f);
         Assert.DoesNotContain(bottom, game.Turrets);
-        Assert.Equal(new Cell(11, 16, 15), middle.Cell);
-        Assert.Equal(new Cell(11, 17, 15), top.Cell);
+        Assert.Equal(new Cell(11, 14, 15), middle.Cell);
+        Assert.Equal(new Cell(11, 15, 15), top.Cell);
         Assert.Equal(currency, game.Economy.Currency);
     }
 
@@ -146,7 +151,7 @@ public class StructuralSupportTests
         var cell = new Cell(8, 16, 8);
         var zombie = new Zombie { Id = 1, Position = cell.Center, WaveIndex = -1 };
         game.Zombies.Add(zombie);
-        game.Liquids.RestoreState(new LiquidState { Obsidian = [new(cell, 2, CrustFace.West, 100)] });
+        game.Liquids.RestoreState(new LiquidState { Obsidian = [new(cell, 2, CrustFace.West, 10)] });
         game.Update(.01f);
         Assert.Equal(10, zombie.Hp);
         Assert.Equal(cell.Center, zombie.Position);
@@ -157,7 +162,7 @@ public class StructuralSupportTests
     {
         var game = new GameSession();
         var cell = new Cell(8, 16, 8);
-        game.Liquids.RestoreState(new LiquidState { Obsidian = [new(cell, 2, CrustFace.Bottom, 100)] });
+        game.Liquids.RestoreState(new LiquidState { Obsidian = [new(cell, 2, CrustFace.Bottom, 10)] });
         Assert.False(game.World.IsSolidAt(cell.Center));
         Assert.True(game.HasTowerSupport(cell + new Cell(0, 1, 0)));
         Assert.True(game.Deploy(PieceKind.Pawn, cell + new Cell(0, 1, 0)));

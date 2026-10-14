@@ -55,7 +55,7 @@ public class ProjectileArmorIntegrationTests
         game.Update(.25f);
         Assert.Equal(10, zombie.BodyHp);
         Assert.Empty(game.Projectiles);
-        Assert.All(game.World.Barriers, block => Assert.Equal(500, block.Hp));
+        Assert.Equal(1497, game.World.Barriers.Sum(block => block.Hp));
     }
 
     [Theory]

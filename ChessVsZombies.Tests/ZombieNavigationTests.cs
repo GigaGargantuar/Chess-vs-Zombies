@@ -10,7 +10,15 @@ public class ZombieNavigationTests
     public void CombatDestructionOpensTheTowerCellAndInvalidatesAnAlreadyClimbingZombieImmediately()
     {
         var game = NewBattle(2);
-        var towerCell = new Cell(11, 16, 15);
+        // Keep a natural roof above the climb's headroom so climbing cannot escape
+        // onto the surface. The far end has a clear stair directly under the core.
+        Assert.True(game.BuyTool(ToolKind.Shovel));
+        for (int x = 10; x <= 14; x++) Assert.True(game.Dig(new Cell(x, 13, 15)));
+        Assert.True(game.Dig(new Cell(10, 14, 15)));
+        Assert.True(game.Dig(new Cell(11, 14, 15)));
+        Assert.True(game.Dig(new Cell(14, 14, 15)));
+        Assert.True(game.Dig(new Cell(15, 14, 15)));
+        var towerCell = new Cell(11, 13, 15);
         Assert.True(game.Deploy(PieceKind.Pawn, towerCell));
         var turret = Assert.Single(game.Turrets);
         turret.Hp = 1; // Breaching this damaged piece is shorter than walking around it.
@@ -18,8 +26,8 @@ public class ZombieNavigationTests
         Begin(game, 2);
         var attacker = game.Zombies[0];
         var climber = game.Zombies[1];
-        Place(attacker, new Cell(10, 16, 15).Center);
-        Place(climber, new Vector3(10.5f, 16.8f, 15.5f));
+        Place(attacker, new Cell(10, 13, 15).Center);
+        Place(climber, new Vector3(10.5f, 13.8f, 15.5f));
         climber.NextCell = towerCell + new Cell(0, 1, 0);
         climber.MoveProgress = .5f;
 
@@ -31,11 +39,13 @@ public class ZombieNavigationTests
         Assert.Equal(Material.Air, game.World.GetMaterial(towerCell));
         Assert.Null(climber.NextCell);
         Assert.Equal(0, climber.MoveProgress);
-        Assert.True(climber.Position.Y < 16.8f, "A removed destination support must begin settling in this slice, not retain an obsolete climb.");
+        Assert.InRange(climber.Position.Y, 13.5f, 13.8f);
         Assert.Equal(Vector3.UnitX, attacker.Facing);
+        game.Update(.25f); // The accelerated fall is initially smaller than float precision.
+        Assert.True(climber.Position.Y < 13.8f);
 
         var entered = new HashSet<int>();
-        for (int step = 0; step < 100; step++)
+        for (int step = 0; step < 175; step++)
         {
             game.Update(.02f);
             foreach (var zombie in game.Zombies)
@@ -68,9 +78,11 @@ public class ZombieNavigationTests
 
         Assert.Empty(game.Turrets);
         Assert.Null(zombie.NextCell);
+        Assert.InRange(zombie.Position.Y, 16.5f, 16.8f);
+        game.Update(.25f);
         Assert.True(zombie.Position.Y < 16.8f);
         bool entered = false;
-        for (int step = 0; step < 100; step++)
+        for (int step = 0; step < 175; step++)
         {
             game.Update(.02f);
             entered |= zombie.Cell == towerCell;
@@ -122,7 +134,7 @@ public class ZombieNavigationTests
         var fallingZombie = Assert.Single(falling.Zombies);
         Place(fallingZombie, new Vector3(10.5f, 17.2f, 15.5f));
         fallingZombie.FaceToward(-Vector3.UnitZ);
-        falling.Update(.05f);
+        falling.Update(.25f);
         Assert.True(fallingZombie.Position.Y < 17.2f);
         Assert.Equal(-Vector3.UnitZ, fallingZombie.Facing);
 
