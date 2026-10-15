@@ -36,6 +36,7 @@ public sealed class DefenseGame : Game
     private readonly List<Cell> draftPattern = [];
     private UpgradeTemplate upgradeTemplate => session.UpgradeTemplate;
     private readonly bool smoke, smokeCombat;
+    private readonly bool smokeMegaGuard, smokeGiantDeaths, smokeThrownCover, smokeTowerPenetration;
     private readonly string smokePanel;
     private readonly string? capturePath;
     private Zombie? smokeArmorDemo;
@@ -54,9 +55,17 @@ public sealed class DefenseGame : Game
         IsMouseVisible = false;
         IsFixedTimeStep = true;
         TargetElapsedTime = TimeSpan.FromSeconds(1d / 60);
+        smokeMegaGuard = args.Contains("--smoke-mega-guard");
+        smokeGiantDeaths = args.Contains("--smoke-giant-deaths");
+        smokeThrownCover = args.Contains("--smoke-thrown-cover");
+        smokeTowerPenetration = args.Contains("--smoke-tower-penetration");
         smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes") || args.Contains("--smoke-megas") || args.Contains("--smoke-merged");
+        smoke = smoke || smokeMegaGuard || smokeGiantDeaths || smokeThrownCover || smokeTowerPenetration;
         smokeCombat = args.Contains("--smoke-combat");
         smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : args.Contains("--smoke-megas") ? "megas" : args.Contains("--smoke-merged") ? "merged" : "";
+        if (smokeMegaGuard || smokeGiantDeaths) smokePanel = "megas";
+        if (smokeThrownCover) smokePanel = "thrown";
+        if (smokeTowerPenetration) smokePanel = "penetration";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
         if (smoke) IsFixedTimeStep = false;
@@ -67,6 +76,8 @@ public sealed class DefenseGame : Game
         if (smokePanel == "buckets") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 20.5f, 12), .26f, -.35f);
         if (smokePanel == "sizes") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 31), MathF.PI, -.35f);
         if (smokePanel == "megas") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 26, 42), MathF.PI, -.34f);
+        if (smokeThrownCover) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 25, 32), MathF.PI, -.3f);
+        if (smokeTowerPenetration) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 34), MathF.PI, -.54f);
         int frameIndex = Array.IndexOf(args, "--capture-frame");
         if (frameIndex >= 0 && frameIndex + 1 < args.Length && int.TryParse(args[frameIndex + 1], out var requestedFrame))
             captureFrame = Math.Clamp(requestedFrame, 1, 600);
@@ -142,13 +153,19 @@ public sealed class DefenseGame : Game
             if (smokePanel == "buckets") PrepareBucketSmoke();
             if (smokePanel == "sizes") PrepareSizeSmoke();
             if (smokePanel == "megas") PrepareMegaSmoke();
+            if (smokeThrownCover) PrepareThrownCoverSmoke();
+            if (smokeTowerPenetration) PrepareTowerPenetrationSmoke();
             if (smokePanel == "merged")
             {
                 session.SetMergeFiveLevels(true);
                 if (smokeCombat) { session.StartLevel(); session.Update(12f); }
                 Capture(false);
             }
-            SetNotice(smokePanel == "merged" ? "Five levels in one battle. Every surviving tower pays 25 currency on victory." :
+            SetNotice(smokeTowerPenetration ? "Tower penetration / a stone block pierces three weak towers, then stops at the fourth." :
+                smokeThrownCover ? "Thrown cover / incoming fire damages real blocks in flight, leaving holes when they break." :
+                smokeMegaGuard ? "Mega mobile cover / advancing to the core while guarding sustained incoming fire." :
+                smokeGiantDeaths ? "Released Kilo hands and Mega chunks / finite blocks fall and settle after death." :
+                smokePanel == "merged" ? "Five levels in one battle. Every surviving tower pays 25 currency on victory." :
                 smokePanel == "megas" ? "Mega / 3 x 3 x 3. Two hands, two real blocks per hand. Stick left / chunky throw right." :
                 smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
                 smokeCombat ? "Live simulation / rendered validation" : "Crosshair placement / rendered validation");
@@ -199,12 +216,108 @@ public sealed class DefenseGame : Game
             mega.Cooldown = 0;
             mega.FaceToward(System.Numerics.Vector3.UnitZ);
         }
-        session.Deploy(PieceKind.Pawn, new Cell(8, 16, 16));
-        session.Deploy(PieceKind.Pawn, new Cell(20, 16, 16));
-        session.Deploy(PieceKind.Pawn, new Cell(21, 16, 16));
+        if (smokeMegaGuard)
+        {
+            foreach (var mega in session.Zombies.Where(zombie => zombie.Size == ZombieSize.Mega))
+            {
+                for (int hit = 0; hit < GameSession.MegaGuardLearningHits; hit++)
+                    session.DamageZombie(mega, 1, DamageKind.Pierce, ShotKind.Pellet, -System.Numerics.Vector3.UnitZ);
+            }
+            QueueMegaGuardSmokeVolley();
+            session.Update(.001f);
+        }
+        else if (smokeGiantDeaths)
+        {
+            var kilo = new Zombie { Id = 102, WaveIndex = -1, Size = ZombieSize.Kilo };
+            kilo.Position = kilo.StandAt(new Cell(15, 16, 23));
+            session.Zombies.Add(kilo);
+            session.Update(.05f);
+            foreach (var giant in session.Zombies.Where(zombie => zombie.IsGiant).ToArray())
+                session.DamageZombie(giant, 100_000, DamageKind.Chemical);
+            session.Update(.001f);
+        }
+        else
+        {
+            session.Deploy(PieceKind.Pawn, new Cell(8, 16, 16));
+            session.Deploy(PieceKind.Pawn, new Cell(20, 16, 16));
+            session.Deploy(PieceKind.Pawn, new Cell(21, 16, 16));
+        }
         selected = null;
         showZones = false;
-        paused = true;
+        paused = !smokeMegaGuard;
+    }
+    private void QueueMegaGuardSmokeVolley()
+    {
+        foreach (var mega in session.Zombies.Where(zombie => zombie.Hp > 0 && zombie.Size == ZombieSize.Mega))
+            for (int shot = 0; shot < 3; shot++)
+            {
+                var aim = mega.Position + new System.Numerics.Vector3(.7f + shot * .1f, 1.1f + shot * .05f, 0);
+                session.Projectiles.Add(new Projectile { Origin = aim + System.Numerics.Vector3.UnitZ * 6,
+                    Target = aim - System.Numerics.Vector3.UnitZ * 3, Kind = ShotKind.Pellet, Damage = 1, Duration = .45f });
+            }
+    }
+    private void PrepareThrownCoverSmoke()
+    {
+        session = new GameSession();
+        var state = session.ExportState();
+        state.MegaWeaponFlights = [new SavedMegaWeaponFlight
+        {
+            OwnerId = 100, Formation = MegaWeaponFormation.Chunk, X = 16, Y = 22, Z = 24,
+            VelocityZ = -2, Damage = 12,
+            Blocks = Enumerable.Range(0, 4).Select(index => new SavedMegaWeaponPart
+            {
+                BlockIndex = index, Material = Material.Dirt, Hp = 100,
+                OffsetX = index % 2 == 0 ? -.5f : .5f, OffsetY = index / 2 == 0 ? -.5f : .5f
+            }).ToList()
+        }];
+        RestoreSmokeState(state);
+        selected = null;
+        showZones = false;
+        QueueThrownCoverSmokeShot(75);
+    }
+    private void PrepareTowerPenetrationSmoke()
+    {
+        session = new GameSession();
+        for (int x = 13; x <= 22; x += 3)
+        {
+            if (!session.Deploy(PieceKind.Rook, new Cell(x, 16, 24)))
+                throw new InvalidOperationException("Could not prepare the penetration targets.");
+            session.Turrets[^1].Hp = x == 22 ? 30 : 1;
+        }
+        var state = session.ExportState();
+        state.MegaWeaponFlights = [new SavedMegaWeaponFlight
+        {
+            OwnerId = 100, Formation = MegaWeaponFormation.Chunk, IsDebris = true,
+            X = 11, Y = 17.1f, Z = 24.5f, VelocityX = 40, Damage = 12,
+            Blocks = [new SavedMegaWeaponPart { BlockIndex = 0, Material = Material.Stone, Hp = 500 }]
+        }];
+        RestoreSmokeState(state);
+        selected = null;
+        showZones = false;
+    }
+    private void RestoreSmokeState(CampaignState state)
+    {
+        var fixture = Path.Combine(Path.GetTempPath(), $"ChessVsZombies-smoke-{Guid.NewGuid():N}.json");
+        try
+        {
+            var options = new JsonSerializerOptions { IgnoreReadOnlyProperties = true, Converters = { new JsonStringEnumConverter() } };
+            File.WriteAllText(fixture, JsonSerializer.Serialize(state, options));
+            if (!SaveStore.TryLoad(fixture, out var restored, out var error)) throw new InvalidOperationException(error);
+            session = restored!;
+        }
+        finally { if (File.Exists(fixture)) File.Delete(fixture); }
+    }
+    private void QueueThrownCoverSmokeShot(float damage)
+    {
+        var flight = session.ExportState().MegaWeaponFlights?.FirstOrDefault();
+        if (flight is null) return;
+        var block = flight.Blocks.OrderBy(block => block.BlockIndex).First();
+        const float lead = .0875f;
+        var aim = new System.Numerics.Vector3(flight.X + block.OffsetX, flight.Y + block.OffsetY, flight.Z + block.OffsetZ) +
+            new System.Numerics.Vector3(flight.VelocityX, flight.VelocityY, flight.VelocityZ) * lead -
+            System.Numerics.Vector3.UnitY * (GameSession.MegaWeaponGravity * lead * lead * .5f);
+        session.Projectiles.Add(new Projectile { Origin = aim - System.Numerics.Vector3.UnitX * 4,
+            Target = aim + System.Numerics.Vector3.UnitX * 4, Kind = ShotKind.Pellet, Damage = damage, Duration = .2f });
     }
     private void PrepareSizeSmoke()
     {
@@ -385,6 +498,8 @@ public sealed class DefenseGame : Game
             }
         }
         var oldPhase = session.Phase;
+        if (smokeMegaGuard && frameCount > 0 && frameCount % 15 == 0) QueueMegaGuardSmokeVolley();
+        if (smokeThrownCover && frameCount is 15 or 30) QueueThrownCoverSmokeShot(25);
         if (!paused && (IsActive || smoke)) session.Update(dt);
         // Frame 30 shows both two-block hands and all four armor slots. Frame
         // 90 shows the stick/chunk arcs; around frame 150 they scatter as debris.

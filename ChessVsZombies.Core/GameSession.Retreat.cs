@@ -28,7 +28,8 @@ public sealed partial class GameSession
     private void FaceKiloTowardShot(Zombie zombie, Vector3 incomingDirection)
     {
         if (zombie.Hp <= 0 || !zombie.IsGiant) return;
-        zombie.SetGuardFacing(-incomingDirection);
+        zombie.SetGuardFacing(zombie.Size == ZombieSize.Mega
+            ? ObserveMegaIncomingFire(zombie, incomingDirection) : -incomingDirection);
         _guardedKilos.Add(zombie);
     }
 
@@ -200,9 +201,11 @@ public sealed partial class GameSession
             zombie.BucketKind = null;
             zombie.BucketUnits = 0;
         }
-        // Held covers already occupy their block slots. Refilling the spare
-        // slots restores a two-block Kilo loadout without duplicating covers.
-        zombie.CarriedBlocks = giant ? Math.Max(0, (zombie.Size == ZombieSize.Mega ? 4 : 2) - GetKiloConstructionBlocks(zombie))
+        // A Mega extracts its weapon from terrain as one chunk, independently
+        // of its bridge backpack. Preserve real supplies already carried.
+        // Kilo backpack supplies still refill its two shared cover slots.
+        zombie.CarriedBlocks = zombie.Size == ZombieSize.Mega ? Math.Max(1, zombie.CarriedBlocks)
+            : giant ? Math.Max(0, 2 - GetKiloConstructionBlocks(zombie))
             : needsBucket ? 0 : Math.Max(1, zombie.CarriedBlocks);
         if (needsWater)
             for (int index = 0; index < zombie.BucketCount; index++)

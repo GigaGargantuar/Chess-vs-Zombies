@@ -60,18 +60,20 @@ public sealed class MegaWeaponTests
     }
 
     [Fact]
-    public void FourBlockWeaponUsesItsRealBackpackAndThreeReachableWorldBlocks()
+    public void FourBlockWeaponRipsOutAConnectedTerrainChunkAndKeepsItsBackpack()
     {
         var (game, mega) = Create();
         var recovered = new Cell(4, 16, 9);
         Assert.True((bool)Invoke(game.World, "AddBarrier", recovered, Material.Copper, (float?)77)!);
+        foreach (var cell in new[] { new Cell(3, 16, 8), new Cell(3, 16, 9), new Cell(4, 16, 8) })
+            Assert.True((bool)Invoke(game.World, "AddBarrier", cell, Material.Dirt, null)!);
         int before = TerrainCount(game);
 
         Acquire(game, mega);
 
         Assert.Equal(4, game.MegaWeapons.Count);
-        Assert.Equal(0, mega.CarriedBlocks);
-        Assert.Equal(before - 3, TerrainCount(game));
+        Assert.Equal(1, mega.CarriedBlocks);
+        Assert.Equal(before - 4, TerrainCount(game));
         Assert.Equal(Material.Air, game.World.GetMaterial(recovered));
         var copper = Assert.Single(game.MegaWeapons, block => block.Material == Material.Copper);
         Assert.Equal(77, copper.Hp);
@@ -86,7 +88,7 @@ public sealed class MegaWeaponTests
             Assert.True(block.Min.Z >= mega.Position.Z - 1.5f && block.Max.Z <= mega.Position.Z + 1.5f);
         });
         Invoke(game, "UpdateMegas", 1f);
-        Assert.Equal(before - 3, TerrainCount(game));
+        Assert.Equal(before - 4, TerrainCount(game));
         Assert.Empty(game.PendingBlockDrops);
         Assert.Equal(0, game.Inventory.DirtCount);
     }
@@ -132,7 +134,7 @@ public sealed class MegaWeaponTests
     }
 
     [Fact]
-    public void AChunkDamagesContactedTowersUniformlyAndScattersItsActualBlocks()
+    public void AChunkUsesItsQuarterShareAndSpentDurabilityForEachContactBeforeScattering()
     {
         var (game, mega) = Create();
         Acquire(game, mega);
@@ -144,8 +146,15 @@ public sealed class MegaWeaponTests
 
         Assert.All(game.MegaProjectiles, block => Assert.Equal(MegaWeaponFormation.Chunk, block.Formation));
         for (int tick = 0; tick < 60 && game.Turrets.All(tower => tower.Hp == before); tick++) Invoke(game, "UpdateMegaProjectiles", .05f);
-        Assert.All(game.Turrets, tower => Assert.Equal(before - mega.Attack * 1.5f / 4, tower.Hp, 4));
+        float quarterDamage = mega.Attack * 1.5f / 4;
+        // Both towers meet the same cube at their shared seam. The first
+        // contact spends its pre-hit HP before the next contact's ratio is read.
+        Assert.Equal(before - quarterDamage, game.Turrets[0].Hp, 4);
+        Assert.Equal(before - quarterDamage * ((Balance.DirtBlockHp - before) / Balance.DirtBlockHp),
+            game.Turrets[1].Hp, 4);
         Assert.Equal(4, game.MegaProjectiles.Count + game.PendingBlockDrops.Count);
+        Assert.Equal(4 * Balance.DirtBlockHp - 2 * before,
+            game.MegaProjectiles.Sum(block => block.Hp) + game.PendingBlockDrops.Sum(block => block.Hp));
         Assert.All(game.MegaProjectiles, block => Assert.True(block.IsDebris));
     }
 
@@ -167,7 +176,7 @@ public sealed class MegaWeaponTests
         Assert.Empty(game.MegaProjectiles);
         var drop = Assert.Single(game.PendingBlockDrops);
         Assert.Equal(Material.Stone, drop.Content);
-        Assert.Equal(311, drop.Hp);
+        Assert.Equal(311 - Balance.TurretHp, drop.Hp);
         Assert.True(drop.WasBarrier);
     }
 
@@ -263,7 +272,7 @@ public sealed class MegaWeaponTests
                 block.Max.Y > low.Y && block.Min.Z < high.Z && block.Max.Z > low.Z;
             Assert.False(overlaps);
         });
-        Assert.Equal(0, mega.CarriedBlocks);
+        Assert.Equal(1, mega.CarriedBlocks);
     }
 
     [Fact]
@@ -276,7 +285,7 @@ public sealed class MegaWeaponTests
         Invoke(game, "HandleKiloDeath", mega);
         Invoke(game, "QueueDeathBlock", mega);
         Assert.Empty(game.MegaWeapons);
-        Assert.Equal(4, game.PendingBlockDrops.Count);
+        Assert.Equal(5, game.PendingBlockDrops.Count);
     }
 
     [Fact]
@@ -295,7 +304,7 @@ public sealed class MegaWeaponTests
         Assert.Equal(4, game.MegaWeapons.Count);
         Assert.Equal(83, Assert.Single(game.MegaWeapons, block => block.BlockIndex == 2).Hp);
         Assert.Equal(before - 1, TerrainCount(game));
-        Assert.Equal(0, mega.CarriedBlocks);
+        Assert.Equal(1, mega.CarriedBlocks);
         Assert.Equal(2, mega.BucketCount);
         Assert.Equal(0, mega.HeldBucketUnits);
     }
@@ -314,7 +323,7 @@ public sealed class MegaWeaponTests
 
         Assert.Equal(4, game.MegaWeapons.Count);
         Assert.Equal(before - 4, TerrainCount(game));
-        Assert.Equal(0, mega.CarriedBlocks);
+        Assert.Equal(1, mega.CarriedBlocks);
         Assert.Equal(2, mega.BucketCount);
         Assert.Empty(game.PendingBlockDrops);
     }
@@ -382,7 +391,7 @@ public sealed class MegaWeaponTests
     {
         for (int tick = 0; tick < 8 && game.MegaWeapons.Count < 4; tick++) Invoke(game, "UpdateMegas", .36f);
         Assert.Equal(4, game.MegaWeapons.Count);
-        Assert.Equal(0, mega.CarriedBlocks);
+        Assert.Equal(1, mega.CarriedBlocks);
     }
 
     private static int TerrainCount(GameSession game)

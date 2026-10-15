@@ -45,10 +45,13 @@ public sealed partial class GameSession
     {
         _megaFlights.Clear();
         _megaActionCooldowns.Clear();
+        _megaGuardMemory.Clear();
+        _megaGuardPredictionBatch = null;
     }
 
     private void UpdateMegas(float dt)
     {
+        UpdateMegaGuardTimers(dt);
         UpdateMegaHeldPoses();
         foreach (var id in _megaActionCooldowns.Keys.ToArray())
         {
@@ -67,14 +70,19 @@ public sealed partial class GameSession
         if (mega.Size != ZombieSize.Mega || mega.Hp <= 0 || IsKiloUsingBuckets(mega) ||
             IsZombieRetreating(mega) || _megaActionCooldowns.ContainsKey(mega.Id) || mega.NextCell.HasValue ||
             !KiloHasFooting(mega, mega.Position) || TryFindBodyObstacle(mega.Position, mega.Position, out _, zombie: mega)) return;
-        if (GetKiloConstructionBlocks(mega) >= 4 && TryThrowMegaWeapon(mega))
+        if (GetKiloConstructionBlocks(mega) >= 4 && MegaGuardReadyToThrow(mega) && TryThrowMegaWeapon(mega))
         {
             _megaActionCooldowns[mega.Id] = MegaThrowCooldownSeconds;
             return;
         }
         if (GetKiloConstructionBlocks(mega) >= 4) return;
-        if (TryRaiseMegaBackpackBlock(mega) || TryGrabMegaWorldBlock(mega))
-            _megaActionCooldowns[mega.Id] = MegaPickupCooldownSeconds;
+        if (TryGrabMegaWorldBlock(mega))
+        {
+            BeginMegaGuardWindup(mega);
+        }
+        // A failed grip also takes time; do not repeat the entire connected
+        // extraction search every simulation slice while a site is obstructed.
+        _megaActionCooldowns[mega.Id] = MegaPickupCooldownSeconds;
     }
 
     private static Vector3 MegaHeldOffset(Zombie mega, int index)
@@ -92,13 +100,21 @@ public sealed partial class GameSession
 
     private void UpdateMegaHeldPoses()
     {
-        foreach (var mega in Zombies)
-            if (mega.Size == ZombieSize.Mega && mega.Hp > 0) UpdateMegaHeldPose(mega);
+        // Trace each incoming projectile once for the whole group, then choose
+        // one simultaneous pose per carrier before resolving any impacts.
+        _megaGuardPredictionBatch = PredictMegaIncomingShots();
+        try
+        {
+            foreach (var mega in Zombies)
+                if (mega.Size == ZombieSize.Mega && mega.Hp > 0) UpdateMegaHeldPose(mega);
+        }
+        finally { _megaGuardPredictionBatch = null; }
     }
 
     private void UpdateMegaHeldPose(Zombie mega)
     {
         if (!_kiloBlocks.TryGetValue(mega.Id, out var blocks) || blocks.Count == 0) return;
+        if (TryUpdateMegaPredictiveCover(mega, blocks)) return;
         foreach (var block in blocks)
         {
             var center = mega.Position + MegaHeldOffset(mega, block.BlockIndex);
@@ -117,70 +133,7 @@ public sealed partial class GameSession
         return -1;
     }
 
-    private bool TryRaiseMegaBackpackBlock(Zombie mega)
-    {
-        if (mega.CarriedBlocks <= 0) return false;
-        _kiloBlocks.TryGetValue(mega.Id, out var held);
-        int index = NextMegaBlockIndex(held);
-        if (index < 0) return false;
-        var center = mega.Position + MegaHeldOffset(mega, index);
-        if (KiloBoxSweep(center, center, new Vector3(.49999f), out _) ||
-            Zombies.Any(ally => ally.Id != mega.Id && ally.Hp > 0 && KiloBoxesOverlap(
-                ally.Position - ally.BodyHalfExtents, ally.Position + ally.BodyHalfExtents,
-                center - new Vector3(.5f), center + new Vector3(.5f)))) return false;
-        if (held == null) _kiloBlocks[mega.Id] = held = [];
-        held.Add(new HeldKiloBlock(index, mega.CarriedBlockMaterial, Balance.BlockHp(mega.CarriedBlockMaterial), false)
-        { Offset = MegaHeldOffset(mega, index) });
-        mega.CarriedBlocks--;
-        return true;
-    }
-
-    private bool TryGrabMegaWorldBlock(Zombie mega)
-    {
-        _kiloBlocks.TryGetValue(mega.Id, out var held);
-        int index = NextMegaBlockIndex(held);
-        if (index < 0) return false;
-        var destination = mega.Position + MegaHeldOffset(mega, index);
-        var min = mega.Position - mega.BodyHalfExtents;
-        var max = mega.Position + mega.BodyHalfExtents;
-        var candidates = new List<Cell>();
-        // First recover fallen teammate blocks in the adjacent shell. Ground
-        // excavation is a fallback and must not remove the Mega's own footing.
-        for (int x = (int)MathF.Floor(min.X) - 1; x <= (int)MathF.Floor(max.X); x++)
-            for (int y = Math.Max(0, (int)MathF.Floor(min.Y) - 1); y <= (int)MathF.Floor(max.Y); y++)
-                for (int z = (int)MathF.Floor(min.Z) - 1; z <= (int)MathF.Floor(max.Z); z++)
-                {
-                    var cell = new Cell(x, y, z);
-                    bool underBody = cell.Y < min.Y && cell.X + 1 > min.X && cell.X < max.X &&
-                        cell.Z + 1 > min.Z && cell.Z < max.Z;
-                    if (!underBody && WorldGrid.IsInside(cell) && !WorldGrid.IsCore(cell) &&
-                        World.GetObsidian(cell) == null && TrySelectTurret(cell) == null &&
-                        Balance.IsTerrainMaterial(World.GetBarrier(cell)?.Content ?? World.GetNaturalMaterial(cell))) candidates.Add(cell);
-                }
-        foreach (var cell in candidates.OrderBy(cell => cell.Y < min.Y ? 1 : 0)
-                     .ThenBy(cell => Vector3.DistanceSquared(cell.Center, destination)).ThenBy(cell => cell.X).ThenBy(cell => cell.Z))
-        {
-            var lifted = new Vector3(cell.Center.X, destination.Y, cell.Center.Z);
-            if (KiloBoxSweep(cell.Center, lifted, new Vector3(.49999f), out _, cell) ||
-                KiloBoxSweep(lifted, destination, new Vector3(.49999f), out _, cell)) continue;
-            bool allyBlocked = Zombies.Any(ally => ally.Id != mega.Id && ally.Hp > 0 &&
-                (ProjectileBoxIntersection(cell.Center, lifted - cell.Center,
-                     ally.Position - ally.BodyHalfExtents - new Vector3(.49999f), ally.Position + ally.BodyHalfExtents + new Vector3(.49999f), out _) ||
-                 ProjectileBoxIntersection(lifted, destination - lifted,
-                     ally.Position - ally.BodyHalfExtents - new Vector3(.49999f), ally.Position + ally.BodyHalfExtents + new Vector3(.49999f), out _)));
-            if (allyBlocked) continue;
-            var barrier = World.GetBarrier(cell);
-            var material = barrier?.Content ?? World.GetNaturalMaterial(cell);
-            var hp = barrier?.Hp ?? World.GetTerrainHp(cell);
-            if (!(barrier != null ? World.RemoveBarrier(cell) : World.Dig(cell))) continue;
-            if (held == null) _kiloBlocks[mega.Id] = held = [];
-            held.Add(new HeldKiloBlock(index, material, hp, barrier != null) { Offset = MegaHeldOffset(mega, index) });
-            RecordZombieProgress(mega);
-            SettleDefenses();
-            return true;
-        }
-        return false;
-    }
+    private bool TryGrabMegaWorldBlock(Zombie mega) => TryExtractMegaChunk(mega);
 
     private bool TryThrowMegaWeapon(Zombie mega)
     {
@@ -233,10 +186,11 @@ public sealed partial class GameSession
 
     private void UpdateMegaProjectiles(float dt)
     {
-        // Newly scattered pieces start on the next step, rather than inheriting
-        // an accidental second full time slice from their parent projectile.
-        foreach (var flight in _megaFlights.ToArray())
+        var pending = new Queue<(MegaWeaponFlight Flight, float Duration)>(
+            _megaFlights.Select(flight => (flight, dt)));
+        while (pending.TryDequeue(out var work))
         {
+            var (flight, duration) = work;
             if (!_megaFlights.Contains(flight)) continue;
             if (flight.IsDebris)
                 flight.DamagedTowerIds.RemoveWhere(id =>
@@ -246,32 +200,56 @@ public sealed partial class GameSession
                         flight.Position + block.Offset - new Vector3(.5f), flight.Position + block.Offset + new Vector3(.5f),
                         tower.Cell.Center - new Vector3(.5f), tower.Cell.Center + new Vector3(.5f)));
                 });
-            float travelBound = (flight.Velocity.Length() + MegaWeaponGravity * dt) * dt;
+            float travelBound = (flight.Velocity.Length() + MegaWeaponGravity * duration) * duration;
             int samples = Math.Max(1, (int)MathF.Ceiling(travelBound / .08f));
-            float slice = dt / samples;
-            for (int sample = 0; sample < samples; sample++)
+            float maximumSlice = duration / samples;
+            float remaining = duration;
+            while (remaining > 0 && _megaFlights.Contains(flight))
             {
+                float slice = Math.Min(maximumSlice, remaining);
                 var from = flight.Position;
                 var to = from + flight.Velocity * slice - Vector3.UnitY * (MegaWeaponGravity * slice * slice * .5f);
-                flight.Velocity -= Vector3.UnitY * (MegaWeaponGravity * slice);
-                flight.Age += slice;
                 if (FindMegaWeaponImpact(flight, from, to, out float fraction, out var contactTowers, out var contactTerrain))
                 {
-                    flight.Position = Vector3.Lerp(from, to, Math.Max(0, fraction - .0001f));
+                    fraction = Math.Clamp(fraction, 0, 1);
+                    float elapsed = slice * fraction;
+                    flight.Position = Vector3.Lerp(from, to, fraction);
+                    flight.Velocity -= Vector3.UnitY * (MegaWeaponGravity * elapsed);
+                    flight.Age += elapsed;
+                    remaining -= elapsed;
+                    bool stopped = contactTerrain.Count > 0;
                     var towerTargets = !flight.IsDebris && flight.Formation == MegaWeaponFormation.Stick
                         ? contactTowers.OrderBy(contact => contact.Tower.Id).Take(1) : contactTowers;
                     foreach (var contact in towerTargets)
-                        if (flight.DamagedTowerIds.Add(contact.Tower.Id))
-                            contact.Tower.Hp -= MegaBlockImpactDamage(flight, contact.Block);
+                    {
+                        if (contact.Tower.Hp <= 0 || !flight.Blocks.Contains(contact.Block) ||
+                            !flight.DamagedTowerIds.Add(contact.Tower.Id)) continue;
+                        float towerHp = contact.Tower.Hp;
+                        contact.Tower.Hp -= MegaBlockImpactDamage(flight, contact.Block);
+                        contact.Block.Hp -= towerHp;
+                        if (contact.Block.Hp <= 0) flight.Blocks.Remove(contact.Block);
+                        stopped |= contact.Tower.Hp > 0;
+                    }
                     foreach (var contact in contactTerrain)
-                        DamageProjectileTerrain(contact.Cell, MegaBlockImpactDamage(flight, contact.Block));
+                        if (flight.Blocks.Contains(contact.Block))
+                            DamageProjectileTerrain(contact.Cell, MegaBlockImpactDamage(flight, contact.Block));
                     if (contactTowers.Count > 0) SettleDefenses();
+                    if (flight.Blocks.Count > 0 && !stopped)
+                        continue; // Re-scan the unspent time through the newly opened path.
                     _megaFlights.Remove(flight);
+                    // Surviving towers end the impact; they are not repeatedly
+                    // attacked by a stationary weapon. Only real surviving parts scatter.
+                    flight.Position = Vector3.Lerp(from, to, Math.Max(0, fraction - .0001f));
                     if (flight.IsDebris) SettleMegaWeaponBlocks(flight);
-                    else ScatterMegaWeapon(flight);
+                    else
+                        foreach (var child in ScatterMegaWeapon(flight))
+                            if (remaining > 0) pending.Enqueue((child, remaining));
                     break;
                 }
                 flight.Position = to;
+                flight.Velocity -= Vector3.UnitY * (MegaWeaponGravity * slice);
+                flight.Age += slice;
+                remaining -= slice;
                 if (flight.Age < 12 && flight.Position.Y > -2 && flight.Position.Y < WorldGrid.Size + 8 &&
                     flight.Position.X is > -4 and < WorldGrid.Size + 4 && flight.Position.Z is > -4 and < WorldGrid.Size + 4) continue;
                 _megaFlights.Remove(flight);
@@ -283,7 +261,7 @@ public sealed partial class GameSession
 
     private static float MegaBlockImpactDamage(MegaWeaponFlight flight, HeldKiloBlock block)
     {
-        float share = flight.IsDebris || flight.Formation == MegaWeaponFormation.Chunk ? .25f : 1;
+        float share = flight.IsDebris || flight.Formation == MegaWeaponFormation.Chunk ? .25f : flight.Blocks.Count / 4f;
         // Damage is the original whole-weapon attack, also retained by debris.
         // Apply the contacting block's surviving durability once at impact.
         return flight.Damage * share * (block.Hp / Balance.DirtBlockHp);
@@ -340,8 +318,9 @@ public sealed partial class GameSession
         return true;
     }
 
-    private void ScatterMegaWeapon(MegaWeaponFlight flight)
+    private List<MegaWeaponFlight> ScatterMegaWeapon(MegaWeaponFlight flight)
     {
+        var scattered = new List<MegaWeaponFlight>();
         for (int index = 0; index < flight.Blocks.Count; index++)
         {
             var block = flight.Blocks[index];
@@ -350,14 +329,17 @@ public sealed partial class GameSession
             var away = incident.LengthSquared() > .00001f ? -Vector3.Normalize(incident) : Vector3.UnitX;
             var side = new Vector3(-away.Z, 0, away.X);
             block.Offset = Vector3.Zero;
-            _megaFlights.Add(new MegaWeaponFlight
+            var child = new MegaWeaponFlight
             {
                 OwnerId = flight.OwnerId, Formation = flight.Formation, IsDebris = true,
                 Position = flight.Position + offset,
                 Velocity = away * 2 + side * (index % 2 == 0 ? -3 : 3) + Vector3.UnitY * (2 + index / 2),
                 Damage = flight.Damage, Blocks = [block], DamagedTowerIds = new HashSet<int>(flight.DamagedTowerIds)
-            });
+            };
+            _megaFlights.Add(child);
+            scattered.Add(child);
         }
+        return scattered;
     }
 
     private void SettleMegaWeaponBlocks(MegaWeaponFlight flight)
@@ -410,7 +392,7 @@ public sealed partial class GameSession
                 !float.IsFinite(flight.VelocityX) || !float.IsFinite(flight.VelocityY) || !float.IsFinite(flight.VelocityZ) ||
                 Math.Abs(flight.VelocityX) > 256 || Math.Abs(flight.VelocityY) > 256 || Math.Abs(flight.VelocityZ) > 256 ||
                 !float.IsFinite(flight.Age) || flight.Age is < 0 or > 12 || !float.IsFinite(flight.Damage) || flight.Damage <= 0 ||
-                flight.Blocks == null || flight.Blocks.Count != (flight.IsDebris ? 1 : 4) ||
+                flight.Blocks == null || flight.Blocks.Count is < 1 or > 4 || flight.IsDebris && flight.Blocks.Count != 1 ||
                 flight.DamagedTowerIds == null || flight.DamagedTowerIds.Any(id => id <= 0) ||
                 flight.DamagedTowerIds.Count != flight.DamagedTowerIds.Distinct().Count())
                 throw new InvalidDataException("Invalid saved Mega projectile motion, damage, or material count.");

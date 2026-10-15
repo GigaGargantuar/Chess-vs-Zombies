@@ -59,6 +59,7 @@ public sealed partial class GameSession
         _kiloBlocks.Remove(zombie.Id);
         _kiloActionCooldowns.Remove(zombie.Id);
         _megaActionCooldowns.Remove(zombie.Id);
+        _megaGuardMemory.Remove(zombie.Id);
         _hurledAllies.Remove(zombie.Id);
         _fallStartHeights.Remove(zombie.Id);
         _coverWaiting.Remove(zombie.Id);

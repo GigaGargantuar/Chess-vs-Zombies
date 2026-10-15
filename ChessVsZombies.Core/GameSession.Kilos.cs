@@ -353,6 +353,7 @@ public sealed partial class GameSession
         _hurledAllies.Remove(zombie.Id);
         _kiloActionCooldowns.Remove(zombie.Id);
         _megaActionCooldowns.Remove(zombie.Id);
+        _megaGuardMemory.Remove(zombie.Id);
         if (!_kiloBlocks.Remove(zombie.Id, out var blocks)) return;
         foreach (var held in blocks)
         {

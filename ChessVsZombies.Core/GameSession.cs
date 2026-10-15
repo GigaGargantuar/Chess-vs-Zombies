@@ -430,7 +430,6 @@ public sealed partial class GameSession
             ResolveBlockDrops();
             Liquids.Update(step, cell => TrySelectTurret(cell) != null);
             Buckets.Update(step, cell => TrySelectTurret(cell) != null);
-            UpdateMegaProjectiles(step);
             SettleDefenses();
             if (Phase == GamePhase.Combat) Step(step);
             else UpdateProjectiles(step);

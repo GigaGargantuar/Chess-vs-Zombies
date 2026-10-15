@@ -494,7 +494,7 @@ public static class SaveStore
                     throw new InvalidDataException("A returning zombie has an invalid bucket payload.");
 
             if (zombie.HeldBlocks.Count > (giant ? blockCapacity : 0) ||
-                giant && zombie.CarriedBlocks + zombie.HeldBlocks.Count > blockCapacity)
+                zombie.Size == ZombieSize.Kilo && zombie.CarriedBlocks + zombie.HeldBlocks.Count > blockCapacity)
                 throw new InvalidDataException("A returning zombie has too many held blocks.");
             var hands = new HashSet<int>();
             foreach (var block in zombie.HeldBlocks)

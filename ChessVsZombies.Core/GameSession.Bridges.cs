@@ -161,7 +161,9 @@ public sealed partial class GameSession
 
     private void ResolveBlockDrops()
     {
+        if (_pendingBlockDrops.Count == 0) return;
         bool placed = false;
+        HashSet<Cell>? fallenDrops = null;
         for (int i = 0; i < _pendingBlockDrops.Count;)
         {
             var drop = _pendingBlockDrops[i];
@@ -186,8 +188,33 @@ public sealed partial class GameSession
             if (!drop.WasBarrier && drop.Hp is { } hp && hp < Balance.BlockHp(drop.Content))
                 World.RestoreTerrainHp(destination.Value, hp);
             _pendingBlockDrops.RemoveAt(i);
+            // Released hands are separate physical blocks. Settle each one
+            // before placing its siblings, otherwise an airborne pair/chunk
+            // counts itself as orthogonal support and remains suspended forever.
+            var resting = destination.Value;
+            while (resting.Y > 0 && !World.HasOrthogonalBlockSupport(resting))
+            {
+                var below = resting + new Cell(0, -1, 0);
+                if (TrySelectTurret(below) != null || !World.MoveBlock(resting, below)) break;
+                Liquids.SwapDisplacedLiquid(resting, below);
+                resting = below;
+            }
+            if (resting != destination.Value)
+            {
+                Falls.RecordBlockDrop(destination.Value, resting, World);
+                (fallenDrops ??= []).Add(resting);
+            }
             placed = true;
         }
-        if (placed) SettleDefenses();
+        if (placed)
+        {
+            // Keep the ordinary falling-solid crush contract while leaving the
+            // expensive whole-world settlement batched across all released cubes.
+            if (fallenDrops != null)
+                foreach (var zombie in Zombies)
+                    if (zombie.Hp > 0 && TryFindBodyObstacle(zombie.Position, zombie.Position, out _, fallenDrops, zombie))
+                        DamageZombie(zombie, zombie.Hp);
+            SettleDefenses();
+        }
     }
 }

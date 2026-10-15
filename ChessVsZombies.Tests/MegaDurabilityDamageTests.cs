@@ -33,9 +33,9 @@ public sealed class MegaDurabilityDamageTests
         Invoke(game, "UpdateMegaProjectiles", .25f);
 
         Assert.Equal(10000 - WholeThrowDamage * ratio, tower.Hp, 4);
-        Assert.Equal(4, game.MegaProjectiles.Count);
+        Assert.Equal(3, game.MegaProjectiles.Count);
         Assert.All(game.MegaProjectiles, block => Assert.True(block.IsDebris));
-        AssertUnchangedBlocks(flight, game);
+        AssertUnchangedBlocks(flight, game, 3);
     }
 
     [Theory]
@@ -55,10 +55,7 @@ public sealed class MegaDurabilityDamageTests
 
         Assert.Equal(10000 - WholeThrowDamage / 4 * ratio, tower.Hp, 4);
         Assert.Empty(game.MegaProjectiles);
-        var drop = Assert.Single(game.PendingBlockDrops);
-        Assert.Equal(material, drop.Content);
-        Assert.Equal(hp, drop.Hp);
-        Assert.True(drop.WasBarrier);
+        Assert.Empty(game.PendingBlockDrops);
     }
 
     [Fact]
@@ -74,7 +71,7 @@ public sealed class MegaDurabilityDamageTests
 
         Assert.Equal(10000 - WholeThrowDamage / 4 * 5, stoneTarget.Hp, 4);
         Assert.Equal(10000 - WholeThrowDamage / 4 * .5f, damagedWoodTarget.Hp, 4);
-        AssertUnchangedBlocks(flight, game);
+        AssertUnchangedBlocks(flight, game, 0, 1);
     }
 
     [Fact]
@@ -129,7 +126,8 @@ public sealed class MegaDurabilityDamageTests
         Invoke(restored, "UpdateMegaProjectiles", .25f);
 
         Assert.Equal(10000 - WholeThrowDamage / 4 * 2.5f, tower.Hp, 4);
-        Assert.Equal(250, Assert.Single(restored.PendingBlockDrops).Hp);
+        Assert.Empty(restored.MegaProjectiles);
+        Assert.Empty(restored.PendingBlockDrops);
     }
 
     private static SavedMegaWeaponFlight Stick(Material contactMaterial, float contactHp) => Flight(false,
@@ -177,11 +175,12 @@ public sealed class MegaDurabilityDamageTests
     private static void Restore(GameSession game, SavedMegaWeaponFlight flight) =>
         Invoke(game, "RestoreMegaWeaponFlights", (object)new[] { flight });
 
-    private static void AssertUnchangedBlocks(SavedMegaWeaponFlight before, GameSession game)
+    private static void AssertUnchangedBlocks(SavedMegaWeaponFlight before, GameSession game, params int[] destroyedIndices)
     {
         Assert.Empty(game.PendingBlockDrops);
-        Assert.Equal(before.Blocks.Count, game.MegaProjectiles.Count);
-        foreach (var source in before.Blocks)
+        Assert.Equal(before.Blocks.Count - destroyedIndices.Length, game.MegaProjectiles.Count);
+        Assert.DoesNotContain(game.MegaProjectiles, block => destroyedIndices.Contains(block.BlockIndex));
+        foreach (var source in before.Blocks.Where(block => !destroyedIndices.Contains(block.BlockIndex)))
         {
             var actual = Assert.Single(game.MegaProjectiles, block => block.BlockIndex == source.BlockIndex);
             Assert.Equal(source.Material, actual.Material);

@@ -4,23 +4,35 @@ namespace ChessVsZombies.Core;
 
 public sealed partial class GameSession
 {
-    private void UpdateProjectiles(float dt)
+    private void UpdateProjectileShots(float dt)
     {
-        UpdateMegaHeldPoses();
-        for (var i = Projectiles.Count - 1; i >= 0; i--)
+        List<Projectile>? remaining = null;
+        int cursor = 0, originalIndex = Projectiles.Count - 1;
+        bool reorder = _megaFlights.Count > 0;
+        while (remaining != null ? cursor < remaining.Count : originalIndex >= 0)
         {
-            var projectile = Projectiles[i];
+            if (reorder)
+            {
+                // A later shot must not destroy a moving shield before an
+                // earlier shot reaches it, regardless of append order.
+                var pending = remaining == null ? Projectiles.AsEnumerable().Reverse() : remaining.Skip(cursor);
+                remaining = pending.OrderBy(projectile => NextMegaInterceptionTime(projectile, dt)).ToList();
+                cursor = 0;
+                reorder = false;
+            }
+            int removalIndex = remaining == null ? originalIndex-- : -1;
+            var projectile = remaining == null ? Projectiles[removalIndex] : remaining[cursor++];
             var startAge = projectile.Age;
             projectile.Age += dt;
             if (projectile.Kind == ShotKind.Melee)
             {
-                if (projectile.Age >= projectile.Duration) Projectiles.RemoveAt(i);
+                if (projectile.Age >= projectile.Duration) RemoveResolvedProjectile(projectile, removalIndex);
                 continue;
             }
             if (!float.IsFinite(projectile.Age) || !float.IsFinite(projectile.Duration) ||
                 !ProjectilePointIsFinite(projectile.Origin) || !ProjectilePointIsFinite(projectile.Target))
             {
-                Projectiles.RemoveAt(i);
+                RemoveResolvedProjectile(projectile, removalIndex);
                 continue;
             }
 
@@ -30,7 +42,7 @@ public sealed partial class GameSession
                 projectile.GetTravelDirection(projectile.Age).Length()) / projectile.FlightDuration;
             if (!float.IsFinite(speedBound) || speedBound <= .000001f)
             {
-                Projectiles.RemoveAt(i);
+                RemoveResolvedProjectile(projectile, removalIndex);
                 continue;
             }
             int steps = projectile.Kind == ShotKind.Lob ? Math.Max(1, (int)MathF.Ceiling(speedBound * dt / .1f)) : 1;
@@ -42,12 +54,22 @@ public sealed partial class GameSession
                 var to = projectile.GetPositionAt(endAge);
                 if (!ProjectilePointIsFinite(from) || !ProjectilePointIsFinite(to)) { stopped = true; break; }
                 bool hitSomething = FindProjectileImpact(from, to, out var fraction, out var terrain, out var zombie, out var crustFace);
-                if (zombie != null) TryInterceptKiloShot(zombie, from, to, fraction);
-                if (TryFindKiloCoverImpact(from, to, out var coverFraction, out var carrierId, out var blockIndex) && coverFraction <= fraction)
+                var sampleStart = dt * (sample - 1) / steps;
+                var sampleEnd = dt * sample / steps;
+                bool hitThrown = TryFindMegaFlightImpact(from, to, sampleStart, sampleEnd,
+                    out var thrownFraction, out var thrownFlight, out var thrownBlock);
+                if (zombie != null && (!hitThrown || fraction < thrownFraction)) TryInterceptKiloShot(zombie, from, to, fraction);
+                bool hitCover = TryFindKiloCoverImpact(from, to, out var coverFraction, out var carrierId, out var blockIndex);
+                if (hitThrown && thrownFraction <= fraction && (!hitCover || thrownFraction < coverFraction))
+                {
+                    DamageMegaFlightBlock(thrownFlight!, thrownBlock!, projectile.Damage);
+                    stopped = true;
+                }
+                else if (hitCover && coverFraction <= fraction)
                 {
                     DamageKiloCover(carrierId, blockIndex, projectile.Damage);
                     var carrier = Zombies.FirstOrDefault(candidate => candidate.Id == carrierId && candidate.Hp > 0);
-                    if (carrier != null)
+                    if (carrier != null && projectile.Damage > 0 && float.IsFinite(projectile.Damage))
                     {
                         var previousAge = startAge + dt * (sample - 1) / steps;
                         var hitAge = previousAge + (endAge - previousAge) * coverFraction;
@@ -67,8 +89,20 @@ public sealed partial class GameSession
                 }
                 from = to;
             }
-            if (stopped) Projectiles.RemoveAt(i);
+            if (stopped)
+            {
+                RemoveResolvedProjectile(projectile, removalIndex);
+                // Removing terrain, cover, or a flying part can reveal a later
+                // contact for other shots, so recompute their event order.
+                reorder = _megaFlights.Count > 0;
+            }
         }
+    }
+
+    private void RemoveResolvedProjectile(Projectile projectile, int originalIndex)
+    {
+        if (originalIndex >= 0) Projectiles.RemoveAt(originalIndex);
+        else Projectiles.Remove(projectile);
     }
 
     private bool FindProjectileImpact(Vector3 from, Vector3 to, out float fraction, out Cell? terrain, out Zombie? zombie, out CrustFace? crustFace)
