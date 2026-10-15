@@ -27,26 +27,22 @@ public class WaveSpawnPlannerTests
     }
 
     [Fact]
-    public void GeneratedArmoredWavesInterleaveThreeToFiveFodderPerArmoredZombie()
+    public void GeneratedWavesInterleaveTheirResolvedArmorAndBossQuotas()
     {
         var catalog = new LevelCatalog();
         for (int level = 3; level <= 100; level++)
         {
-            var wave = Assert.Single(catalog.Get(level).Waves);
-            int fodderSinceArmor = 0;
-            var spawned = new Dictionary<ZombieKind, int>();
-            for (int index = 0; index < wave.Groups.Sum(group => group.Count); index++)
+            var plan = WaveSpawnPlanner.Plan(Assert.Single(catalog.Get(level).Waves));
+            var spawned = new Dictionary<(ZombieKind, GearTier, ZombieSize, bool), int>();
+            for (int index = 0; index < plan.SpawnCount; index++)
             {
-                var group = WaveSpawnPlanner.SelectGroup(wave, index);
-                spawned[group.Kind] = spawned.GetValueOrDefault(group.Kind) + 1;
-                if (group.Kind is ZombieKind.Armored or ZombieKind.ArmedArmored)
-                {
-                    Assert.InRange(fodderSinceArmor, 3, 5);
-                    fodderSinceArmor = 0;
-                }
-                else fodderSinceArmor++;
+                var group = WaveSpawnPlanner.SelectGroup(plan, index);
+                var key = (group.Kind, group.Tier, group.Size, group.IsBoss);
+                spawned[key] = spawned.GetValueOrDefault(key) + 1;
             }
-            foreach (var group in wave.Groups) Assert.Equal(group.Count, spawned[group.Kind]);
+            foreach (var group in plan.Groups)
+                Assert.Equal(group.Count, spawned[(group.Kind, group.Tier, group.Size, group.IsBoss)]);
+            Assert.InRange(plan.BudgetSpent, 0, plan.HpBudget);
         }
     }
 

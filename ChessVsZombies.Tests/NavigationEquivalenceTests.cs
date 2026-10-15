@@ -8,7 +8,7 @@ public class NavigationEquivalenceTests
 {
     private static readonly Cell[] Horizontal = [new(1, 0, 0), new(-1, 0, 0), new(0, 0, 1), new(0, 0, -1)];
     private static readonly Cell[] Adjacent = [new(1, 0, 0), new(-1, 0, 0), new(0, 1, 0), new(0, -1, 0), new(0, 0, 1), new(0, 0, -1)];
-    private delegate bool JumpPlanner(Cell from, Cell to, out float height);
+    private delegate bool JumpPlanner(Cell from, Cell to, out float height, Zombie? zombie);
 
     [Theory]
     [InlineData(0)]
@@ -75,7 +75,7 @@ public class NavigationEquivalenceTests
     {
         // Freeze the pre-optimization collection/search algorithm while sharing the
         // live physical edge rules. This isolates graph-storage and ordering regressions.
-        var hasSupport = Bind<Func<Cell, bool>>(game, "HasZombieSupport");
+        var hasSupport = Bind<Func<Cell, Zombie?, bool>>(game, "HasZombieSupport");
         var canStep = Bind<Func<Cell, Cell, bool>>(game, "CanPlanStep");
         var canJump = Bind<JumpPlanner>(game, "CanPlanJump");
         var breach = Bind<Func<Cell, int, float>>(game, "BreachCost");
@@ -85,7 +85,7 @@ public class NavigationEquivalenceTests
                 for (int z = 0; z < WorldGrid.Size; z++)
                 {
                     var cell = new Cell(x, y, z);
-                    if (hasSupport(cell) && game.World.GetMaterial(cell) != Material.Core) nodes.Add(cell);
+                    if (hasSupport(cell, null) && game.World.GetMaterial(cell) != Material.Core) nodes.Add(cell);
                 }
         var goals = nodes.Where(cell => Adjacent.Any(direction => WorldGrid.IsCore(cell + direction))).ToArray();
         var incoming = new Dictionary<Cell, List<(Cell Previous, float Cost)>>(nodes.Count);
@@ -113,7 +113,7 @@ public class NavigationEquivalenceTests
                     edges.Add((previous, cost));
                 }
                 var launch = cell + horizontal + horizontal;
-                if (nodes.Contains(launch) && canJump(launch, cell, out _)) edges.Add((launch, 2));
+                if (nodes.Contains(launch) && canJump(launch, cell, out _, null)) edges.Add((launch, 2));
             }
             incoming.Add(cell, edges);
         }

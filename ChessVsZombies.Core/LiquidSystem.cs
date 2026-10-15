@@ -208,6 +208,45 @@ public sealed class LiquidSystem
         return true;
     }
 
+    /// <summary>The upper exposed phase can be scooped, without reaching through a crust or roof.</summary>
+    public bool TryGetSurfaceLiquid(Cell cell, out LiquidKind kind, out int availableUnits)
+    {
+        kind = default;
+        availableUnits = 0;
+        var volumes = GetVolumes(cell).OrderByDescending(volume => volume.Max.Y).ToArray();
+        if (volumes.Length == 0) return false;
+        var surface = volumes[0];
+        var center = (surface.Min + surface.Max) * .5f;
+        if (!OpenAbove(cell, center, surface.Max.Y) ||
+            GetLiquidAt(new Vector3(center.X, surface.Max.Y + .0001f, center.Z)).HasValue) return false;
+        kind = surface.Kind;
+        availableUnits = GetUnits(cell, kind);
+        return availableUnits > 0;
+    }
+
+    /// <summary>Removes only the exposed top liquid kind, conserving the scooped units in its caller's bucket.</summary>
+    public int TakeSurfaceLiquid(Cell cell, int maximumUnits, out LiquidKind kind)
+    {
+        if (!TryGetSurfaceLiquid(cell, out kind, out var available) || maximumUnits <= 0) return 0;
+        int units = Math.Min(UnitsPerBlock, Math.Min(maximumUnits, available));
+        Change(cell, kind, -units);
+        return units;
+    }
+
+    internal bool CanReceiveFromAbove(Cell cell, LiquidKind kind)
+    {
+        if (!CanAdd(cell, kind, 1)) return false;
+        var (min, max) = Region(cell, kind);
+        return OpenAbove(cell, (min + max) * .5f, max.Y);
+    }
+
+    private bool OpenAbove(Cell cell, Vector3 center, float fromY)
+    {
+        for (float y = fromY + .0001f; y <= cell.Y + 1.0001f; y += .025f)
+            if (_world.IsSolidAt(new Vector3(center.X, y, center.Z))) return false;
+        return !_world.IsSolidAt(new Vector3(center.X, cell.Y + 1.0001f, center.Z));
+    }
+
     public void Update(float dt, Func<Cell, bool>? occupied = null)
     {
         if (!float.IsFinite(dt) || dt < 0) throw new ArgumentOutOfRangeException(nameof(dt));

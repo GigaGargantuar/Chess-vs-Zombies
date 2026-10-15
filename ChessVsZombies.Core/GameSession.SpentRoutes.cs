@@ -88,10 +88,11 @@ public sealed partial class GameSession
 
     private sealed record BuilderYield(Zombie Builder, Cell BuilderCell, Cell Floor, Cell Origin, Cell Destination);
 
-    private bool IsBuilderYieldActive(BuilderYield request) => request.Builder.Hp > 0 && request.Builder.CarriedBlocks > 0 &&
+    private bool IsBuilderYieldActive(BuilderYield request) => request.Builder.Hp > 0 && AvailableConstructionBlocks(request.Builder) > 0 &&
         request.Builder.Cell == request.BuilderCell && !request.Builder.NextCell.HasValue &&
+        !IsZombieHurled(request.Builder) &&
         !_liquidDestinations.ContainsKey(request.Builder.Id) &&
-        Vector3.DistanceSquared(request.Builder.Position, request.BuilderCell.Center) < .000001f &&
+        Vector3.DistanceSquared(request.Builder.Position, request.Builder.StandAt(request.BuilderCell)) < .000001f &&
         HasZombieSupport(request.BuilderCell) && World.HasOrthogonalBlockSupport(request.Floor) &&
         World.GetMaterial(request.Floor) == Material.Air &&
         !HasLiveIndexedTurret(request.Floor) && Liquids.GetTotalUnits(request.Floor) == 0;
@@ -100,11 +101,11 @@ public sealed partial class GameSession
     {
         foreach (var blocker in Zombies)
         {
-            if (blocker.Hp <= 0 || blocker.CarriedBlocks != 0 || !BodyOverlapsCell(blocker.Position, floor)) continue;
+            if (blocker.Hp <= 0 || AvailableConstructionBlocks(blocker) != 0 || !BodyOverlapsCell(blocker.Position, floor, blocker)) continue;
             // Finish existing physical movement first. In particular, do not
             // redirect a jumper or a unit currently leaving the requested cell.
-            if (blocker.NextCell.HasValue || _liquidDestinations.ContainsKey(blocker.Id) ||
-                !HasSolidFooting(blocker.Position) || Vector3.DistanceSquared(blocker.Position, blocker.Cell.Center) > .000001f) continue;
+            if (blocker.NextCell.HasValue || IsZombieHurled(blocker) || _liquidDestinations.ContainsKey(blocker.Id) ||
+                !HasSolidFooting(blocker.Position, blocker) || Vector3.DistanceSquared(blocker.Position, blocker.StandAt(blocker.Cell)) > .000001f) continue;
             if (_builderYields.TryGetValue(blocker.Id, out var existing) && IsBuilderYieldActive(existing)) continue;
             _builderYields.Remove(blocker.Id);
 
@@ -114,8 +115,9 @@ public sealed partial class GameSession
                 foreach (int dy in new[] { 0, -1, 1 })
                 {
                     var next = blocker.Cell + horizontal + new Cell(0, dy, 0);
-                    if (!CanYieldStep(blocker.Cell, next) || BodyOverlapsCell(next.Center, floor) || IsOccupiedByZombie(next)) continue;
-                    if (_builderYields.Values.Any(request => IsBuilderYieldActive(request) && BodyOverlapsCell(next.Center, request.Floor))) continue;
+                    var standing = blocker.StandAt(next);
+                    if (!CanYieldStep(blocker.Cell, next, blocker) || BodyOverlapsCell(standing, floor, blocker) || IsOccupiedByZombie(next)) continue;
+                    if (_builderYields.Values.Any(request => IsBuilderYieldActive(request) && BodyOverlapsCell(standing, request.Floor, blocker))) continue;
                     int cost = dy == 0 ? 1 : 2;
                     if (cost >= bestCost) continue;
                     bestCost = cost;
@@ -130,21 +132,21 @@ public sealed partial class GameSession
     {
         next = default;
         if (!_builderYields.TryGetValue(zombie.Id, out var request)) return false;
-        if (zombie.CarriedBlocks != 0 || !IsBuilderYieldActive(request))
+        if (AvailableConstructionBlocks(zombie) != 0 || !IsBuilderYieldActive(request))
         {
             _builderYields.Remove(zombie.Id);
             return false;
         }
         if (zombie.NextCell.HasValue || _liquidDestinations.ContainsKey(zombie.Id)) return false;
-        if (zombie.Cell == request.Destination && Vector3.DistanceSquared(zombie.Position, request.Destination.Center) < .000001f)
+        if (zombie.Cell == request.Destination && Vector3.DistanceSquared(zombie.Position, zombie.StandAt(request.Destination)) < .000001f)
         {
             // Keep the floor free until this particular carrier has finished or
             // abandoned construction; ordinary fallback must not send us back.
             next = zombie.Cell;
             return true;
         }
-        if (zombie.Cell != request.Origin || Vector3.DistanceSquared(zombie.Position, request.Origin.Center) > .000001f ||
-            !CanYieldStep(zombie.Cell, request.Destination))
+        if (zombie.Cell != request.Origin || Vector3.DistanceSquared(zombie.Position, zombie.StandAt(request.Origin)) > .000001f ||
+            !CanYieldStep(zombie.Cell, request.Destination, zombie))
         {
             _builderYields.Remove(zombie.Id);
             return false;
@@ -153,18 +155,23 @@ public sealed partial class GameSession
         return true;
     }
 
-    private bool CanYieldStep(Cell from, Cell to)
+    private bool CanYieldStep(Cell from, Cell to, Zombie? zombie = null)
     {
-        if (!IsValidStep(from, to) || !HasZombieSupport(from) || !HasZombieSupport(to) ||
-            IsZombieObstacle(to) || !IsBodyClear(to.Center)) return false;
+        if (!IsValidStep(from, to) || !HasZombieSupport(from, zombie) || !HasZombieSupport(to, zombie) ||
+            IsZombieObstacle(to, zombie) || !IsBodyClear(zombie?.StandAt(to) ?? to.Center, zombie)) return false;
         var clearance = StepClearance(from, to);
-        if (clearance.HasValue && IsZombieObstacle(clearance.Value)) return false;
-        var waypoint = clearance?.Center ?? to.Center;
-        return !TryFindBodyObstacle(from.Center, waypoint, out _) && !TryFindBodyObstacle(waypoint, to.Center, out _);
+        if (clearance.HasValue && IsZombieObstacle(clearance.Value, zombie)) return false;
+        var start = zombie?.StandAt(from) ?? from.Center;
+        var end = zombie?.StandAt(to) ?? to.Center;
+        var waypoint = clearance.HasValue ? zombie?.StandAt(clearance.Value) ?? clearance.Value.Center : end;
+        return !TryFindBodyObstacle(start, waypoint, out _, zombie: zombie) && !TryFindBodyObstacle(waypoint, end, out _, zombie: zombie);
     }
 
-    private static bool BodyOverlapsCell(Vector3 position, Cell cell) =>
-        position.X + .2f > cell.X && position.X - .2f < cell.X + 1 &&
-        position.Y + .39f > cell.Y && position.Y - .39f < cell.Y + 1 &&
-        position.Z + .2f > cell.Z && position.Z - .2f < cell.Z + 1;
+    private static bool BodyOverlapsCell(Vector3 position, Cell cell, Zombie? zombie = null)
+    {
+        var body = zombie?.BodyHalfExtents ?? new Vector3(.2f, .39f, .2f);
+        return position.X + body.X > cell.X && position.X - body.X < cell.X + 1 &&
+            position.Y + body.Y > cell.Y && position.Y - body.Y < cell.Y + 1 &&
+            position.Z + body.Z > cell.Z && position.Z - body.Z < cell.Z + 1;
+    }
 }

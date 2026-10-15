@@ -84,12 +84,12 @@ public sealed class WorldRenderer : IDisposable
             if (armorSeen.TryGetValue(zombie.Id, out var old))
                 foreach (var piece in old.Where(piece => !current.ContainsKey(piece.Key)))
                 {
-                    var (min, max) = ArmorBounds(piece.Key);
-                    var scale = new Vector3(1, ZombieHeightScale, 1);
+                    var (min, max) = ZombieArmorBounds(zombie, piece.Key);
+                    var scale = ZombieMeshScale(zombie);
                     var orientation = ZombieRotation(zombie);
                     var origin = ZombieFeet(zombie) + Vector3.Transform((min + max) * .5f * scale, orientation);
                     var drift = Vector3.Transform(new Vector3(piece.Key == ArmorSlot.Shield ? -.15f : .25f, 0,
-                        piece.Key == ArmorSlot.Shield ? .4f : .2f), orientation);
+                        piece.Key == ArmorSlot.Shield ? .4f : .2f) * scale, orientation);
                     float floor = origin.Y;
                     while (floor > .1f && !session.World.IsSolidAt(new System.Numerics.Vector3(origin.X, floor - .1f, origin.Z))) floor -= .1f;
                     var spin = new Vector3(piece.Key == ArmorSlot.Shield ? 2.7f : 1.8f, 0,
@@ -98,9 +98,23 @@ public sealed class WorldRenderer : IDisposable
                         orientation, spin, piece.Value, time));
                 }
             armorSeen[zombie.Id] = current;
-            DrawZombie(zombie, time, session.Feedback.GetFlash(zombie.Id));
+            DrawZombie(zombie, time, session.Feedback.GetFlash(zombie.Id), session.IsKiloUsingBuckets(zombie));
         }
         foreach (var id in armorSeen.Keys.Where(id => !session.Zombies.Any(zombie => zombie.Id == id)).ToArray()) armorSeen.Remove(id);
+        foreach (var cover in session.KiloCovers)
+        {
+            if (!cover.IsActive)
+            {
+                var carrier = session.Zombies.FirstOrDefault(zombie => zombie.Id == cover.CarrierId);
+                if (carrier is not null) DrawStowedKiloCover(carrier, cover);
+                continue;
+            }
+            var center = (cover.Min + cover.Max) * .5f;
+            var cell = new Cell((int)MathF.Floor(center.X), (int)MathF.Floor(center.Y), (int)MathF.Floor(center.Z));
+            var color = BlockColor(cover.Material, null, cell);
+            dynamic.Box(ToXna(cover.Min), ToXna(cover.Max), color);
+            dynamic.Outline(ToXna(cover.Min) + new Vector3(.016f), ToXna(cover.Max) - new Vector3(.016f), color * .72f, .012f);
+        }
         fallenArmor.RemoveAll(piece => time - piece.Started > 2.5);
         foreach (var piece in fallenArmor)
         {
@@ -125,6 +139,27 @@ public sealed class WorldRenderer : IDisposable
                 var offset = tail - position;
                 if (offset.LengthSquared() > .35f * .35f) tail = position + Vector3.Normalize(offset) * .35f;
                 dynamic.Line(position, tail, .02f, color);
+            }
+        }
+        foreach (var flight in session.Buckets.Flights)
+        {
+            var color = LiquidColor(flight.Kind);
+            var position = ToXna(flight.Position);
+            float radius = .055f + .06f * MathF.Sqrt(flight.Units / (float)Balance.BucketCapacity);
+            dynamic.Box(position - new Vector3(radius), position + new Vector3(radius), color);
+            dynamic.Box(position - new Vector3(radius * .55f, radius * 1.6f, radius * .55f),
+                position + new Vector3(radius * .55f, radius * 1.6f, radius * .55f), color);
+            // A short trail follows the actual continuing parabola, including
+            // its longer descent when the landing ground is below the thrower.
+            float startAge = Math.Max(0, flight.Age - .18f);
+            var previous = ToXna(flight.GetPositionAt(startAge));
+            for (int segment = 1; segment <= 6; segment++)
+            {
+                float age = MathHelper.Lerp(startAge, flight.Age, segment / 6f);
+                var point = ToXna(flight.GetPositionAt(age));
+                float width = .008f + .015f * segment / 6f;
+                dynamic.Line(previous, point, width, color);
+                previous = point;
             }
         }
         if (showZones)
@@ -278,15 +313,18 @@ public sealed class WorldRenderer : IDisposable
         }
         if (turret.UpgradePoints.Values.Any(points => points > 0)) dynamic.Cylinder(p + Vector3.Up * .27f, .305f, .305f, .04f, new Color(235, 189, 105));
     }
-    private void DrawZombie(Zombie zombie, double time, float flash)
+    private void DrawZombie(Zombie zombie, double time, float flash, bool kiloUsingBuckets)
     {
         int firstVertex = dynamic.Vertices.Count;
         var p = ZombieFeet(zombie);
         var skin = new Color(115, 144, 99); var dark = new Color(43, 63, 53);
         float stride = MathF.Sin((float)time * 7 + zombie.Id) * .08f;
-        dynamic.Box(p + new Vector3(-.21f, .04f + stride, -.14f), p + new Vector3(-.045f, .39f + stride, .14f), dark);
-        dynamic.Box(p + new Vector3(.045f, .04f - stride, -.14f), p + new Vector3(.21f, .39f - stride, .14f), dark);
-        dynamic.Box(p + new Vector3(-.24f, .38f, -.17f), p + new Vector3(.24f, .84f, .17f), skin);
+        float sole = zombie.Size == ZombieSize.Kilo ? .09f : .04f;
+        dynamic.Box(p + new Vector3(-.21f, sole + stride, -.14f), p + new Vector3(-.045f, .39f + stride, .14f), dark);
+        dynamic.Box(p + new Vector3(.045f, sole - stride, -.14f), p + new Vector3(.21f, .39f - stride, .14f), dark);
+        var torsoWidth = zombie.Size == ZombieSize.Kilo ? .36f : .24f;
+        var torsoDepth = zombie.Size == ZombieSize.Kilo ? .20f : .17f;
+        dynamic.Box(p + new Vector3(-torsoWidth, .38f, -torsoDepth), p + new Vector3(torsoWidth, .84f, torsoDepth), skin);
         dynamic.Box(p + new Vector3(-.20f, .84f, -.19f), p + new Vector3(.20f, 1.21f, .19f), skin);
         dynamic.Box(p + new Vector3(-.39f, .42f, -.11f), p + new Vector3(-.25f, .87f, .14f), skin);
         dynamic.Box(p + new Vector3(.25f, .42f, -.11f), p + new Vector3(.39f, .87f, .14f), skin);
@@ -294,12 +332,46 @@ public sealed class WorldRenderer : IDisposable
         var tier = ArmorColor(zombie.Tier);
         foreach (var piece in zombie.ArmorPieces)
         {
-            var (min, max) = ArmorBounds(piece.Slot);
+            var (min, max) = ZombieArmorBounds(zombie, piece.Slot);
             dynamic.Box(p + min, p + max, ArmorColor(piece.Tier));
         }
         if (zombie.Kind is ZombieKind.Armed or ZombieKind.ArmedArmored)
             dynamic.Box(p + new Vector3(.35f, .33f, -.09f), p + new Vector3(.46f, 1.10f, .04f), tier);
-        if (zombie.CarriedBlocks > 0)
+        if (zombie.Size == ZombieSize.Kilo || zombie.CarriesBucket)
+        {
+            // Each bucket has its own fill. Kilos keep both buckets on their
+            // backs while guarding, and bring the pair forward while scooping.
+            for (int bucketIndex = 0; bucketIndex < zombie.BucketCount; bucketIndex++)
+            {
+                int firstBucketVertex = dynamic.Vertices.Count;
+                var load = zombie.BucketLoads[bucketIndex];
+                var metal = new Color(156, 171, 178);
+                var rim = new Color(208, 219, 222);
+                dynamic.Box(p + new Vector3(-.20f, .43f, -.54f), p + new Vector3(.20f, .49f, -.20f), metal);
+                dynamic.Box(p + new Vector3(-.20f, .49f, -.54f), p + new Vector3(-.165f, .91f, -.20f), metal);
+                dynamic.Box(p + new Vector3(.165f, .49f, -.54f), p + new Vector3(.20f, .91f, -.20f), metal);
+                dynamic.Box(p + new Vector3(-.165f, .49f, -.54f), p + new Vector3(.165f, .91f, -.505f), metal);
+                dynamic.Box(p + new Vector3(-.165f, .49f, -.235f), p + new Vector3(.165f, .91f, -.20f), metal);
+                dynamic.Box(p + new Vector3(-.165f, .49f, -.505f), p + new Vector3(.165f, .50f, -.235f), new Color(41, 52, 58));
+                if (load.Units > 0 && load.Kind is { } liquid)
+                {
+                    float fill = .50f + .34f * Math.Clamp(load.Units / (float)Balance.BucketCapacity, 0, 1);
+                    dynamic.Box(p + new Vector3(-.163f, .50f, -.503f), p + new Vector3(.163f, fill, -.237f), LiquidColor(liquid));
+                }
+                dynamic.Outline(p + new Vector3(-.20f, .895f, -.54f), p + new Vector3(.20f, .925f, -.20f), rim, .009f);
+                dynamic.Line(p + new Vector3(-.205f, .85f, -.37f), p + new Vector3(-.205f, 1.07f, -.37f), .014f, rim);
+                dynamic.Line(p + new Vector3(-.205f, 1.07f, -.37f), p + new Vector3(.205f, 1.07f, -.37f), .014f, rim);
+                dynamic.Line(p + new Vector3(.205f, 1.07f, -.37f), p + new Vector3(.205f, .85f, -.37f), .014f, rim);
+                if (zombie.Size != ZombieSize.Kilo || !kiloUsingBuckets)
+                    foreach (float x in new[] { -.13f, .13f })
+                        dynamic.Box(p + new Vector3(x - .025f, .79f, -.24f), p + new Vector3(x + .025f, .98f, -.18f), new Color(69, 50, 34));
+                if (zombie.Size == ZombieSize.Kilo)
+                    TransformVertices(firstBucketVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(.65f, 1, .65f) *
+                        Matrix.CreateTranslation(p + new Vector3(bucketIndex == 0 ? -.21f : .21f,
+                            kiloUsingBuckets ? -.08f : .12f, kiloUsingBuckets ? .48f : 0)));
+            }
+        }
+        else if (zombie.CarriedBlocks > 0)
         {
             // The block and its straps share the body's facing transform; local -Z is the back.
             var block = BlockColor(zombie.CarriedBlockMaterial, null, zombie.Cell);
@@ -316,11 +388,49 @@ public sealed class WorldRenderer : IDisposable
                 dynamic.Vertices[i] = vertex;
             }
         // Local +Z is the face and shield front. One transform keeps every body part,
-        // equipped item aligned while preserving the one-cell body height.
-        TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(1, ZombieHeightScale, 1) *
+        // equipped item aligned at the actor's size, anchored to its actual feet.
+        TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(ZombieMeshScale(zombie)) *
             ZombieRotation(zombie) * Matrix.CreateTranslation(p));
     }
-    private static Vector3 ZombieFeet(Zombie zombie) => ToXna(zombie.Position) - new Vector3(0, .5f, 0);
+
+    private void DrawStowedKiloCover(Zombie zombie, KiloCover cover)
+    {
+        int firstVertex = dynamic.Vertices.Count;
+        var p = ZombieFeet(zombie);
+        float side = cover.BlockIndex == 0 ? -.23f : .23f;
+        var min = p + new Vector3(side - .11f, .46f, -.47f);
+        var max = p + new Vector3(side + .11f, .84f, -.25f);
+        var color = BlockColor(cover.Material, null, zombie.Cell);
+        dynamic.Box(min, max, color);
+        dynamic.Outline(min + new Vector3(.008f), max - new Vector3(.008f), color * .72f, .008f);
+        var strap = new Color(69, 50, 34);
+        dynamic.Box(p + new Vector3(side - .018f, .45f, -.472f), p + new Vector3(side + .018f, .85f, -.24f), strap);
+        dynamic.Box(p + new Vector3(side - .112f, .62f, -.472f), p + new Vector3(side + .112f, .665f, -.24f), strap);
+        // These are inventory markers, not full-sized blocking volumes. Their
+        // compact back-mounted corners fit inside the body at every yaw.
+        TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(ZombieMeshScale(zombie)) *
+            ZombieRotation(zombie) * Matrix.CreateTranslation(p));
+    }
+    private static Vector3 ZombieMeshScale(Zombie zombie) => zombie.Size == ZombieSize.Kilo
+        // Uniform horizontal scaling keeps the farthest equipped corner below
+        // a one-block radius, so every yaw fits the same 2x2 footprint.
+        ? new Vector3(1.7f, ZombieHeightScale * 2, 1.7f)
+        : new Vector3(1, ZombieHeightScale, 1) * zombie.BodyScale;
+
+    private static (Vector3 Min, Vector3 Max) ZombieArmorBounds(Zombie zombie, ArmorSlot slot)
+    {
+        var (min, max) = ArmorBounds(slot);
+        if (zombie.Size == ZombieSize.Kilo && slot == ArmorSlot.Chestplate)
+        {
+            min.X *= 1.45f;
+            max.X *= 1.45f;
+            min.Z = -.22f;
+            max.Z = .22f;
+        }
+        return (min, max);
+    }
+
+    private static Vector3 ZombieFeet(Zombie zombie) => ToXna(zombie.Position) - new Vector3(0, zombie.StandingHeight, 0);
     private static Matrix ZombieRotation(Zombie zombie)
     {
         var facing = ToXna(zombie.Facing);
@@ -349,6 +459,12 @@ public sealed class WorldRenderer : IDisposable
     {
         GearTier.Wood => new Color(137, 100, 67), GearTier.Stone => new Color(137, 146, 155), GearTier.Copper => new Color(188, 123, 83),
         GearTier.Iron => new Color(189, 201, 207), GearTier.Gold => new Color(241, 186, 62), GearTier.Diamond => new Color(100, 207, 233), _ => new Color(107, 101, 139)
+    };
+    private static Color LiquidColor(LiquidKind kind) => kind switch
+    {
+        LiquidKind.Water => new Color(58, 142, 211),
+        LiquidKind.Mercury => new Color(184, 197, 215),
+        _ => new Color(248, 102, 32)
     };
     public static Vector3 ToXna(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
     public void Dispose() { terrain?.Dispose(); effect.Dispose(); }

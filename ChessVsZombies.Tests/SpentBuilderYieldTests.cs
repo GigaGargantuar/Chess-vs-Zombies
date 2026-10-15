@@ -156,7 +156,7 @@ public class SpentBuilderYieldTests
             foreach (var zombie in game.Zombies)
             {
                 Assert.Equal(Balance.ZombieHp, zombie.Hp);
-                Assert.InRange(Vector3.Distance(previous[zombie.Id], zombie.Position), 0, .018f);
+                Assert.InRange(Vector3.Distance(previous[zombie.Id], zombie.Position), 0, zombie.MovementSpeed * .02f + .00001f);
                 Assert.Equal(Material.Air, game.World.GetMaterial(zombie.Cell));
             }
             inspect?.Invoke();

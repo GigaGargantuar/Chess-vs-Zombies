@@ -41,9 +41,8 @@ public sealed partial class GameSession
             : selected with { Units = selected.Units + 1, Hp = selected.Hp + LiquidSystem.ObsidianHpPerUnit };
         if (existing is null && !TouchesNeighborBlock(proposed.Min, proposed.Max, cell + CrustDirection(face)))
             return "The first layer needs a solid block touching its supporting face.";
-        var body = new Vector3(.2f, .39f, .2f);
         if (Zombies.Any(zombie => zombie.Hp > 0 && BoundsOverlap(proposed.Min, proposed.Max,
-                zombie.Position - body, zombie.Position + body)))
+                zombie.Position - zombie.BodyHalfExtents, zombie.Position + zombie.BodyHalfExtents)))
             return "That layer would overlap a living zombie.";
         return null;
     }

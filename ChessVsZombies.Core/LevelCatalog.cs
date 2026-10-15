@@ -64,46 +64,98 @@ public sealed class LevelCatalog
                 throw new InvalidDataException("Each wave needs a finite, positive SpawnInterval.");
             if (wave.Groups == null || wave.Groups.Count == 0)
                 throw new InvalidDataException("Each wave needs at least one zombie group.");
+            if (wave.HpBudget is <= 0)
+                throw new InvalidDataException("HpBudget must be positive when specified.");
+            if (!float.IsFinite(wave.BossBudgetFraction) || wave.BossBudgetFraction < .01f || wave.BossBudgetFraction > .05f)
+                throw new InvalidDataException("BossBudgetFraction must be between 0.01 and 0.05.");
             foreach (var group in wave.Groups)
-                if (group == null || group.Count <= 0 || !Enum.IsDefined(group.Kind) || !Enum.IsDefined(group.Tier))
-                    throw new InvalidDataException("Groups need positive Count and valid Kind and Tier values.");
-            if (wave.Groups.Sum(group => (long)group.Count) > int.MaxValue)
+                if (group == null || group.Count <= 0 || !Enum.IsDefined(group.Kind) || !Enum.IsDefined(group.Tier) ||
+                    !Enum.IsDefined(group.Size) || group.IsBoss && group.Size != ZombieSize.Kilo)
+                    throw new InvalidDataException("Groups need positive Count and valid Kind, Tier, and Size values; bosses must be Kilos.");
+            if (wave.HpBudget.HasValue && !wave.Groups.Any(group => !group.IsBoss))
+                throw new InvalidDataException("A budgeted wave needs at least one normal spawn type.");
+            if (!wave.HpBudget.HasValue && wave.Groups.Sum(group => (long)group.Count) > int.MaxValue)
                 throw new InvalidDataException("A wave's total zombie count exceeds the supported integer range.");
         }
     }
 
-    public static int ZombieMaxHp(ZombieKind kind, GearTier tier) => Balance.ZombieHp +
-        (kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 3 * Balance.GearHp(tier) : 0);
+    public static int ZombieMaxHp(ZombieKind kind, GearTier tier, ZombieSize size = ZombieSize.Standard)
+    {
+        int standard = Balance.ZombieHp +
+            (kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 3 * Balance.GearHp(tier) : 0);
+        return size switch
+        {
+            ZombieSize.Milli => standard / 2,
+            ZombieSize.Standard => standard,
+            ZombieSize.Kilo => standard * 4,
+            _ => throw new ArgumentOutOfRangeException(nameof(size))
+        };
+    }
     public static int ZombieAttack(ZombieKind kind, GearTier tier) => Balance.BaseAttack +
         (kind is ZombieKind.Armed or ZombieKind.ArmedArmored ? Balance.WeaponAttack(tier) : 0);
 
+    /// <summary>The strongest armor unlocked by the generated campaign, or none before wave five.</summary>
+    public static GearTier? HighestAvailableArmorTier(int levelNumber)
+    {
+        if (levelNumber < 1) throw new ArgumentOutOfRangeException(nameof(levelNumber));
+        return levelNumber < 5 ? null : (GearTier)Math.Clamp(levelNumber / 5 - 1, 0, 6);
+    }
+
     private static LevelDefinition Generate(int number)
     {
-        var tier = (GearTier)Math.Min(6, (number - 1) / 5);
-        var groups = new List<ZombieGroup> { new() { Kind = ZombieKind.Basic, Tier = tier, Count = 6 + number * 2 } };
-        if (number >= 2) groups.Add(new() { Kind = ZombieKind.Armed, Tier = tier, Count = 1 + number / 3 });
-        if (number >= 3) groups.Add(new() { Kind = ZombieKind.Armored, Tier = tier, Count = 1 + number / 4 });
-        if (number >= 5) groups.Add(new() { Kind = ZombieKind.ArmedArmored, Tier = tier, Count = 1 + number / 5 });
-        if (number >= 3)
+        var unlockedArmor = HighestAvailableArmorTier(number);
+        var tier = unlockedArmor ?? GearTier.Wood;
+        int total = checked(6 + number * 2);
+        float gearedShare = number < 5 ? 0 : number < 10 ? .2f + (number - 5) * .15f : .85f;
+        int geared = (int)Math.Round(total * gearedShare);
+        var groups = new List<ZombieGroup>();
+        void AddSizedGroups(ZombieKind kind, GearTier gear, int count)
         {
-            // Keep the generated spawn budget while targeting four unarmored bodies per armored body.
-            int total = groups.Sum(group => group.Count);
-            int armored = Math.Max(1, (total + 2) / 5);
-            int fodder = total - armored;
-            int armed = Math.Min(groups.First(group => group.Kind == ZombieKind.Armed).Count, fodder - 1);
-            groups =
-            [
-                new() { Kind = ZombieKind.Basic, Tier = tier, Count = fodder - armed },
-                new() { Kind = ZombieKind.Armed, Tier = tier, Count = armed },
-                new() { Kind = ZombieKind.Armored, Tier = tier, Count = number >= 5 ? (armored + 1) / 2 : armored }
-            ];
-            if (number >= 5) groups.Add(new() { Kind = ZombieKind.ArmedArmored, Tier = tier, Count = armored / 2 });
+            int millis = count / 5;
+            if (count - millis > 0)
+                groups.Add(new ZombieGroup { Kind = kind, Tier = gear, Count = count - millis });
+            if (millis > 0)
+                groups.Add(new ZombieGroup { Kind = kind, Tier = gear, Count = millis, Size = ZombieSize.Milli });
         }
+        AddSizedGroups(ZombieKind.Basic, GearTier.Wood, total - geared);
+        if (geared > 0)
+        {
+            int lowerCount = (int)tier;
+            int lowerSpawns = lowerCount == 0 ? 0 : Math.Max(lowerCount, (int)Math.Round(geared * .3));
+            var tierCounts = new int[lowerCount + 1];
+            // Every previous tier retains at least one armored representative.
+            if (lowerCount > 0)
+            {
+                // A triangular cycle gives the more recent lower tiers a greater share.
+                int cycle = lowerCount * (lowerCount + 1) / 2;
+                int extras = lowerSpawns - lowerCount;
+                for (int previous = 0; previous < lowerCount; previous++)
+                    tierCounts[previous] = 1 + extras / cycle * (previous + 1) +
+                        Math.Clamp(extras % cycle - previous * (previous + 1) / 2, 0, previous + 1);
+            }
+            tierCounts[lowerCount] = geared - lowerSpawns;
+            for (int gear = 0; gear < tierCounts.Length; gear++)
+            {
+                int count = tierCounts[gear];
+                AddSizedGroups(ZombieKind.Armored, (GearTier)gear, (count + 2) / 3);
+                AddSizedGroups(ZombieKind.ArmedArmored, (GearTier)gear, (count + 1) / 3);
+                AddSizedGroups(ZombieKind.Armed, (GearTier)gear, count / 3);
+            }
+        }
+        const float bossFraction = .03f;
+        long normalHp = groups.Sum(group => (long)group.Count * ZombieMaxHp(group.Kind, group.Tier, group.Size));
+        int hpBudget = checked((int)decimal.Ceiling(normalHp / (1m - (decimal)bossFraction)));
+        groups.Add(new ZombieGroup
+        {
+            Kind = unlockedArmor.HasValue ? ZombieKind.Armored : ZombieKind.Basic,
+            Tier = tier, Size = ZombieSize.Kilo, IsBoss = true
+        });
         return new LevelDefinition
         {
             Number = number,
             Name = number == 1 ? "First contact" : $"{tier} siege {number}",
-            Waves = [new WaveDefinition { SpawnInterval = Math.Max(.3f, 1.4f - number * .025f), Groups = groups }]
+            Waves = [new WaveDefinition { SpawnInterval = Math.Max(.3f, 1.4f - number * .025f), Groups = groups,
+                HpBudget = hpBudget, BossBudgetFraction = bossFraction }]
         };
     }
 
@@ -114,7 +166,10 @@ public sealed class LevelCatalog
         Waves = level.Waves.Select(wave => new WaveDefinition
         {
             SpawnInterval = wave.SpawnInterval,
-            Groups = wave.Groups.Select(group => new ZombieGroup { Kind = group.Kind, Tier = group.Tier, Count = group.Count }).ToList()
+            HpBudget = wave.HpBudget,
+            BossBudgetFraction = wave.BossBudgetFraction,
+            Groups = wave.Groups.Select(group => new ZombieGroup { Kind = group.Kind, Tier = group.Tier, Count = group.Count,
+                Size = group.Size, IsBoss = group.IsBoss }).ToList()
         }).ToList()
     };
 }

@@ -75,14 +75,14 @@ public sealed class ObsidianPairGeometryTests
     public void ZombieBodyAndFootingUseBothSlabsWithoutFillingTheGap()
     {
         var game = Pair();
-        var clear = Method<Func<Vector3, bool>>(game, "IsBodyClear");
+        var clear = Method<Func<Vector3, Zombie?, bool>>(game, "IsBodyClear");
         var floor = Method<FindFloor>(game, "TrySolidFloor");
 
-        Assert.True(clear(CrustCell.Center));
-        Assert.False(clear(new Vector3(8.75f, 16.5f, 8.5f)));
-        Assert.True(floor(new Vector3(8.9f, 17.5f, 8.5f), out var eastHeight));
+        Assert.True(clear(CrustCell.Center, null));
+        Assert.False(clear(new Vector3(8.75f, 16.5f, 8.5f), null));
+        Assert.True(floor(new Vector3(8.9f, 17.5f, 8.5f), out var eastHeight, null));
         Assert.Equal(17.5f, eastHeight);
-        Assert.True(floor(new Vector3(8.5f, 17.5f, 8.5f), out var gapHeight));
+        Assert.True(floor(new Vector3(8.5f, 17.5f, 8.5f), out var gapHeight, null));
         Assert.Equal(16.5f, gapHeight);
     }
 
@@ -90,9 +90,9 @@ public sealed class ObsidianPairGeometryTests
     public void JumpSweepDetectsTheOppositeSlabInsteadOfPassingThroughIt()
     {
         var game = Pair(primaryUnits: 1, oppositeUnits: 4);
-        var clear = Method<Func<Cell, Cell, float, float, float, bool>>(game, "IsJumpArcClear");
+        var clear = Method<Func<Cell, Cell, float, float, float, Zombie?, bool>>(game, "IsJumpArcClear");
 
-        Assert.False(clear(new Cell(8, 16, 7), new Cell(8, 16, 9), .1f, 0, 1));
+        Assert.False(clear(new Cell(8, 16, 7), new Cell(8, 16, 9), .1f, 0, 1, null));
     }
 
     [Fact]
@@ -145,7 +145,7 @@ public sealed class ObsidianPairGeometryTests
         Duration = .1f, Damage = damage, TargetId = -1
     };
 
-    private delegate bool FindFloor(Vector3 position, out float height);
+    private delegate bool FindFloor(Vector3 position, out float height, Zombie? zombie);
     private static T Method<T>(object target, string name) where T : Delegate =>
         target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.CreateDelegate<T>(target);
 }

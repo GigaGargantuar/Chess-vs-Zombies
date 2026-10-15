@@ -40,7 +40,21 @@ public sealed partial class GameSession
                 var endAge = startAge + dt * sample / steps;
                 var to = projectile.GetPositionAt(endAge);
                 if (!ProjectilePointIsFinite(from) || !ProjectilePointIsFinite(to)) { stopped = true; break; }
-                if (FindProjectileImpact(from, to, out var fraction, out var terrain, out var zombie, out var crustFace))
+                bool hitSomething = FindProjectileImpact(from, to, out var fraction, out var terrain, out var zombie, out var crustFace);
+                if (zombie is { Size: ZombieSize.Kilo }) TryInterceptKiloShot(zombie, from, to, fraction);
+                if (TryFindKiloCoverImpact(from, to, out var coverFraction, out var carrierId, out var blockIndex) && coverFraction <= fraction)
+                {
+                    DamageKiloCover(carrierId, blockIndex, projectile.Damage);
+                    var carrier = Zombies.FirstOrDefault(candidate => candidate.Id == carrierId && candidate.Hp > 0);
+                    if (carrier != null)
+                    {
+                        var previousAge = startAge + dt * (sample - 1) / steps;
+                        var hitAge = previousAge + (endAge - previousAge) * coverFraction;
+                        FaceKiloTowardShot(carrier, projectile.GetTravelDirection(hitAge));
+                    }
+                    stopped = true;
+                }
+                else if (hitSomething)
                 {
                     var previousAge = startAge + dt * (sample - 1) / steps;
                     var hitAge = previousAge + (endAge - previousAge) * fraction;
@@ -103,7 +117,11 @@ public sealed partial class GameSession
                 }
         foreach (var candidate in Zombies)
         {
-            if (candidate.Hp <= 0 || !ProjectileBodyIntersection(from, delta, candidate.Position, out var hit) || hit >= fraction) continue;
+            if (candidate.Hp <= 0) continue;
+            bool intersects = candidate.Size == ZombieSize.Kilo
+                ? ProjectileBoxIntersection(from, delta, candidate.Position - candidate.BodyHalfExtents, candidate.Position + candidate.BodyHalfExtents, out var hit)
+                : ProjectileBodyIntersection(from, delta, candidate.Position, out hit, candidate.BodyScale);
+            if (!intersects || hit >= fraction) continue;
             fraction = hit;
             zombie = candidate;
             terrain = null;
@@ -129,11 +147,11 @@ public sealed partial class GameSession
         if (destroyed) SettleDefenses();
     }
 
-    private static bool ProjectileBodyIntersection(Vector3 from, Vector3 delta, Vector3 center, out float hit)
+    private static bool ProjectileBodyIntersection(Vector3 from, Vector3 delta, Vector3 center, out float hit, float bodyScale = 1)
     {
         // Preserve the existing half-block hit radius, but resolve its first contact.
         var offset = from - center;
-        var c = Vector3.Dot(offset, offset) - .25f;
+        var c = Vector3.Dot(offset, offset) - .25f * bodyScale * bodyScale;
         if (c <= 0) { hit = 0; return true; }
         var a = Vector3.Dot(delta, delta);
         var b = Vector3.Dot(offset, delta);

@@ -117,9 +117,9 @@ public sealed partial class GameSession
 
     private bool TryBuildBridge(Zombie zombie, Cell from, Cell next)
     {
-        if (zombie.CarriedBlocks == 0 || zombie.Cooldown > 0 || from.Y != next.Y ||
-            !IsValidStep(from, next) || !HasZombieSupport(from) ||
-            Vector3.DistanceSquared(zombie.Position, from.Center) > .000001f) return false;
+        if (AvailableConstructionBlocks(zombie) == 0 || zombie.Cooldown > 0 || from.Y != next.Y ||
+            !IsValidStep(from, next) || !HasZombieSupport(from, zombie) ||
+            Vector3.DistanceSquared(zombie.Position, zombie.StandAt(from)) > .000001f) return false;
         var floor = next + new Cell(0, -1, 0);
         if (!IsEmpty(floor) || !World.HasOrthogonalBlockSupport(floor) || !IsEmpty(next)) return false;
         if (IsOccupiedByZombie(floor))
@@ -127,20 +127,35 @@ public sealed partial class GameSession
             RequestBuilderYield(zombie, from, floor);
             return false;
         }
-        if (!World.RestoreTerrainPlacement(floor, zombie.CarriedBlockMaterial)) return false;
-        zombie.CarriedBlocks--;
-        zombie.FaceToward(next.Center - zombie.Position);
+        if (zombie.CarriedBlocks > 0)
+        {
+            if (!World.RestoreTerrainPlacement(floor, zombie.CarriedBlockMaterial)) return false;
+            zombie.CarriedBlocks--;
+        }
+        else
+        {
+            if (!TryPeekKiloConstructionBlock(zombie, out var block)) return false;
+            bool placed = block.WasBarrier ? World.AddBarrier(floor, block.Content, block.Hp) : World.RestoreTerrainPlacement(floor, block.Content);
+            if (!placed) return false;
+            if (!block.WasBarrier && block.Hp is { } hp && hp < Balance.BlockHp(block.Content)) World.RestoreTerrainHp(floor, hp);
+            ConsumeKiloConstructionBlock(zombie);
+        }
+        zombie.FaceToward(zombie.StandAt(next) - zombie.Position);
+        RecordZombieProgress(zombie);
         zombie.Cooldown = 1;
         SettleDefenses();
         return true;
     }
+
+    private int AvailableConstructionBlocks(Zombie zombie) => zombie.CarriedBlocks + GetKiloConstructionBlocks(zombie);
 
     private void QueueDeathBlock(Zombie zombie)
     {
         if (zombie.Hp > 0 || zombie.CarriedBlocks == 0) return;
         var cell = zombie.Cell;
         cell = new Cell(Math.Clamp(cell.X, 0, WorldGrid.Size - 1), Math.Clamp(cell.Y, 0, WorldGrid.Size - 1), Math.Clamp(cell.Z, 0, WorldGrid.Size - 1));
-        _pendingBlockDrops.Add(new BlockDrop(cell, zombie.CarriedBlockMaterial));
+        for (int index = 0; index < zombie.CarriedBlocks; index++)
+            _pendingBlockDrops.Add(new BlockDrop(cell, zombie.CarriedBlockMaterial));
         zombie.CarriedBlocks = 0;
     }
 
@@ -163,7 +178,13 @@ public sealed partial class GameSession
             }
             // A completely obstructed column retains the finite block for a
             // later geometry change; pending drops are included in checkpoints.
-            if (!destination.HasValue || !World.RestoreTerrainPlacement(destination.Value, drop.Content)) { i++; continue; }
+            if (!destination.HasValue) { i++; continue; }
+            bool restored = drop.WasBarrier
+                ? World.AddBarrier(destination.Value, drop.Content, drop.Hp)
+                : World.RestoreTerrainPlacement(destination.Value, drop.Content);
+            if (!restored) { i++; continue; }
+            if (!drop.WasBarrier && drop.Hp is { } hp && hp < Balance.BlockHp(drop.Content))
+                World.RestoreTerrainHp(destination.Value, hp);
             _pendingBlockDrops.RemoveAt(i);
             placed = true;
         }

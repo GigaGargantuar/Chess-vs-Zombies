@@ -171,7 +171,8 @@ public class JumpTraversalTests
             Assert.True(zombie.Hp > 0);
             Assert.InRange(zombie.Position.Y, start.Center.Y - .0001f, start.Center.Y + 2.001f);
             Assert.InRange(zombie.Position.X, before.X - .0001f, landing.Center.X + .0001f);
-            Assert.InRange(Vector3.Distance(before, zombie.Position), 0, .08f);
+            // A two-block jump rises at most four times its horizontal speed.
+            Assert.InRange(Vector3.Distance(before, zombie.Position), 0, zombie.MovementSpeed * .02f * MathF.Sqrt(17) + .00001f);
             AssertBodyClear(game, zombie);
             peak = Math.Max(peak, zombie.Position.Y);
         }

@@ -18,12 +18,15 @@ public enum ToolKind { Shovel, Pickaxe }
 public enum PieceKind { Pawn, Knight, Bishop, Rook }
 public enum UpgradeKind { HP, ATK, Orthogonal, PlaneDiagonal, SpaceDiagonal, Jump }
 public enum ZombieKind { Basic, Armed, Armored, ArmedArmored }
+public enum ZombieSize { Standard, Milli, Kilo }
+public enum KiloEquipmentMode { Covers, Buckets }
 public enum GearTier { Wood, Stone, Copper, Iron, Gold, Diamond, Osmium }
 public enum GamePhase { Building, Combat, Defeat }
 public enum ShotKind { Melee, Pellet, Lob }
 public enum DamageKind { Pierce, Blunt, Chemical, Thermal }
 public enum ArmorSlot { Shield, Chestplate, Helmet }
-public sealed record BlockDrop([property: JsonRequired] Cell Cell, [property: JsonRequired] Material Content);
+public sealed record BlockDrop([property: JsonRequired] Cell Cell, [property: JsonRequired] Material Content,
+    float? Hp = null, bool WasBarrier = false);
 
 public static class Balance
 {
@@ -39,6 +42,8 @@ public static class Balance
     public const int FallDamageMinimumBlocks = 4, FallDamagePerBlock = 5;
     public const float ChemicalDamagePerSecond = 5, LavaDamagePerSecond = 10, SteamDamagePerSecond = 3;
     public const int DuplicatesPerRank = 10;
+    public const int BucketCapacity = 10, BucketCarrierInterval = 5;
+    public const float BucketReach = 2, BucketActionSeconds = 1;
     public const int HpUpgradePerPoint = 10, AtkUpgradePerPoint = 1;
     // Retained constant names for source compatibility; ranks set caps, never stat bonuses.
     public const int HpUpgradePerRank = HpUpgradePerPoint, AtkUpgradePerRank = AtkUpgradePerPoint;
@@ -121,7 +126,16 @@ public sealed class ArmorPiece
     public GearTier Tier { get; init; }
     public float Hp { get; internal set; }
     public float HeatProtectionRemaining { get; internal set; }
+    public float DurabilityMultiplier { get; init; } = 1;
+    public float MaxHp => Balance.GearHp(Tier) * DurabilityMultiplier;
     public bool Resists(DamageKind kind) => kind == DamageKind.Thermal && Tier == GearTier.Osmium && HeatProtectionRemaining > 0;
+}
+
+/// <summary>One physical bucket's payload; different buckets can hold different liquids.</summary>
+public sealed class ZombieBucketLoad
+{
+    public int Units { get; internal set; }
+    public LiquidKind? Kind { get; internal set; }
 }
 
 public sealed class Zombie
@@ -129,13 +143,51 @@ public sealed class Zombie
     private List<ArmorPiece>? _armor;
     private float _bodyHp = Balance.ZombieHp;
     private float? _maximumHp;
+    private int _carriedBlocks = 1;
+    private ZombieSize _size;
+    private Vector3? _guardFacing;
     public int Id { get; init; }
-    public int WaveIndex { get; init; }
-    public ZombieKind Kind { get; init; }
-    public GearTier Tier { get; init; }
+    public int WaveIndex { get; set; }
+    public ZombieKind Kind { get; set; }
+    public GearTier Tier { get; set; }
+    public int RetreatReturns { get; internal set; }
+    public int OriginalBudgetCost { get; internal set; }
+    public ZombieSize Size
+    {
+        get => _size;
+        init
+        {
+            if (!Enum.IsDefined(value)) throw new ArgumentOutOfRangeException(nameof(value));
+            _size = value;
+            _bodyHp = MaxBodyHp;
+            _armor = null;
+        }
+    }
+    public bool IsBoss { get; init; }
+    public float BodyScale => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, _ => 1 };
+    public float HealthMultiplier => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, _ => 1 };
+    public float MaxBodyHp => Balance.ZombieHp * HealthMultiplier;
+    public Vector3 BodyHalfExtents => Size == ZombieSize.Kilo ? Vector3.One : new Vector3(.2f, .39f, .2f) * BodyScale;
+    public int GridFootprint => Size == ZombieSize.Kilo ? 2 : 1;
+    public float StandingHeight => .5f * BodyScale;
+    public bool HasWeapon => Kind is ZombieKind.Armed or ZombieKind.ArmedArmored;
+    public float MovementSpeed => NavigationCosts.WalkTilesPerSecond * (HasWeapon ? 1 : 1.5f) *
+        (Size switch { ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, _ => 1 });
+    public Vector3 StandAt(Cell cell) => cell.Center + new Vector3((GridFootprint - 1) * .5f, StandingHeight - .5f, (GridFootprint - 1) * .5f);
     public Vector3 Position { get; set; }
     public Vector3 Facing { get; private set; } = Vector3.UnitZ;
-    public int CarriedBlocks { get; internal set; } = 1;
+    private bool _carriesBucket;
+    public bool CarriesBucket { get => Size == ZombieSize.Kilo || _carriesBucket; set => _carriesBucket = value; }
+    public KiloEquipmentMode KiloEquipmentMode { get; internal set; } = KiloEquipmentMode.Covers;
+    public float KiloBucketActionRemaining { get; internal set; }
+    private readonly ZombieBucketLoad[] _bucketLoads = [new(), new()];
+    public int BucketCount => Size == ZombieSize.Kilo ? 2 : 1;
+    public IReadOnlyList<ZombieBucketLoad> BucketLoads => _bucketLoads;
+    public int HeldBucketUnits => _bucketLoads[0].Units + _bucketLoads[1].Units;
+    // Preserve the original one-bucket API for existing callers and checkpoints.
+    public int BucketUnits { get => _bucketLoads[0].Units; internal set => _bucketLoads[0].Units = value; }
+    public LiquidKind? BucketKind { get => _bucketLoads[0].Kind; internal set => _bucketLoads[0].Kind = value; }
+    public int CarriedBlocks { get => CarriesBucket && Size != ZombieSize.Kilo ? 0 : _carriedBlocks; internal set => _carriedBlocks = value; }
     public Material CarriedBlockMaterial => Kind == ZombieKind.Basic ? Material.Dirt : Tier switch
     {
         GearTier.Wood => Material.Wood,
@@ -162,13 +214,13 @@ public sealed class Zombie
             else
             {
                 _armor = null;
-                _bodyHp = Balance.ZombieHp;
+                _bodyHp = MaxBodyHp;
                 EnsureArmor();
                 ApplySequentialDamage(Math.Max(0, Hp - value));
             }
         }
     }
-    public float MaxHp { get => _maximumHp ?? Balance.ZombieHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 3 * Balance.GearHp(Tier) : 0); init => _maximumHp = value; }
+    public float MaxHp { get => _maximumHp ?? (Balance.ZombieHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 3 * Balance.GearHp(Tier) : 0)) * HealthMultiplier; init => _maximumHp = value; }
     public float AirRemaining { get; internal set; } = Balance.AirSeconds;
     public bool SinksIn(LiquidKind liquid) => liquid switch
     {
@@ -177,21 +229,35 @@ public sealed class Zombie
         LiquidKind.Lava => ArmorPieces.Any(piece => piece.Tier >= GearTier.Iron),
         _ => throw new ArgumentOutOfRangeException(nameof(liquid))
     };
-    public int Attack { get; init; }
+    public int Attack { get; set; }
     public float MoveProgress { get; set; }
     public float Cooldown { get; set; }
     public float DamageSinceLaneSwitch { get; set; }
     public int Lane { get; set; }
     public Cell? NextCell { get; set; }
-    public Cell Cell => new((int)MathF.Floor(Position.X), (int)MathF.Floor(Position.Y), (int)MathF.Floor(Position.Z));
+    public Cell Cell => CellAt(Position);
+    public Cell CellAt(Vector3 position) => new((int)MathF.Floor(position.X - (GridFootprint - 1) * .5f),
+        (int)MathF.Floor(position.Y - StandingHeight + .5f), (int)MathF.Floor(position.Z - (GridFootprint - 1) * .5f));
 
     /// <summary>Faces a travel or attack direction while keeping the body upright.</summary>
     public void FaceToward(Vector3 direction)
     {
+        if (_guardFacing is { } guard) { Facing = guard; return; }
         if (!float.IsFinite(direction.X) || !float.IsFinite(direction.Y) || !float.IsFinite(direction.Z)) return;
         var length = Math.Sqrt((double)direction.X * direction.X + (double)direction.Z * direction.Z);
         if (length == 0) return;
         Facing = new Vector3((float)(direction.X / length), 0, (float)(direction.Z / length));
+    }
+
+    /// <summary>Keeps cover toward the latest incoming fire independently of the carrier's travel direction.</summary>
+    internal void SetGuardFacing(Vector3? direction)
+    {
+        if (direction is not { } value) { _guardFacing = null; return; }
+        if (!float.IsFinite(value.X) || !float.IsFinite(value.Y) || !float.IsFinite(value.Z)) return;
+        var length = Math.Sqrt((double)value.X * value.X + (double)value.Z * value.Z);
+        if (length == 0) return;
+        _guardFacing = new Vector3((float)(value.X / length), 0, (float)(value.Z / length));
+        Facing = _guardFacing.Value;
     }
 
     private void EnsureArmor()
@@ -203,9 +269,32 @@ public sealed class Zombie
         foreach (var slot in Enum.GetValues<ArmorSlot>())
             _armor.Add(new ArmorPiece
             {
-                Slot = slot, Tier = Tier, Hp = Balance.GearHp(Tier),
+                Slot = slot, Tier = Tier, Hp = Balance.GearHp(Tier) * HealthMultiplier,
+                DurabilityMultiplier = HealthMultiplier,
                 HeatProtectionRemaining = Tier == GearTier.Osmium ? Balance.HeatProtectionSecondsPerPiece : 0
             });
+    }
+
+    internal float ReequipArmor(GearTier? tier)
+    {
+        float before = Hp;
+        if (tier.HasValue)
+        {
+            Tier = tier.Value;
+            Kind = HasWeapon ? ZombieKind.ArmedArmored : ZombieKind.Armored;
+        }
+        _maximumHp = null;
+        _armor = null;
+        EnsureArmor();
+        Attack = LevelCatalog.ZombieAttack(Kind, Tier);
+        return Hp - before;
+    }
+
+    internal void RestoreBodyAndArmor(float bodyHp, IEnumerable<ArmorPiece> armor)
+    {
+        _bodyHp = bodyHp;
+        _armor = armor.ToList();
+        _maximumHp = null;
     }
 
     internal void ApplyDamage(float damage, DamageKind kind, ShotKind? shot = null, Vector3? incomingDirection = null)
@@ -221,6 +310,7 @@ public sealed class Zombie
             else if (delivery == ShotKind.Pellet) AbsorbWith(ArmorSlot.Chestplate, ref damage);
         }
         _bodyHp = Math.Max(0, _bodyHp - damage);
+        if (_bodyHp <= 0) SetGuardFacing(null);
     }
 
     private bool IsShieldFacingHit(Vector3? incomingDirection)
@@ -254,6 +344,7 @@ public sealed class Zombie
         EnsureArmor();
         foreach (var slot in Enum.GetValues<ArmorSlot>()) AbsorbWith(slot, ref damage);
         _bodyHp = Math.Max(0, _bodyHp - damage);
+        if (_bodyHp <= 0) SetGuardFacing(null);
     }
 
     internal float ConsumeHeatProtection(float seconds)
@@ -309,11 +400,15 @@ public sealed class ZombieGroup
     public ZombieKind Kind { get; set; }
     public GearTier Tier { get; set; }
     public int Count { get; set; } = 1;
+    public ZombieSize Size { get; set; } = ZombieSize.Standard;
+    public bool IsBoss { get; set; }
 }
 public sealed class WaveDefinition
 {
     public float SpawnInterval { get; set; } = 1.4f;
     public List<ZombieGroup> Groups { get; set; } = [];
+    public int? HpBudget { get; set; }
+    public float BossBudgetFraction { get; set; } = .03f;
 }
 public sealed class LevelDefinition
 {
@@ -324,9 +419,14 @@ public sealed class LevelDefinition
 public sealed class WaveState
 {
     public int Index { get; init; }
-    public int TotalCount { get; init; }
+    public int TotalCount { get; set; }
     public int Spawned { get; set; }
-    public float TotalHp { get; init; }
+    public float TotalHp { get; set; }
+    public long HpBudget { get; set; }
+    public long NormalBudget { get; set; }
+    public long BossBudget { get; set; }
+    public int ReinforcementsSpawned { get; set; }
+    public long BudgetSpent { get; set; }
     public float DamageTaken { get; set; }
     public bool Started { get; set; }
     public float SpawnTimer { get; set; }

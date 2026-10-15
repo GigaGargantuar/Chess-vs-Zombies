@@ -179,7 +179,7 @@ public class GameSessionTests
     [Theory]
     [InlineData(false, 9)]
     [InlineData(true, 10)]
-    public void UnupgradedRookShootsDistantTargetsAndSolidBlocksStopItsLineOfFire(bool blocked, int expectedHp)
+    public void UnupgradedRookShootsDistantTargetsAndDamagesInterveningCover(bool blocked, int expectedHp)
     {
         var game = NewSession(new WaveDefinition { Groups = [new() { Count = 1 }] });
         Assert.True(game.Deploy(PieceKind.Rook, new Cell(1, 16, 15)));
@@ -191,10 +191,10 @@ public class GameSessionTests
         zombie.NextCell = null;
 
         game.Update(.01f);
-        if (blocked) Assert.Empty(game.Projectiles);
-        else Assert.Equal(ShotKind.Pellet, Assert.Single(game.Projectiles).Kind);
+        Assert.Equal(ShotKind.Pellet, Assert.Single(game.Projectiles).Kind);
         game.Update(.85f);
         Assert.Equal(expectedHp, zombie.Hp);
+        if (blocked) Assert.Equal(Balance.DirtBlockHp - 1, game.World.GetBarrier(new Cell(13, 16, 15))!.Hp);
     }
 
     [Fact]

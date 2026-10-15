@@ -45,11 +45,12 @@ public static class CombatOverlay
                      .OrderByDescending(z => Vector3.DistanceSquared(camera, WorldRenderer.ToXna(z.Position))))
         {
             var position = WorldRenderer.ToXna(zombie.Position);
-            if (!Project(position + Vector3.Up * .65f, out var anchor) || !Visible(position + Vector3.Up * .35f)) continue;
+            if (!Project(position + Vector3.Up * (.65f * zombie.BodyScale), out var anchor) ||
+                !Visible(position + Vector3.Up * (.35f * zombie.BodyScale))) continue;
             int rows = 1 + zombie.ArmorPieces.Count + (zombie.AirRemaining < Balance.AirSeconds ? 1 : 0);
             var x = anchor.X - 52;
             var y = anchor.Y - rows * 12;
-            Bar("HP", zombie.BodyHp, Balance.ZombieHp, new Color(242, 134, 115), x, ref y);
+            Bar("HP", zombie.BodyHp, zombie.MaxBodyHp, new Color(242, 134, 115), x, ref y);
             foreach (var slot in new[] { ArmorSlot.Helmet, ArmorSlot.Chestplate, ArmorSlot.Shield })
             {
                 var piece = zombie.ArmorPieces.FirstOrDefault(p => p.Slot == slot);
@@ -57,20 +58,21 @@ public static class CombatOverlay
                 var label = slot == ArmorSlot.Helmet ? "HELM" : slot == ArmorSlot.Chestplate ? "CHEST" : "SHIELD";
                 var color = slot == ArmorSlot.Helmet ? new Color(240, 200, 113) :
                     slot == ArmorSlot.Chestplate ? new Color(126, 209, 223) : new Color(182, 160, 239);
-                Bar(label, piece.Hp, Balance.GearHp(piece.Tier), color, x, ref y);
+                Bar(label, piece.Hp, piece.MaxHp, color, x, ref y);
             }
             if (zombie.AirRemaining < Balance.AirSeconds)
                 Bar("AIR", zombie.AirRemaining, Balance.AirSeconds, new Color(107, 185, 231), x, ref y);
         }
         foreach (var hit in session.Feedback.Hits)
         {
-            var point = WorldRenderer.ToXna(hit.Position) + Vector3.Up * (.9f + hit.Age * .8f);
-            if (!Project(point, out var anchor) || !Visible(WorldRenderer.ToXna(hit.Position) + Vector3.Up * .35f)) continue;
+            var target = session.Zombies.FirstOrDefault(z => z.Id == hit.ZombieId);
+            float bodyScale = target?.BodyScale ?? 1;
+            var point = WorldRenderer.ToXna(hit.Position) + Vector3.Up * (.9f * bodyScale + hit.Age * .8f);
+            if (!Project(point, out var anchor) || !Visible(WorldRenderer.ToXna(hit.Position) + Vector3.Up * (.35f * bodyScale))) continue;
             var amount = "-" + hit.Amount.ToString("0.##", CultureInfo.InvariantCulture);
             var color = hit.Kind == DamageKind.Chemical ? new Color(178, 244, 139) :
                 hit.Kind == DamageKind.Thermal ? new Color(255, 185, 106) : Color.White;
             float opacity = Math.Clamp((CombatFeedback.NumberDuration - hit.Age) / .3f, 0, 1);
-            var target = session.Zombies.FirstOrDefault(z => z.Id == hit.ZombieId);
             int statusRows = target is null ? 1 : 1 + target.ArmorPieces.Count + (target.AirRemaining < Balance.AirSeconds ? 1 : 0);
             var position = anchor + new Vector2((hit.Id % 3 - 1) * 30 - font.Measure(amount, 18) * .5f, -12 - statusRows * 12);
             // This pass uses straight alpha; fading RGB too would darken the label twice.

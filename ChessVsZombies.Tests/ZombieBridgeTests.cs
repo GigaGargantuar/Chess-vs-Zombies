@@ -32,7 +32,7 @@ public class ZombieBridgeTests
     }
 
     [Fact]
-    public void OneZombieCannotRegenerateBlocksToCrossAWideMoat()
+    public void ALoneBuilderMustRefillAtTheOuterEdgeBeforeExtendingItsBridge()
     {
         var game = NewSession();
         ExcavateMoat(game, 9, 12);
@@ -41,12 +41,26 @@ public class ZombieBridgeTests
         Assert.Equal(0, zombie.CarriedBlocks);
         Assert.Single(BridgeCells(game, 9, 12));
 
-        game.Update(20);
+        bool retreated = false, suppliedAtEdge = false;
+        for (int step = 0; step < 2000 && BridgeCells(game, 9, 12).Length < 2; step++)
+        {
+            int before = zombie.CarriedBlocks;
+            var position = zombie.Position;
+            game.Update(.02f);
+            retreated |= game.IsZombieRetreating(zombie);
+            Assert.InRange(System.Numerics.Vector3.Distance(position, zombie.Position), 0, zombie.MovementSpeed * .02f + .00001f);
+            if (zombie.CarriedBlocks <= before) continue;
+            Assert.True(zombie.Position.X < 1 || zombie.Position.Z < 1 || zombie.Position.X > 31 || zombie.Position.Z > 31,
+                $"A replacement block appeared in the field at {zombie.Position}.");
+            suppliedAtEdge = true;
+        }
 
         Assert.True(zombie.Hp > 0);
+        Assert.True(retreated);
+        Assert.True(suppliedAtEdge);
         Assert.Equal(0, zombie.CarriedBlocks);
-        Assert.Single(BridgeCells(game, 9, 12));
-        Assert.True(zombie.Position.X < 13, $"A lone builder crossed the wide moat at {zombie.Position}.");
+        Assert.Equal(2, BridgeCells(game, 9, 12).Length);
+        Assert.True(zombie.Position.X < 13, $"A builder skipped the remaining unsupported crossing at {zombie.Position}.");
         Assert.Equal(Balance.CoreHp, game.CoreHp);
     }
 

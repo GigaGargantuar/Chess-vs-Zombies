@@ -206,7 +206,7 @@ public class ZombieLedgeTests
             var previous = follower.Position;
             game.Update(.02f);
             Assert.True(follower.Hp > 0);
-            Assert.InRange(Vector3.Distance(previous, follower.Position), 0, .018f);
+            Assert.InRange(Vector3.Distance(previous, follower.Position), 0, follower.MovementSpeed * .02f + .00001f);
             AssertBodyClear(game, follower);
             inspect?.Invoke();
         }

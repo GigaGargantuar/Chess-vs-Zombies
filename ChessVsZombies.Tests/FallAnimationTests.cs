@@ -199,7 +199,7 @@ public class FallAnimationTests
         zombie.Lane = 0;
         game.Update(.01f);
         Assert.Equal(new Cell(9, 16, 15), zombie.NextCell);
-        game.Update(.7f);
+        game.Update(.7f / 1.5f); // Same jump progress after the unarmed movement boost.
         Assert.InRange(zombie.Position.X, 8.09f, 8.1f);
 
         Assert.True(game.World.DamageObsidian(landingSupport, 50));
@@ -211,7 +211,7 @@ public class FallAnimationTests
             var before = zombie.Position;
             game.Update(.01f);
             Assert.True(zombie.Hp > 0);
-            Assert.InRange(Math.Abs(zombie.Position.X - before.X), 0, .0086f);
+            Assert.InRange(Math.Abs(zombie.Position.X - before.X), 0, zombie.MovementSpeed * .01f + .00001f);
             Assert.True(zombie.Position.Y >= 16.4999f);
             foreach (float x in new[] { -.2f, .2f })
                 foreach (float z in new[] { -.2f, .2f })

@@ -4,8 +4,12 @@
   "waves": [
     {
       "spawnInterval": 1.4,
+      "hpBudget": 78,
+      "bossBudgetFraction": 0.03,
       "groups": [
-        { "kind": "Basic", "tier": "Wood", "count": 8 }
+        { "kind": "Basic", "tier": "Wood", "size": "Standard", "count": 7 },
+        { "kind": "Basic", "tier": "Wood", "size": "Milli", "count": 1 },
+        { "kind": "Basic", "tier": "Wood", "size": "Kilo", "isBoss": true, "count": 1 }
       ]
     }
   ]

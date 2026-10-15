@@ -18,6 +18,7 @@ public sealed class DefenseGame : Game
     private WorldRenderer renderer = null!;
     private KeyboardState previousKeys;
     private MouseState previousMouse;
+    private bool wasActive, synchronizeInput = true, suppressMouseUntilReleased;
     private readonly FlyCamera cameraControl = new();
     private Vector3 camera => WorldRenderer.ToXna(cameraControl.Position);
     private bool captured = true, paused, showZones = true, saveBlocked;
@@ -53,9 +54,9 @@ public sealed class DefenseGame : Game
         IsMouseVisible = false;
         IsFixedTimeStep = true;
         TargetElapsedTime = TimeSpan.FromSeconds(1d / 60);
-        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges");
+        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes");
         smokeCombat = args.Contains("--smoke-combat");
-        smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : "";
+        smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : "";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
         if (smoke) IsFixedTimeStep = false;
@@ -63,6 +64,8 @@ public sealed class DefenseGame : Game
         if (smokePanel == "liquids") cameraControl = new FlyCamera(new System.Numerics.Vector3(18.5f, 18, 25), MathF.PI, -.54f);
         if (smokePanel == "falls") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 31), MathF.PI, -.4f);
         if (smokePanel == "bridges") cameraControl = new FlyCamera(new System.Numerics.Vector3(20.5f, 21, 31), MathF.PI, -.39f);
+        if (smokePanel == "buckets") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 20.5f, 12), .26f, -.35f);
+        if (smokePanel == "sizes") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 31), MathF.PI, -.35f);
         int frameIndex = Array.IndexOf(args, "--capture-frame");
         if (frameIndex >= 0 && frameIndex + 1 < args.Length && int.TryParse(args[frameIndex + 1], out var requestedFrame))
             captureFrame = Math.Clamp(requestedFrame, 1, 600);
@@ -70,7 +73,8 @@ public sealed class DefenseGame : Game
         capturePath = captureIndex >= 0 && captureIndex + 1 < args.Length ? Path.GetFullPath(args[captureIndex + 1]) : null;
         int saveIndex = Array.IndexOf(args, "--save-path");
         if (saveIndex >= 0 && saveIndex + 1 < args.Length) savePath = Path.GetFullPath(args[saveIndex + 1]);
-        Activated += (_, _) => { if (captured) CenterMouse(); };
+        Activated += (_, _) => { synchronizeInput = true; suppressMouseUntilReleased = true; };
+        Deactivated += (_, _) => ReleaseCursorForFocusLoss();
         Window.ClientSizeChanged += (_, _) => { if (captured) CenterMouse(); };
         Exiting += (_, _) => SaveCheckpoint();
     }
@@ -134,12 +138,69 @@ public sealed class DefenseGame : Game
                 for (int y = 16; y <= 19; y++) session.BuildBarrier(new Cell(13, y, 18));
             }
             if (smokePanel == "bridges") PrepareBridgeSmoke();
-            SetNotice(smokeCombat ? "Live simulation / rendered validation" : "Crosshair placement / rendered validation");
+            if (smokePanel == "buckets") PrepareBucketSmoke();
+            if (smokePanel == "sizes") PrepareSizeSmoke();
+            SetNotice(smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
+                smokeCombat ? "Live simulation / rendered validation" : "Crosshair placement / rendered validation");
         }
         else LoadCheckpoint();
         CenterMouse();
         base.LoadContent();
     }
+    private void PrepareSizeSmoke()
+    {
+        session.StartLevel();
+        ZombieSize[] sizes = [ZombieSize.Milli, ZombieSize.Standard, ZombieSize.Kilo];
+        int[] columns = [17, 20, 24];
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            var zombie = new Zombie { Id = -100 - i, WaveIndex = -1, Size = sizes[i],
+                Kind = ZombieKind.ArmedArmored, Tier = GearTier.Iron, Attack = 9 };
+            zombie.Position = zombie.StandAt(new Cell(columns[i], 16, 23));
+            zombie.FaceToward(System.Numerics.Vector3.UnitZ);
+            session.Zombies.Add(zombie);
+        }
+        session.Update(.05f);
+        if (session.Zombies.FirstOrDefault(zombie => zombie.Size == ZombieSize.Kilo) is { } kilo)
+        {
+            var aim = kilo.Position + new System.Numerics.Vector3(.7f, .8f, 0);
+            session.Projectiles.Add(new Projectile { Origin = aim + System.Numerics.Vector3.UnitZ * 3,
+                Target = aim, Kind = ShotKind.Pellet, Damage = 1, Duration = .1f });
+            session.Update(.1f);
+        }
+        selected = null;
+        paused = true;
+    }
+    private void PrepareBucketSmoke()
+    {
+        session.Economy.Credit(4000);
+        session.BuyTool(ToolKind.Shovel);
+        foreach (var source in new[] { new Cell(19, 15, 19), new Cell(19, 15, 18) })
+        {
+            session.Dig(source);
+            session.BuyLiquid(LiquidKind.Lava);
+            session.PourLiquid(source, LiquidKind.Lava);
+        }
+        session.Inventory.Add(Material.Dirt);
+        session.BuildBarrier(new Cell(23, 16, 23));
+        session.Deploy(PieceKind.Rook, new Cell(23, 16, 20));
+        session.StartLevel();
+        session.Zombies.Add(new Zombie { Id = -90, WaveIndex = -1, CarriesBucket = true,
+            Position = new Cell(20, 16, 19).Center, Attack = Balance.BaseAttack });
+        session.Zombies.Add(new Zombie { Id = -91, WaveIndex = -1, CarriesBucket = true,
+            Position = new Cell(23, 16, 25).Center, Attack = Balance.BaseAttack });
+        var kilo = new Zombie { Id = -92, WaveIndex = -1, Size = ZombieSize.Kilo,
+            Kind = ZombieKind.Armored, Tier = GearTier.Wood, CarriesBucket = true, Attack = Balance.BaseAttack };
+        // Acquire real cover on dry ground first, then demonstrate switching to
+        // the buckets at the bank with both blocks still in its inventory.
+        kilo.Position = kilo.StandAt(new Cell(18, 16, 24));
+        session.Zombies.Add(kilo);
+        session.Update(.05f);
+        kilo.Position = kilo.StandAt(new Cell(18, 16, 18));
+        kilo.NextCell = null;
+        kilo.MoveProgress = 0;
+    }
+
     private void PrepareBridgeSmoke()
     {
         for (int i = 0; i < SaleMaterials.Length; i++) session.Inventory.Add(SaleMaterials[i], SaleMaterials[i] == Material.Obsidian ? 13 : i + 1);
@@ -175,17 +236,47 @@ public sealed class DefenseGame : Game
         tool = 10;
     }
     private Vector3 Forward => WorldRenderer.ToXna(cameraControl.Forward);
-    private void CenterMouse() { Mouse.SetPosition(Window.ClientBounds.Width / 2, Window.ClientBounds.Height / 2); previousMouse = Mouse.GetState(); }
-    private void Capture(bool value) { captured = value; IsMouseVisible = !value; if (value) CenterMouse(); }
+    private void CenterMouse()
+    {
+        if (!IsActive || !captured) return;
+        Mouse.SetPosition(Window.ClientBounds.Width / 2, Window.ClientBounds.Height / 2);
+        previousMouse = Mouse.GetState();
+    }
+    private void Capture(bool value)
+    {
+        captured = value && IsActive;
+        IsMouseVisible = !captured;
+        if (captured) { suppressMouseUntilReleased = true; CenterMouse(); }
+    }
+    private void ReleaseCursorForFocusLoss()
+    {
+        Capture(false);
+        synchronizeInput = true;
+        suppressMouseUntilReleased = true;
+    }
     private bool Pressed(KeyboardState keys, Keys key) => keys.IsKeyDown(key) && previousKeys.IsKeyUp(key);
     protected override void Update(GameTime gameTime)
     {
         float dt = smoke ? 1f / 60 : (float)gameTime.ElapsedGameTime.TotalSeconds;
         elapsed += dt; noticeTime = Math.Max(0, noticeTime - dt);
         var keys = Keyboard.GetState(); var mouse = Mouse.GetState();
+        // Event handling releases immediately; the state check also covers a
+        // missed transition. Returning focus never captures or warps the cursor.
+        if (!IsActive && (wasActive || captured)) ReleaseCursorForFocusLoss();
+        bool resynchronizing = synchronizeInput || IsActive != wasActive;
+        if (resynchronizing)
+        {
+            previousKeys = keys;
+            previousMouse = mouse;
+            synchronizeInput = false;
+        }
+        wasActive = IsActive;
+        if (suppressMouseUntilReleased && mouse.LeftButton == ButtonState.Released &&
+            mouse.RightButton == ButtonState.Released && mouse.MiddleButton == ButtonState.Released)
+            suppressMouseUntilReleased = false;
         uiScale = Math.Min(Window.ClientBounds.Width / 1440f, Window.ClientBounds.Height / 900f);
         uiScale = Math.Max(.4f, uiScale); width = Window.ClientBounds.Width / uiScale; height = Window.ClientBounds.Height / uiScale;
-        if (IsActive && !smoke)
+        if (IsActive && !smoke && !resynchronizing)
         {
             if (Pressed(keys, Keys.Tab)) Capture(!captured);
             if (Pressed(keys, Keys.Escape)) { if (panel == 3) panel = 2; else if (panel == 7) panel = 5; else Capture(!captured); }
@@ -214,12 +305,15 @@ public sealed class DefenseGame : Game
                 if (keys.IsKeyDown(Keys.LeftShift) || keys.IsKeyDown(Keys.RightShift)) movement.Y--;
                 cameraControl.MovePrecise(movement, dt * (keys.IsKeyDown(Keys.LeftControl) ? 12 : 7), point => session.World.IsSolidAt(point) || session.Turrets.Any(t => t.Cell == new Cell((int)MathF.Floor(point.X), (int)MathF.Floor(point.Y), (int)MathF.Floor(point.Z))));
                 Aim();
-                if (mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released) RemoveTarget();
-                if (mouse.RightButton == ButtonState.Pressed && previousMouse.RightButton == ButtonState.Released) PlaceDefense();
-                if (mouse.MiddleButton == ButtonState.Pressed && previousMouse.MiddleButton == ButtonState.Released) ApplyTemplateToTarget();
-                Mouse.SetPosition(cx, cy);
+                if (!suppressMouseUntilReleased)
+                {
+                    if (mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released) RemoveTarget();
+                    if (mouse.RightButton == ButtonState.Pressed && previousMouse.RightButton == ButtonState.Released) PlaceDefense();
+                    if (mouse.MiddleButton == ButtonState.Pressed && previousMouse.MiddleButton == ButtonState.Released) ApplyTemplateToTarget();
+                }
+                CenterMouse();
             }
-            else if (mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released)
+            else if (!suppressMouseUntilReleased && mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released)
             {
                 var point = new Point((int)(mouse.X / uiScale), (int)(mouse.Y / uiScale));
                 var clicked = buttons.LastOrDefault(b => b.Area.Contains(point)); clicked.Action?.Invoke();
@@ -503,18 +597,24 @@ public sealed class DefenseGame : Game
         {
             int started = session.Waves.Count(w => w.Started), total = session.Waves.Sum(w => w.TotalCount), spawned = session.Waves.Sum(w => w.Spawned);
             Text($"WAVE {started}/{session.Waves.Count}     {session.Zombies.Count} ACTIVE     {spawned}/{total} SPAWNED", left, 180, 15, Teal);
+            int resupplying = session.Zombies.Count(session.IsZombieRetreating);
+            if (resupplying > 0) Text($"{resupplying} returning for supplies", left, 197, 12, Gold);
             float y = 210;
             foreach (var wave in session.Waves)
             {
                 Text($"{wave.Index + 1:00}  {(wave.Started ? "HP REMAINING" : "WAITING")}", left, y, 12, Muted);
-                Fill(left, y + 23, 220, 5, Raised); Fill(left, y + 23, 220 * (1 - wave.DamageTaken / Math.Max(1, wave.TotalHp)), 5, wave.Started ? Red : Muted * .4f);
+                float remaining = wave.TotalHp > 0 ? Math.Clamp(1 - wave.DamageTaken / wave.TotalHp, 0, 1) : 0;
+                Fill(left, y + 23, 220, 5, Raised); Fill(left, y + 23, 220 * remaining, 5, wave.Started ? Red : Muted * .4f);
                 Fill(left + 110, y + 21, 1, 9, TextColor); y += 47;
             }
         }
         else
         {
             Text("Build. Equip. Hold the center.", left, 180, 16, Muted);
-            Text($"Next level: {session.Level.Waves.Sum(w => w.Groups.Sum(g => g.Count))} zombies / {session.Level.Waves.Count} wave(s)", left, 206, 15, Muted);
+            Text($"Next level: {session.PreparedWaves.Sum(w => w.SpawnCount) + session.PendingReinforcementCount} zombies / {session.Level.Waves.Count} wave(s)", left, 206, 15, Muted);
+            Text($"HP budget {session.PreparedWaves.Sum(w => w.HpBudget) + session.PendingReinforcementBudget:N0} / boss reserve {session.PreparedWaves.Sum(w => w.BossBudget) + session.PendingBossReinforcementBudget:N0}", left, 232, 13, Muted);
+            if (session.PendingReinforcementCount > 0)
+                Text($"Includes {session.PendingReinforcementCount} returning survivors", left, 254, 13, Gold);
         }
         float px = width - 340, py = 112;
         Fill(px, py, 312, height - 248, Panel);

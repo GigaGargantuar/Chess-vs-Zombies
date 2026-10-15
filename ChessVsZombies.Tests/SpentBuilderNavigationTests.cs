@@ -185,7 +185,7 @@ public class SpentBuilderNavigationTests
                 if (previous.TryGetValue(zombie.Id, out var origin))
                 {
                     var horizontal = new Vector2(zombie.Position.X - origin.X, zombie.Position.Z - origin.Z);
-                    Assert.InRange(horizontal.Length(), 0, .018f);
+                    Assert.InRange(horizontal.Length(), 0, zombie.MovementSpeed * .02f + .00001f);
                 }
                 AssertBodyClear(game, zombie);
             }
