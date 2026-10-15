@@ -30,7 +30,7 @@ public sealed class RetreatEscalationTests
             Assert.False(game.IsZombieRetreating(zombie));
             Assert.Equal(index + 1, zombie.RetreatReturns);
             Assert.Equal(expected[index], zombie.Tier);
-            Assert.Equal(3, zombie.ArmorPieces.Count);
+            Assert.Equal(4, zombie.ArmorPieces.Count);
             Assert.All(zombie.ArmorPieces, piece => Assert.Equal(piece.MaxHp, piece.Hp));
             Assert.Equal(bodyHp, zombie.BodyHp);
             Assert.Equal(10, wave.BudgetSpent);

@@ -196,7 +196,7 @@ public sealed class CoverGroupingTests
 
         AdvanceGroups(game, .05f);
 
-        Assert.Equal(40, stronger.Hp);
+        Assert.Equal(50, stronger.Hp);
         Assert.True(Wait(game, stronger));
         Assert.False(Wait(game, weaker));
         Assert.True(JoinStep(game, weaker, out var next));

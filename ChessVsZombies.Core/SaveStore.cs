@@ -116,6 +116,9 @@ public sealed class CampaignState
     public EconomyState Economy { get; set; } = new();
     [JsonRequired]
     public int LevelNumber { get; set; } = 1;
+    // Optional preparation preference; older checkpoints continue one level at a time.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool MergeFiveLevels { get; set; }
     [JsonRequired]
     public float CoreHp { get; set; } = Balance.CoreHp;
     [JsonRequired]
@@ -144,6 +147,8 @@ public sealed class CampaignState
     // Optional additive v8 data: campaigns saved before returning enemies have no queue.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<SavedReturningZombie>? ReturningZombies { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<SavedMegaWeaponFlight>? MegaWeaponFlights { get; set; }
 }
 
 public static class SaveStore
@@ -229,6 +234,30 @@ public static class SaveStore
         catch (Exception exception) when (IsSaveException(exception))
         {
             error = $"Could not save upgrade template: {exception.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>Clear a finished battle's selection without replacing its preparation checkpoint.</summary>
+    public static bool TryClearMergeSelection(string path, out string error)
+    {
+        try
+        {
+            if (!TryLoad(path, out var prepared, out error))
+            {
+                if (string.IsNullOrEmpty(error)) error = "No preparation checkpoint is available to clear the merge selection.";
+                return false;
+            }
+            if (!prepared!.MergeFiveLevels) return true;
+            if (!prepared.SetMergeFiveLevels(false))
+                throw new InvalidOperationException(prepared.Message);
+            Save(prepared, path);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception) when (IsSaveException(exception))
+        {
+            error = $"Could not clear merge selection: {exception.Message}";
             return false;
         }
     }
@@ -366,6 +395,7 @@ public static class SaveStore
         if (state.Liquids != null) liquids.RestoreState(state.Version is 5 or 6
             ? ConvertLegacyObsidianDurability(state.Liquids) : state.Liquids);
         if (state.Buckets != null) new LiquidBucketSystem(world, liquids).RestoreState(state.Buckets);
+        if (state.MegaWeaponFlights != null) GameSession.ValidateMegaWeaponFlights(state.MegaWeaponFlights);
 
         var cells = new HashSet<Cell>();
         var ids = new HashSet<int>();
@@ -432,17 +462,20 @@ public static class SaveStore
             if (zombie is null || zombie.Id <= 0 || zombie.Id == int.MaxValue || !usedIds.Add(zombie.Id) ||
                 zombie.TargetLevel != state.LevelNumber || zombie.TargetWaveIndex != 0 ||
                 !Enum.IsDefined(zombie.Kind) || !Enum.IsDefined(zombie.Tier) || !Enum.IsDefined(zombie.Size) ||
-                zombie.IsBoss && zombie.Size != ZombieSize.Kilo || zombie.RetreatReturns is < 0 or > 3 ||
-                zombie.OriginalBudgetCost <= 0 || zombie.IsBoss && zombie.OriginalBudgetCost != Balance.ZombieHp ||
+                zombie.IsBoss && zombie.Size is not (ZombieSize.Kilo or ZombieSize.Mega) || zombie.RetreatReturns is < 0 or > 3 ||
+                zombie.OriginalBudgetCost <= 0 || zombie.IsBoss && zombie.OriginalBudgetCost != (zombie.Size == ZombieSize.Mega ? 15 : Balance.ZombieHp) ||
                 zombie.Armor is null || zombie.Buckets is null || zombie.HeldBlocks is null)
                 throw new InvalidDataException("A returning zombie has invalid identity, wave, or equipment data.");
 
-            float multiplier = zombie.Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, _ => 1 };
+            bool giant = zombie.Size is ZombieSize.Kilo or ZombieSize.Mega;
+            int blockCapacity = zombie.Size == ZombieSize.Mega ? 4 : zombie.Size == ZombieSize.Kilo ? 2 : 1;
+            float offsetLimit = zombie.Size == ZombieSize.Mega ? 1 : .5f;
+            float multiplier = zombie.Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
             if (!float.IsFinite(zombie.BodyHp) || zombie.BodyHp <= 0 || zombie.BodyHp > Balance.ZombieHp * multiplier)
                 throw new InvalidDataException("A returning zombie has invalid body HP.");
 
             var slots = new HashSet<ArmorSlot>();
-            if (zombie.Armor.Count > 3) throw new InvalidDataException("A returning zombie has too many armor pieces.");
+            if (zombie.Armor.Count > 4) throw new InvalidDataException("A returning zombie has too many armor pieces.");
             foreach (var armor in zombie.Armor)
                 if (armor is null || !Enum.IsDefined(armor.Slot) || !Enum.IsDefined(armor.Tier) || !slots.Add(armor.Slot) ||
                     !float.IsFinite(armor.Hp) || armor.Hp <= 0 || armor.Hp > Balance.GearHp(armor.Tier) * multiplier ||
@@ -450,31 +483,32 @@ public static class SaveStore
                     armor.HeatProtectionRemaining > (armor.Tier == GearTier.Osmium ? 10 : 0))
                     throw new InvalidDataException("A returning zombie has invalid armor durability or heat protection.");
 
-            int bucketCount = zombie.CarriesBucket ? zombie.Size == ZombieSize.Kilo ? 2 : 1 : 0;
+            int bucketCount = zombie.CarriesBucket ? giant ? 2 : 1 : 0;
             if (zombie.Buckets.Count != bucketCount || zombie.CarriedBlocks < 0 ||
-                zombie.CarriedBlocks > (zombie.Size == ZombieSize.Kilo ? 2 : 1) ||
-                zombie.Size != ZombieSize.Kilo && zombie.CarriesBucket && zombie.CarriedBlocks != 0)
+                zombie.CarriedBlocks > blockCapacity ||
+                !giant && zombie.CarriesBucket && zombie.CarriedBlocks != 0)
                 throw new InvalidDataException("A returning zombie has invalid carried block or bucket counts.");
             foreach (var bucket in zombie.Buckets)
-                if (bucket is null || bucket.Units is < 0 or > LiquidSystem.UnitsPerBlock ||
+                if (bucket is null || bucket.Units < 0 || bucket.Units > (zombie.Size == ZombieSize.Mega ? 15 : LiquidSystem.UnitsPerBlock) ||
                     bucket.Kind.HasValue && !Enum.IsDefined(bucket.Kind.Value) || (bucket.Units == 0) != !bucket.Kind.HasValue)
                     throw new InvalidDataException("A returning zombie has an invalid bucket payload.");
 
-            if (zombie.HeldBlocks.Count > (zombie.Size == ZombieSize.Kilo ? 2 : 0) ||
-                zombie.Size == ZombieSize.Kilo && zombie.CarriedBlocks + zombie.HeldBlocks.Count > 2)
+            if (zombie.HeldBlocks.Count > (giant ? blockCapacity : 0) ||
+                giant && zombie.CarriedBlocks + zombie.HeldBlocks.Count > blockCapacity)
                 throw new InvalidDataException("A returning zombie has too many held blocks.");
             var hands = new HashSet<int>();
             foreach (var block in zombie.HeldBlocks)
-                if (block is null || block.BlockIndex is < 0 or > 1 || !hands.Add(block.BlockIndex) ||
+                if (block is null || block.BlockIndex < 0 || block.BlockIndex >= blockCapacity || !hands.Add(block.BlockIndex) ||
                     !Balance.IsTerrainMaterial(block.Material) || !float.IsFinite(block.Hp) || block.Hp <= 0 ||
                     block.Hp > Balance.BlockHp(block.Material) || !float.IsFinite(block.OffsetX) ||
                     !float.IsFinite(block.OffsetY) || !float.IsFinite(block.OffsetZ) ||
-                    Math.Abs(block.OffsetX) > .5f || Math.Abs(block.OffsetY) > .5f || Math.Abs(block.OffsetZ) > .5f)
+                    Math.Abs(block.OffsetX) > offsetLimit || Math.Abs(block.OffsetY) > offsetLimit || Math.Abs(block.OffsetZ) > offsetLimit)
                     throw new InvalidDataException("A returning Kilo has invalid held-block data.");
-            if (zombie.HeldBlocks.Count == 2)
+            for (int firstIndex = 0; firstIndex < zombie.HeldBlocks.Count; firstIndex++)
+                for (int secondIndex = firstIndex + 1; secondIndex < zombie.HeldBlocks.Count; secondIndex++)
             {
-                var first = zombie.HeldBlocks[0];
-                var second = zombie.HeldBlocks[1];
+                var first = zombie.HeldBlocks[firstIndex];
+                var second = zombie.HeldBlocks[secondIndex];
                 if (Math.Abs(first.OffsetX - second.OffsetX) < 1 && Math.Abs(first.OffsetY - second.OffsetY) < 1 &&
                     Math.Abs(first.OffsetZ - second.OffsetZ) < 1)
                     throw new InvalidDataException("A returning Kilo's independent blocks overlap.");
@@ -628,7 +662,11 @@ public static class SaveStore
             Obsidian = obsidian,
             Hazards = source.Hazards,
             Accumulator = source.Accumulator,
-            FlowTick = source.FlowTick
+            FlowTick = source.FlowTick,
+            EscapedWaterUnits = source.EscapedWaterUnits,
+            EscapedMercuryUnits = source.EscapedMercuryUnits,
+            EscapedLavaUnits = source.EscapedLavaUnits,
+            SuppliedWaterUnits = source.SuppliedWaterUnits
         };
     }
 

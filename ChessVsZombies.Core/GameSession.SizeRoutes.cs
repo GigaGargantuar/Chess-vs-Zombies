@@ -44,7 +44,7 @@ public sealed partial class GameSession
         // axis-aligned step sweeps therefore cover whole cells, including any
         // partial obsidian in them; there is no need to allocate collision
         // iterators and test the same slab geometry for every incoming edge.
-        var occupied = size is ZombieSize.Kilo or ZombieSize.Milli ? new byte[count] : null;
+        var occupied = shape.IsGiant || size == ZombieSize.Milli ? new byte[count] : null;
         if (occupied != null)
             for (int x = 0; x < WorldGrid.Size; x++)
                 for (int y = 0; y < WorldGrid.Size; y++)
@@ -56,8 +56,8 @@ public sealed partial class GameSession
                             size == ZombieSize.Milli && material == Material.Obsidian ? (byte)3 :
                             material != Material.Air || HasLiveIndexedTurret(cell) ? (byte)1 : (byte)0;
                     }
-        bool Segment(Vector3 from, Vector3 to, HashSet<Cell>? breaches) => size == ZombieSize.Kilo && occupied != null
-            ? TryKiloGridSegmentBreaches(from, to, breaches, occupied)
+        bool Segment(Vector3 from, Vector3 to, HashSet<Cell>? breaches) => shape.IsGiant && occupied != null
+            ? TryGiantGridSegmentBreaches(from, to, shape.GridFootprint, breaches, occupied)
             : TrySizedSegmentBreaches(from, to, shape, breaches);
         bool Clear(Cell cell)
         {
@@ -67,9 +67,9 @@ public sealed partial class GameSession
                 byte solid = occupied[Index(cell)];
                 return solid == 0 || solid == 3 && IsBodyClear(shape.StandAt(cell), shape);
             }
-            for (int x = cell.X; x < cell.X + 2; x++)
-                for (int y = cell.Y; y < cell.Y + 2; y++)
-                    for (int z = cell.Z; z < cell.Z + 2; z++)
+            for (int x = cell.X; x < cell.X + shape.GridFootprint; x++)
+                for (int y = cell.Y; y < cell.Y + shape.GridFootprint; y++)
+                    for (int z = cell.Z; z < cell.Z + shape.GridFootprint; z++)
                         if (occupied[Index(new Cell(x, y, z))] != 0) return false;
             return true;
         }
@@ -97,7 +97,7 @@ public sealed partial class GameSession
         var edges = new float[nodes.Count * edgesPerNode];
         Array.Fill(edges, float.NaN);
         int referenceAttack = Level.Waves.SelectMany(wave => wave.Groups)
-            .Select(group => LevelCatalog.ZombieAttack(group.Kind, group.Tier)).DefaultIfEmpty(Balance.BaseAttack).Max();
+            .Select(group => LevelCatalog.ZombieAttack(group.Kind, group.Tier, shape.Size)).DefaultIfEmpty(Balance.BaseAttack).Max();
         var breachCosts = new Dictionary<Cell, float>();
         float[]? gridCosts = occupied != null ? new float[count] : null;
         if (gridCosts != null) Array.Fill(gridCosts, float.NaN);
@@ -136,8 +136,8 @@ public sealed partial class GameSession
                     if (!IsNode(from)) continue;
                     if (occupied != null)
                     {
-                        bool valid = size == ZombieSize.Kilo
-                            ? TryKiloGridStepCost(from, destination, occupied, gridCosts!, referenceAttack, out float cost)
+                        bool valid = shape.IsGiant
+                            ? TryGiantGridStepCost(from, destination, shape.GridFootprint, occupied, gridCosts!, referenceAttack, out float cost)
                             : TryMilliGridStepCost(from, destination, occupied, gridCosts!, referenceAttack, out cost);
                         if (valid) edges[slot] = cost;
                     }
@@ -252,9 +252,9 @@ public sealed partial class GameSession
         // Runtime bridge and breach queries use the same exact shortcut only
         // for canonical whole-cell Kilo endpoints. Fractional movement retains
         // the slab sweep below.
-        if (shape.Size == ZombieSize.Kilo && IsGridPoint(from) && IsGridPoint(to) &&
+        if (shape.IsGiant && IsGiantGridPoint(from, shape) && IsGiantGridPoint(to, shape) &&
             (from.X == to.X && from.Z == to.Z || from.X == to.X && from.Y == to.Y || from.Y == to.Y && from.Z == to.Z))
-            return TryKiloGridSegmentBreaches(from, to, breaches);
+            return TryGiantGridSegmentBreaches(from, to, shape.GridFootprint, breaches);
         var body = shape.BodyHalfExtents;
         var boundsMin = Vector3.Min(from, to) - body;
         var boundsMax = Vector3.Max(from, to) + body;
@@ -284,6 +284,9 @@ public sealed partial class GameSession
 
     private static bool IsGridPoint(Vector3 point) =>
         point.X == MathF.Floor(point.X) && point.Y == MathF.Floor(point.Y) && point.Z == MathF.Floor(point.Z);
+
+    private static bool IsGiantGridPoint(Vector3 point, Zombie shape) =>
+        IsGridPoint(point - new Vector3(shape.BodyScale * .5f));
 
     private bool TryMilliGridStepCost(Cell from, Cell to, byte[] occupied, float[] costs, int attack, out float cost)
     {
@@ -350,15 +353,18 @@ public sealed partial class GameSession
     }
 
     private bool TryKiloGridStepCost(Cell from, Cell to, byte[] occupied, float[] costs, int attack, out float cost)
+        => TryGiantGridStepCost(from, to, 2, occupied, costs, attack, out cost);
+
+    private bool TryGiantGridStepCost(Cell from, Cell to, int footprint, byte[] occupied, float[] costs, int attack, out float cost)
     {
         // These two axis-aligned sweeps can overlap in at most eight cells.
         // Retain their first-seen order, exactly as the generic HashSet sweep,
         // without hashing Cell values for every edge through underground rock.
-        Span<int> breached = stackalloc int[24];
+        Span<int> breached = stackalloc int[128];
         int count = 0;
         var waypoint = StepClearance(from, to) ?? to;
-        if (!AppendKiloGridSweep(from, waypoint, occupied, breached, ref count) ||
-            !AppendKiloGridSweep(waypoint, to, occupied, breached, ref count))
+        if (!AppendGiantGridSweep(from, waypoint, footprint, occupied, breached, ref count) ||
+            !AppendGiantGridSweep(waypoint, to, footprint, occupied, breached, ref count))
         {
             cost = 0;
             return false;
@@ -377,9 +383,12 @@ public sealed partial class GameSession
     }
 
     private static bool AppendKiloGridSweep(Cell from, Cell to, byte[] occupied, Span<int> breached, ref int count)
+        => AppendGiantGridSweep(from, to, 2, occupied, breached, ref count);
+
+    private static bool AppendGiantGridSweep(Cell from, Cell to, int footprint, byte[] occupied, Span<int> breached, ref int count)
     {
         int minX = Math.Min(from.X, to.X), minY = Math.Min(from.Y, to.Y), minZ = Math.Min(from.Z, to.Z);
-        int maxX = Math.Max(from.X, to.X) + 2, maxY = Math.Max(from.Y, to.Y) + 2, maxZ = Math.Max(from.Z, to.Z) + 2;
+        int maxX = Math.Max(from.X, to.X) + footprint, maxY = Math.Max(from.Y, to.Y) + footprint, maxZ = Math.Max(from.Z, to.Z) + footprint;
         // The node builder has already rejected all out-of-bounds bodies.
         for (int x = minX; x < maxX; x++)
             for (int y = minY; y < maxY; y++)
@@ -395,9 +404,13 @@ public sealed partial class GameSession
     }
 
     private bool TryKiloGridSegmentBreaches(Vector3 from, Vector3 to, HashSet<Cell>? breaches, byte[]? occupied = null)
+        => TryGiantGridSegmentBreaches(from, to, 2, breaches, occupied);
+
+    private bool TryGiantGridSegmentBreaches(Vector3 from, Vector3 to, int footprint, HashSet<Cell>? breaches, byte[]? occupied = null)
     {
-        var min = Vector3.Min(from, to) - Vector3.One;
-        var max = Vector3.Max(from, to) + Vector3.One;
+        var half = new Vector3(footprint * .5f);
+        var min = Vector3.Min(from, to) - half;
+        var max = Vector3.Max(from, to) + half;
         if (min.X < 0 || min.Y < 0 || min.Z < 0 || max.X > WorldGrid.Size || max.Y > WorldGrid.Size || max.Z > WorldGrid.Size)
             return false;
         for (int x = (int)min.X; x < (int)max.X; x++)

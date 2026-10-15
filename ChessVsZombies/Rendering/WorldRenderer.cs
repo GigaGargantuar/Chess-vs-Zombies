@@ -141,6 +141,15 @@ public sealed class WorldRenderer : IDisposable
                 dynamic.Line(position, tail, .02f, color);
             }
         }
+        foreach (var block in session.MegaProjectiles)
+        {
+            var center = (block.Min + block.Max) * .5f;
+            var cell = new Cell((int)MathF.Floor(center.X), (int)MathF.Floor(center.Y), (int)MathF.Floor(center.Z));
+            var color = BlockColor(block.Material, null, cell);
+            dynamic.Box(ToXna(block.Min), ToXna(block.Max), color);
+            dynamic.Outline(ToXna(block.Min) + new Vector3(.016f), ToXna(block.Max) - new Vector3(.016f),
+                block.IsDebris ? new Color(239, 165, 98) : color * .72f, .015f);
+        }
         foreach (var flight in session.Buckets.Flights)
         {
             var color = LiquidColor(flight.Kind);
@@ -319,11 +328,11 @@ public sealed class WorldRenderer : IDisposable
         var p = ZombieFeet(zombie);
         var skin = new Color(115, 144, 99); var dark = new Color(43, 63, 53);
         float stride = MathF.Sin((float)time * 7 + zombie.Id) * .08f;
-        float sole = zombie.Size == ZombieSize.Kilo ? .09f : .04f;
+        float sole = zombie.IsGiant ? .09f : .04f;
         dynamic.Box(p + new Vector3(-.21f, sole + stride, -.14f), p + new Vector3(-.045f, .39f + stride, .14f), dark);
         dynamic.Box(p + new Vector3(.045f, sole - stride, -.14f), p + new Vector3(.21f, .39f - stride, .14f), dark);
-        var torsoWidth = zombie.Size == ZombieSize.Kilo ? .36f : .24f;
-        var torsoDepth = zombie.Size == ZombieSize.Kilo ? .20f : .17f;
+        var torsoWidth = zombie.IsGiant ? .36f : .24f;
+        var torsoDepth = zombie.IsGiant ? .20f : .17f;
         dynamic.Box(p + new Vector3(-torsoWidth, .38f, -torsoDepth), p + new Vector3(torsoWidth, .84f, torsoDepth), skin);
         dynamic.Box(p + new Vector3(-.20f, .84f, -.19f), p + new Vector3(.20f, 1.21f, .19f), skin);
         dynamic.Box(p + new Vector3(-.39f, .42f, -.11f), p + new Vector3(-.25f, .87f, .14f), skin);
@@ -333,11 +342,16 @@ public sealed class WorldRenderer : IDisposable
         foreach (var piece in zombie.ArmorPieces)
         {
             var (min, max) = ZombieArmorBounds(zombie, piece.Slot);
-            dynamic.Box(p + min, p + max, ArmorColor(piece.Tier));
+            if (piece.Slot == ArmorSlot.Boots)
+            {
+                dynamic.Box(p + min, p + (max with { X = -.045f }), ArmorColor(piece.Tier));
+                dynamic.Box(p + (min with { X = .045f }), p + max, ArmorColor(piece.Tier));
+            }
+            else dynamic.Box(p + min, p + max, ArmorColor(piece.Tier));
         }
         if (zombie.Kind is ZombieKind.Armed or ZombieKind.ArmedArmored)
             dynamic.Box(p + new Vector3(.35f, .33f, -.09f), p + new Vector3(.46f, 1.10f, .04f), tier);
-        if (zombie.Size == ZombieSize.Kilo || zombie.CarriesBucket)
+        if (zombie.CarriesBucket)
         {
             // Each bucket has its own fill. Kilos keep both buckets on their
             // backs while guarding, and bring the pair forward while scooping.
@@ -355,17 +369,17 @@ public sealed class WorldRenderer : IDisposable
                 dynamic.Box(p + new Vector3(-.165f, .49f, -.505f), p + new Vector3(.165f, .50f, -.235f), new Color(41, 52, 58));
                 if (load.Units > 0 && load.Kind is { } liquid)
                 {
-                    float fill = .50f + .34f * Math.Clamp(load.Units / (float)Balance.BucketCapacity, 0, 1);
+                    float fill = .50f + .34f * Math.Clamp(load.Units / (float)zombie.BucketCapacity, 0, 1);
                     dynamic.Box(p + new Vector3(-.163f, .50f, -.503f), p + new Vector3(.163f, fill, -.237f), LiquidColor(liquid));
                 }
                 dynamic.Outline(p + new Vector3(-.20f, .895f, -.54f), p + new Vector3(.20f, .925f, -.20f), rim, .009f);
                 dynamic.Line(p + new Vector3(-.205f, .85f, -.37f), p + new Vector3(-.205f, 1.07f, -.37f), .014f, rim);
                 dynamic.Line(p + new Vector3(-.205f, 1.07f, -.37f), p + new Vector3(.205f, 1.07f, -.37f), .014f, rim);
                 dynamic.Line(p + new Vector3(.205f, 1.07f, -.37f), p + new Vector3(.205f, .85f, -.37f), .014f, rim);
-                if (zombie.Size != ZombieSize.Kilo || !kiloUsingBuckets)
+                if (!zombie.IsGiant || !kiloUsingBuckets)
                     foreach (float x in new[] { -.13f, .13f })
                         dynamic.Box(p + new Vector3(x - .025f, .79f, -.24f), p + new Vector3(x + .025f, .98f, -.18f), new Color(69, 50, 34));
-                if (zombie.Size == ZombieSize.Kilo)
+                if (zombie.IsGiant)
                     TransformVertices(firstBucketVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(.65f, 1, .65f) *
                         Matrix.CreateTranslation(p + new Vector3(bucketIndex == 0 ? -.21f : .21f,
                             kiloUsingBuckets ? -.08f : .12f, kiloUsingBuckets ? .48f : 0)));
@@ -397,30 +411,32 @@ public sealed class WorldRenderer : IDisposable
     {
         int firstVertex = dynamic.Vertices.Count;
         var p = ZombieFeet(zombie);
-        float side = cover.BlockIndex == 0 ? -.23f : .23f;
-        var min = p + new Vector3(side - .11f, .46f, -.47f);
-        var max = p + new Vector3(side + .11f, .84f, -.25f);
+        float side = cover.BlockIndex % 2 == 0 ? -.23f : .23f;
+        float bottom = zombie.Size == ZombieSize.Mega ? .28f + cover.BlockIndex / 2 * .38f : .46f;
+        float top = bottom + (zombie.Size == ZombieSize.Mega ? .32f : .38f);
+        var min = p + new Vector3(side - .11f, bottom, -.47f);
+        var max = p + new Vector3(side + .11f, top, -.25f);
         var color = BlockColor(cover.Material, null, zombie.Cell);
         dynamic.Box(min, max, color);
         dynamic.Outline(min + new Vector3(.008f), max - new Vector3(.008f), color * .72f, .008f);
         var strap = new Color(69, 50, 34);
-        dynamic.Box(p + new Vector3(side - .018f, .45f, -.472f), p + new Vector3(side + .018f, .85f, -.24f), strap);
-        dynamic.Box(p + new Vector3(side - .112f, .62f, -.472f), p + new Vector3(side + .112f, .665f, -.24f), strap);
+        dynamic.Box(p + new Vector3(side - .018f, bottom - .01f, -.472f), p + new Vector3(side + .018f, top + .01f, -.24f), strap);
+        dynamic.Box(p + new Vector3(side - .112f, bottom + .16f, -.472f), p + new Vector3(side + .112f, bottom + .205f, -.24f), strap);
         // These are inventory markers, not full-sized blocking volumes. Their
         // compact back-mounted corners fit inside the body at every yaw.
         TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(ZombieMeshScale(zombie)) *
             ZombieRotation(zombie) * Matrix.CreateTranslation(p));
     }
-    private static Vector3 ZombieMeshScale(Zombie zombie) => zombie.Size == ZombieSize.Kilo
+    private static Vector3 ZombieMeshScale(Zombie zombie) => zombie.IsGiant
         // Uniform horizontal scaling keeps the farthest equipped corner below
         // a one-block radius, so every yaw fits the same 2x2 footprint.
-        ? new Vector3(1.7f, ZombieHeightScale * 2, 1.7f)
+        ? new Vector3(.85f, ZombieHeightScale, .85f) * zombie.BodyScale
         : new Vector3(1, ZombieHeightScale, 1) * zombie.BodyScale;
 
     private static (Vector3 Min, Vector3 Max) ZombieArmorBounds(Zombie zombie, ArmorSlot slot)
     {
         var (min, max) = ArmorBounds(slot);
-        if (zombie.Size == ZombieSize.Kilo && slot == ArmorSlot.Chestplate)
+        if (zombie.IsGiant && slot == ArmorSlot.Chestplate)
         {
             min.X *= 1.45f;
             max.X *= 1.45f;
@@ -444,6 +460,7 @@ public sealed class WorldRenderer : IDisposable
         ArmorSlot.Helmet => (new Vector3(-.22f, 1.13f, -.22f), new Vector3(.22f, 1.28f, .22f)),
         ArmorSlot.Chestplate => (new Vector3(-.255f, .45f, -.19f), new Vector3(.255f, .83f, .19f)),
         ArmorSlot.Shield => (new Vector3(-.28f, .36f, .235f), new Vector3(.28f, .9f, .32f)),
+        ArmorSlot.Boots => (new Vector3(-.235f, .03f, -.18f), new Vector3(.235f, .30f, .18f)),
         _ => throw new ArgumentOutOfRangeException(nameof(slot))
     };
     private void TransformVertices(int firstVertex, Matrix transform)

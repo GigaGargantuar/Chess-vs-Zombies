@@ -27,7 +27,7 @@ public sealed partial class GameSession
 
     private void FaceKiloTowardShot(Zombie zombie, Vector3 incomingDirection)
     {
-        if (zombie.Hp <= 0 || zombie.Size != ZombieSize.Kilo) return;
+        if (zombie.Hp <= 0 || !zombie.IsGiant) return;
         zombie.SetGuardFacing(-incomingDirection);
         _guardedKilos.Add(zombie);
     }
@@ -183,26 +183,39 @@ public sealed partial class GameSession
         state.SupplySeconds += dt;
         if (state.SupplySeconds < 1) return true;
 
-        bool kilo = zombie.Size == ZombieSize.Kilo;
-        bool needsBucket = kilo || HasReachableBucketWork(zombie);
+        bool giant = zombie.IsGiant;
+        bool needsWater = NeedsWaterForLava(zombie);
+        bool needsBucket = giant || needsWater || HasReachableBucketWork(zombie);
         // Ordinary carriers exchange their tool and release its real payload.
         // Kilos keep both tools, so their buckets need no emptying or exchange.
         // Failed displacement keeps liquid in the ordinary carrier's bucket.
-        if (!kilo && zombie.HeldBucketUnits > 0)
+        if (!giant && zombie.HeldBucketUnits > 0)
         {
             SpillZombieBucket(zombie);
             if (zombie.HeldBucketUnits > 0) return true;
         }
         zombie.CarriesBucket = needsBucket;
-        if (!kilo)
+        if (!giant)
         {
             zombie.BucketKind = null;
             zombie.BucketUnits = 0;
         }
         // Held covers already occupy their block slots. Refilling the spare
         // slots restores a two-block Kilo loadout without duplicating covers.
-        zombie.CarriedBlocks = kilo ? Math.Max(0, 2 - GetKiloConstructionBlocks(zombie))
+        zombie.CarriedBlocks = giant ? Math.Max(0, (zombie.Size == ZombieSize.Mega ? 4 : 2) - GetKiloConstructionBlocks(zombie))
             : needsBucket ? 0 : Math.Max(1, zombie.CarriedBlocks);
+        if (needsWater)
+            for (int index = 0; index < zombie.BucketCount; index++)
+            {
+                var load = zombie.BucketLoads[index];
+                // An occupied giant bucket retains its actual other liquid.
+                // Empty buckets are filled from the supplies outside the map.
+                if (load.Units > 0 && load.Kind != LiquidKind.Water) continue;
+                int supplied = zombie.BucketCapacity - load.Units;
+                load.Kind = LiquidKind.Water;
+                load.Units = zombie.BucketCapacity;
+                Liquids.RecordSuppliedWater(supplied);
+            }
         UpgradeRetreatArmor(zombie);
         zombie.RetreatReturns++;
         zombie.KiloEquipmentMode = KiloEquipmentMode.Covers;

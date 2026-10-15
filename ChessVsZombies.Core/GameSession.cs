@@ -107,6 +107,7 @@ public sealed partial class GameSession
         ResetCoverBehavior();
         ResetBucketBehavior();
         ResetKilos();
+        ResetMegas();
         ResetSizeRoutes();
         ResetRetreatBehavior();
         _returningZombies.Clear();
@@ -117,6 +118,7 @@ public sealed partial class GameSession
         _navigationRevision = -1;
         LevelNumber = 1;
         Level = _levels.Get(1);
+        ResetLevelMerging();
         CoreHp = Balance.CoreHp;
         Phase = GamePhase.Building;
         Message = "New defense: 1000 currency. Place your pieces and protect the core.";
@@ -156,9 +158,11 @@ public sealed partial class GameSession
                     var cell = new Cell(x, y, z);
                     if (!WorldGrid.IsCore(cell) && World.GetNaturalMaterial(cell) != WorldGrid.InitialMaterial(cell)) excavated.Add(cell);
                 }
+        var megaFlights = ExportMegaWeaponFlights();
         return new CampaignState
         {
             LevelNumber = LevelNumber,
+            MergeFiveLevels = MergeFiveLevels,
             CoreHp = CoreHp,
             Economy = Economy.ExportState(),
             UpgradeTemplate = SavedUpgradeTemplate.FromTemplate(UpgradeTemplate),
@@ -172,6 +176,7 @@ public sealed partial class GameSession
             DamagedTerrain = World.DamagedTerrain.Select(pair => new SavedTerrainDamage { Cell = pair.Key, Hp = pair.Value }).ToList(),
             Liquids = Liquids.ExportState(),
             Buckets = Buckets.ExportState(),
+            MegaWeaponFlights = megaFlights.Count == 0 ? null : megaFlights,
             LiquidInventory = new Dictionary<LiquidKind, int>(_liquidInventory),
             Turrets = Turrets.Select(turret => new SavedTurret
             {
@@ -200,7 +205,10 @@ public sealed partial class GameSession
             foreach (var returning in _returningZombies) _nextId = Math.Max(_nextId, returning.Id + 1);
         }
         LevelNumber = state.LevelNumber;
-        Level = _levels.Get(LevelNumber);
+        MergeFiveLevels = state.MergeFiveLevels;
+        var encounter = PrepareEncounter(LevelNumber, MergeFiveLevels);
+        Level = encounter.Level;
+        _sourceLevelNumbers = encounter.SourceLevels;
         CoreHp = state.CoreHp;
         foreach (var cell in state.Excavated) World.Dig(cell);
         foreach (var placement in state.TerrainPlacements!) World.RestoreTerrainPlacement(placement.Cell, placement.Material);
@@ -208,6 +216,7 @@ public sealed partial class GameSession
         foreach (var barrier in state.Barriers) World.AddBarrier(barrier.Cell, barrier.Content!.Value, barrier.Hp);
         Liquids.RestoreState(state.Liquids!);
         Buckets.RestoreState(state.Buckets ?? new BucketSystemState());
+        RestoreMegaWeaponFlights(state.MegaWeaponFlights ?? []);
         foreach (var kind in Enum.GetValues<LiquidKind>()) _liquidInventory[kind] = state.LiquidInventory![kind];
         foreach (var saved in state.Turrets)
         {
@@ -230,6 +239,9 @@ public sealed partial class GameSession
         if (!IsEmpty(cell)) return Reject("That cell is occupied.");
         if (IsOccupiedByZombie(cell)) return Reject("A zombie is occupying that cell.");
         if (!HasTowerSupport(cell)) return Reject("Pieces need a solid block or another living tower directly below them.");
+        if (Phase == GamePhase.Combat && !CanHoldSurvivorReward((long)Economy.Currency - Balance.PieceCost(kind),
+            Turrets.Count(turret => turret.Hp > 0) + 1, SurvivorRewardPerTower))
+            return Reject("The wallet cannot hold this tower's eventual survivor reward.");
         if (!Economy.TrySpend(Balance.PieceCost(kind))) return Reject(Economy.LastMessage);
         Turrets.Add(new Turret { Id = _nextId++, Kind = kind, Cell = cell });
         _topologyRevision++;
@@ -332,6 +344,10 @@ public sealed partial class GameSession
         if (turret != null)
         {
             if (!CanUseTowers()) return false;
+            long refundedCurrency = (long)Economy.Currency + Balance.PieceCost(turret.Kind);
+            if (refundedCurrency > int.MaxValue || Phase == GamePhase.Combat &&
+                !CanHoldSurvivorReward(refundedCurrency, Turrets.Count(tower => tower.Hp > 0) - 1, SurvivorRewardPerTower))
+                return Reject("The wallet cannot hold the refund and surviving-tower reward.");
             Turrets.Remove(turret);
             Economy.Credit(Balance.PieceCost(turret.Kind));
             _topologyRevision++;
@@ -352,31 +368,51 @@ public sealed partial class GameSession
     public bool StartLevel()
     {
         if (Phase != GamePhase.Building) return Reject("The current level is already running.");
-        LevelCatalog.Validate(Level);
+        if (!CanHoldSurvivorReward(Economy.Currency, Turrets.Count(turret => turret.Hp > 0), SurvivorRewardPerTower))
+            return Reject("The wallet cannot hold the full surviving-tower reward.");
+        WaveSpawnPlan[] plans;
+        var waves = new List<WaveState>();
+        (LevelDefinition Level, int[] SourceLevels) nextEncounter;
+        try
+        {
+            LevelCatalog.Validate(Level);
+            nextEncounter = PrepareEncounter(checked(LevelNumber + LevelSpan), merged: false);
+            plans = Level.Waves.Select(WaveSpawnPlanner.Plan).ToArray();
+            for (var i = 0; i < plans.Length; i++)
+            {
+                var plan = plans[i];
+                waves.Add(new WaveState
+                {
+                    Index = i,
+                    TotalCount = plan.SpawnCount,
+                    TotalHp = plan.TotalHp,
+                    HpBudget = plan.HpBudget,
+                    NormalBudget = plan.NormalBudget,
+                    BossBudget = plan.BossBudget,
+                    Started = i == 0
+                });
+            }
+            foreach (var returning in _returningZombies.Where(zombie => zombie.TargetLevel == LevelNumber))
+                AddReinforcementBudget(waves[returning.TargetWaveIndex], returning);
+        }
+        catch (Exception error) when (error is OverflowException or InvalidDataException or ArgumentOutOfRangeException)
+        {
+            return Reject($"Cannot start this level selection: {error.Message}");
+        }
         RebuildNavigation();
         RefreshSpawnCells();
         Waves.Clear();
+        Waves.AddRange(waves);
         _wavePlans.Clear();
-        _previewLevel = null; // Resolve any authoring edits before committing a roster.
-        for (var i = 0; i < Level.Waves.Count; i++)
-        {
-            var plan = PreparedWaves[i];
-            _wavePlans.Add(plan);
-            Waves.Add(new WaveState
-            {
-                Index = i,
-                TotalCount = plan.SpawnCount,
-                TotalHp = plan.TotalHp,
-                HpBudget = plan.HpBudget,
-                NormalBudget = plan.NormalBudget,
-                BossBudget = plan.BossBudget,
-                Started = i == 0
-            });
-        }
-        foreach (var returning in _returningZombies.Where(zombie => zombie.TargetLevel == LevelNumber))
-            AddReinforcementBudget(Waves[returning.TargetWaveIndex], returning);
+        _wavePlans.AddRange(plans);
+        _previewPlans = plans;
+        _previewLevel = Level;
+        _nextEncounter = nextEncounter.Level;
+        _nextSourceLevelNumbers = nextEncounter.SourceLevels;
         Phase = GamePhase.Combat;
-        Message = $"Level {LevelNumber}: {Level.Name}. Defend the core!";
+        Message = MergeFiveLevels
+            ? $"Levels {LevelNumber}–{EndLevelNumber}: {Level.Name}. Defend the core!"
+            : $"Level {LevelNumber}: {Level.Name}. Defend the core!";
         return true;
     }
 
@@ -394,6 +430,7 @@ public sealed partial class GameSession
             ResolveBlockDrops();
             Liquids.Update(step, cell => TrySelectTurret(cell) != null);
             Buckets.Update(step, cell => TrySelectTurret(cell) != null);
+            UpdateMegaProjectiles(step);
             SettleDefenses();
             if (Phase == GamePhase.Combat) Step(step);
             else UpdateProjectiles(step);
@@ -444,7 +481,7 @@ public sealed partial class GameSession
             wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + actual);
         }
         zombie.DamageSinceLaneSwitch += actual;
-        var threshold = zombie.MaxHp * Balance.LaneThreshold(LevelNumber);
+        var threshold = zombie.MaxHp * Balance.LaneThreshold(GetSourceLevelNumber(zombie.WaveIndex));
         if (zombie.Hp > 0 && zombie.DamageSinceLaneSwitch >= threshold)
         {
             zombie.Lane = (zombie.Lane + 1 + _random.Next(3)) % 4;
@@ -484,6 +521,7 @@ public sealed partial class GameSession
         foreach (var zombie in Zombies)
             if (zombie.Hp > 0) UpdateLiquidExposure(zombie, dt);
         UpdateKilos(dt);
+        UpdateMegas(dt);
         foreach (var zombie in Zombies.ToArray())
             if (zombie.Hp > 0) UpdateZombie(zombie, dt);
         foreach (var zombie in Zombies)
@@ -505,16 +543,31 @@ public sealed partial class GameSession
         if (CoreHp <= 0)
         {
             CoreHp = 0;
+            if (MergeFiveLevels)
+            {
+                var preparation = PrepareEncounter(LevelNumber, merged: false);
+                MergeFiveLevels = false;
+                Level = preparation.Level;
+                _sourceLevelNumbers = preparation.SourceLevels;
+                _previewLevel = null;
+                _nextEncounter = null;
+                _nextSourceLevelNumbers = [];
+            }
             Phase = GamePhase.Defeat;
             Message = $"The core fell on level {LevelNumber}. Start a new defense to try again.";
             return;
         }
         if (Zombies.Count == 0 && Waves.All(wave => wave.Started && wave.Spawned >= wave.TotalCount))
         {
-            var reward = Balance.SurvivorIncome * Turrets.Count(turret => turret.Hp > 0);
+            var reward = checked(SurvivorRewardPerTower * Turrets.Count(turret => turret.Hp > 0));
             Economy.Credit(reward);
-            LevelNumber++;
-            Level = _levels.Get(LevelNumber);
+            LevelNumber = checked(LevelNumber + LevelSpan);
+            MergeFiveLevels = false;
+            Level = _nextEncounter!;
+            _sourceLevelNumbers = _nextSourceLevelNumbers;
+            _nextEncounter = null;
+            _nextSourceLevelNumbers = [];
+            _previewLevel = null;
             Phase = GamePhase.Building;
             Message = $"Level complete! {reward} currency from surviving pieces. Prepare level {LevelNumber}.";
         }
@@ -543,10 +596,10 @@ public sealed partial class GameSession
             Position = shape.StandAt(cell),
             Hp = hp,
             MaxHp = hp,
-            Attack = LevelCatalog.ZombieAttack(group.Kind, group.Tier),
-            CarriesBucket = group.Size == ZombieSize.Kilo || wave.Spawned % Balance.BucketCarrierInterval == 0 && NeedsBucketCarrier(cell, shape),
+            Attack = LevelCatalog.ZombieAttack(group.Kind, group.Tier, group.Size),
+            CarriesBucket = shape.IsGiant || wave.Spawned % Balance.BucketCarrierInterval == 0 && NeedsBucketCarrier(cell, shape),
             OriginalBudgetCost = WaveSpawnPlan.BudgetCost(group),
-            Lane = cell.X == 0 ? 0 : cell.X == 31 ? 1 : cell.Z == 0 ? 2 : 3
+            Lane = cell.X == 0 ? 0 : cell.X + shape.GridFootprint == WorldGrid.Size ? 1 : cell.Z == 0 ? 2 : 3
         };
         zombie.FaceToward(new Vector3(16, zombie.Position.Y, 16) - zombie.Position);
         Zombies.Add(zombie);
@@ -732,7 +785,10 @@ public sealed partial class GameSession
         // genuinely supported fractional body retains its old late action when
         // no clear support recovery or shoreline departure was available.
         if (!retreating && Vector3.DistanceSquared(zombie.Position, zombie.StandAt(zombie.Cell)) > .000001f)
+        {
             TryKiloAction(zombie, dt);
+            TryMegaAction(zombie, dt);
+        }
         var next = current;
         bool yieldingToBuilder = !retreating && TryGetBuilderYieldStep(zombie, out next);
         bool retreatStep = retreating && TryGetRetreatStep(zombie, current, out next);
@@ -987,7 +1043,7 @@ public sealed partial class GameSession
 
     private static bool FaceNearbyCore(Zombie zombie)
     {
-        if (zombie.Size == ZombieSize.Kilo)
+        if (zombie.IsGiant)
         {
             if (!IsCoreApproach(zombie.Cell, zombie)) return false;
             zombie.FaceToward(new Vector3(16, 16, 16) - zombie.Position);
@@ -1653,8 +1709,8 @@ public sealed partial class GameSession
     private bool IsZombieObstacle(Cell cell, Zombie? zombie = null) => zombie == null
         ? World.GetMaterial(cell) != Material.Air || HasLiveIndexedTurret(cell)
         : !IsBodyClear(zombie.StandAt(cell), zombie);
-    private bool HasZombieSupport(Cell cell, Zombie? zombie = null) => zombie?.Size == ZombieSize.Kilo
-        ? HasKiloGridSupport(cell) : zombie?.Size == ZombieSize.Milli
+    private bool HasZombieSupport(Cell cell, Zombie? zombie = null) => zombie?.IsGiant == true
+        ? HasGiantGridSupport(cell, zombie.GridFootprint) : zombie?.Size == ZombieSize.Milli
         ? HasMilliGridSupport(cell) : zombie != null
         ? WorldGrid.IsInside(cell) && TrySolidFloor(zombie.StandAt(cell), out var height, zombie) && Math.Abs(height - zombie.StandAt(cell).Y) <= .011f
         : WorldGrid.IsInside(cell) && (World.IsSolidAt(cell.Center - new Vector3(0, .51f, 0)) ||

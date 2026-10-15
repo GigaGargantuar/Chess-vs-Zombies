@@ -86,7 +86,7 @@ public sealed class ObsidianPairSettlementTests
         Assert.Equal(Ground + new Cell(0, 1, 0), load.Cell);
         Assert.Equal(Material.Iron, load.Content);
         Assert.Equal(1337, load.Hp);
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         var hit = Assert.Single(game.Feedback.Hits);
         Assert.Equal(DamageKind.Pierce, hit.Kind);
         Assert.Equal(20, hit.Amount);
@@ -96,7 +96,7 @@ public sealed class ObsidianPairSettlementTests
         game.Update(.01f);
 
         Assert.Equal(stationary, Assert.Single(game.World.ObsidianCells));
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         Assert.Single(game.Feedback.Hits);
     }
 
@@ -167,7 +167,7 @@ public sealed class ObsidianPairSettlementTests
         Assert.Equal(412, load.Hp);
         Assert.Empty(game.World.ObsidianCells);
         Assert.Equal(0, game.Inventory.ObsidianLayers);
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         var hit = Assert.Single(game.Feedback.Hits);
         Assert.Equal(DamageKind.Pierce, hit.Kind);
         Assert.Equal(20, hit.Amount);
@@ -176,7 +176,7 @@ public sealed class ObsidianPairSettlementTests
         game.Update(.01f);
 
         Assert.Equal(revision, game.World.Revision);
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         Assert.Single(game.Feedback.Hits);
     }
 

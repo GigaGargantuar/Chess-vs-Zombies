@@ -80,11 +80,15 @@ public sealed class LiquidState
     [JsonRequired] public List<VaporCloud> Hazards { get; set; } = [];
     [JsonRequired] public double Accumulator { get; set; }
     [JsonRequired] public int FlowTick { get; set; }
+    public long EscapedWaterUnits { get; set; }
+    public long EscapedMercuryUnits { get; set; }
+    public long EscapedLavaUnits { get; set; }
+    public long SuppliedWaterUnits { get; set; }
 }
 
 /// <summary>
-/// A closed, integer-volume simulation. A unit is one tenth of a block; only reactions remove
-/// liquid, accounting for it as solid lava or vapor. A crust seals fluid flow through its face,
+/// An integer-volume simulation with open battlefield boundaries. A unit is one tenth of a
+/// block; reactions and escaped parcels retain explicit accounting. A crust seals its face,
 /// while its hot reaction front can keep consuming reactants on the two sides.
 /// </summary>
 public sealed class LiquidSystem
@@ -103,6 +107,8 @@ public sealed class LiquidSystem
     private readonly List<VaporCloud> _hazards = [];
     private double _accumulator;
     private int _flowTick;
+    private readonly long[] _escapedUnits = new long[3];
+    public long SuppliedWaterUnits { get; private set; }
     /// <summary>Changes only when liquid amounts or positions change, not when a flow timer ticks.</summary>
     public long Revision { get; private set; }
 
@@ -119,6 +125,20 @@ public sealed class LiquidSystem
     public int GetUnits(Cell cell, LiquidKind kind) => Enum.IsDefined(kind) && _cells.TryGetValue(cell, out var amounts) ? amounts[(int)kind] : 0;
     /// <summary>Liquid volume only; solid crust units are available from WorldGrid.GetObsidian.</summary>
     public int GetTotalUnits(Cell cell) => _cells.TryGetValue(cell, out var amounts) ? amounts[0] + amounts[1] + amounts[2] : 0;
+    public long GetEscapedUnits(LiquidKind kind) => Enum.IsDefined(kind) ? _escapedUnits[(int)kind] : 0;
+
+    internal void ReleaseOutside(LiquidKind kind, int units)
+    {
+        if (!Enum.IsDefined(kind) || units <= 0) throw new ArgumentOutOfRangeException(nameof(units));
+        _escapedUnits[(int)kind] = checked(_escapedUnits[(int)kind] + units);
+        Revision++;
+    }
+
+    internal void RecordSuppliedWater(int units)
+    {
+        if (units < 0) throw new ArgumentOutOfRangeException(nameof(units));
+        SuppliedWaterUnits = checked(SuppliedWaterUnits + units);
+    }
 
     /// <summary>A falling solid displaces liquid into its vacated cell without deleting any units.</summary>
     internal void SwapDisplacedLiquid(Cell from, Cell to)
@@ -263,6 +283,7 @@ public sealed class LiquidSystem
             React(occupied);
             Fall(occupied);
             Level(occupied);
+            DrainBoundary(occupied);
             foreach (var empty in _cells.Where(pair => pair.Value.All(n => n == 0)).Select(pair => pair.Key).ToArray()) _cells.Remove(empty);
             _flowTick = _flowTick == int.MaxValue ? 0 : _flowTick + 1;
         }
@@ -271,14 +292,17 @@ public sealed class LiquidSystem
     public LiquidState ExportState() => new()
     {
         Cells = Cells.ToList(), Obsidian = _world.ObsidianCells.OrderBy(c => c.Cell.X).ThenBy(c => c.Cell.Y).ThenBy(c => c.Cell.Z).ToList(),
-        Hazards = _hazards.ToList(), Accumulator = _accumulator, FlowTick = _flowTick
+        Hazards = _hazards.ToList(), Accumulator = _accumulator, FlowTick = _flowTick,
+        EscapedWaterUnits = _escapedUnits[0], EscapedMercuryUnits = _escapedUnits[1], EscapedLavaUnits = _escapedUnits[2],
+        SuppliedWaterUnits = SuppliedWaterUnits
     };
 
     /// <summary>Validates a complete snapshot before changing either fluids or world collision.</summary>
     public void RestoreState(LiquidState state)
     {
         if (state is null || state.Cells is null || state.Obsidian is null || state.Hazards is null ||
-            !double.IsFinite(state.Accumulator) || state.Accumulator < 0 || state.Accumulator >= StepDuration || state.FlowTick < 0)
+            !double.IsFinite(state.Accumulator) || state.Accumulator < 0 || state.Accumulator >= StepDuration || state.FlowTick < 0 ||
+            state.EscapedWaterUnits < 0 || state.EscapedMercuryUnits < 0 || state.EscapedLavaUnits < 0 || state.SuppliedWaterUnits < 0)
             throw new InvalidDataException("Liquid snapshot has missing collections or an invalid flow clock.");
         var solids = new Dictionary<Cell, ObsidianCell>();
         foreach (var crust in state.Obsidian)
@@ -320,7 +344,32 @@ public sealed class LiquidSystem
             ? cloud with { Dps = Balance.SteamDamagePerSecond } : cloud));
         _accumulator = state.Accumulator;
         _flowTick = state.FlowTick;
+        _escapedUnits[0] = state.EscapedWaterUnits;
+        _escapedUnits[1] = state.EscapedMercuryUnits;
+        _escapedUnits[2] = state.EscapedLavaUnits;
+        SuppliedWaterUnits = state.SuppliedWaterUnits;
         Revision++;
+    }
+
+    private void DrainBoundary(Func<Cell, bool>? occupied)
+    {
+        foreach (var cell in _cells.Keys.ToArray())
+        {
+            if (occupied?.Invoke(cell) == true) continue;
+            foreach (var kind in DensityOrder)
+            {
+                int units = GetUnits(cell, kind);
+                if (units == 0) continue;
+                bool escapes = cell.X == 0 && TouchesFace(cell, kind, CrustFace.West) ||
+                    cell.X == WorldGrid.Size - 1 && TouchesFace(cell, kind, CrustFace.East) ||
+                    cell.Z == 0 && TouchesFace(cell, kind, CrustFace.North) ||
+                    cell.Z == WorldGrid.Size - 1 && TouchesFace(cell, kind, CrustFace.South) ||
+                    cell.Y == 0 && TouchesFace(cell, kind, CrustFace.Bottom);
+                if (!escapes) continue;
+                Change(cell, kind, -units);
+                ReleaseOutside(kind, units);
+            }
+        }
     }
 
     private void React(Func<Cell, bool>? occupied)

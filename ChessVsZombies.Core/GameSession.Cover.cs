@@ -35,7 +35,7 @@ public sealed partial class GameSession
         HasSolidFooting(zombie.Position, zombie) && _coverWaiting.ContainsKey(zombie.Id);
 
     private bool CanGatherBehindCover(Zombie zombie) => !IsZombieRetreating(zombie) &&
-        !(zombie.Size == ZombieSize.Kilo && GetKiloConstructionBlocks(zombie) > 0);
+        !(zombie.IsGiant && GetKiloConstructionBlocks(zombie) > 0);
 
     private void ResetCoverBehavior()
     {
@@ -68,17 +68,18 @@ public sealed partial class GameSession
 
     private bool TryGetTurretShot(Turret turret, Zombie zombie, out ShotKind kind)
     {
-        if (zombie.Size == ZombieSize.Kilo)
+        if (zombie.IsGiant)
             return TryGetKiloTurretAim(turret, zombie, null, out kind, out _);
         var offset = zombie.Cell - turret.Cell;
         bool jump = Economy.IsJumpOffset(turret, offset);
         kind = jump ? ShotKind.Lob : turret.Kind == PieceKind.Pawn && offset.Chebyshev == 1
             ? ShotKind.Melee : ShotKind.Pellet;
-        return jump || Economy.IsDirectionalOffset(turret, offset);
+        return (jump || Economy.IsDirectionalOffset(turret, offset)) &&
+            !TurretShotCrossesCore(turret.Cell.Center, zombie.Position, kind);
     }
 
     private Vector3 GetTurretAimPoint(Turret turret, Zombie zombie, ShotKind shot) =>
-        zombie.Size == ZombieSize.Kilo && TryGetKiloTurretAim(turret, zombie, shot, out _, out var aim)
+        zombie.IsGiant && TryGetKiloTurretAim(turret, zombie, shot, out _, out var aim)
             ? aim : zombie.Position;
 
     private bool TryGetKiloTurretAim(Turret turret, Zombie zombie, ShotKind? requiredShot,
@@ -112,12 +113,35 @@ public sealed partial class GameSession
                     if (!ProjectileBoxIntersection(origin, ray, min, max, out float hit)) continue;
                     var aim = origin + ray * hit;
                     float distance = Vector3.DistanceSquared(origin, aim);
-                    if (distance >= nearest) continue;
+                    if (distance >= nearest || TurretShotCrossesCore(origin, aim, kind)) continue;
                     nearest = distance;
                     selectedShot = kind;
                     selectedAim = aim;
                 }
         return float.IsFinite(nearest);
+    }
+
+    private static bool TurretShotCrossesCore(Vector3 origin, Vector3 aim, ShotKind shot)
+    {
+        var min = new Vector3(WorldGrid.Size / 2 - 1);
+        var max = min + new Vector3(2);
+        var delta = aim - origin;
+        if (shot != ShotKind.Lob)
+            return ProjectileBoxIntersection(origin, delta, min, max, out _);
+
+        // Only the indestructible objective vetoes cover fire. Use the actual
+        // lob parabola: its straight aiming chord may cross the core while the
+        // projectile clears it overhead. X/Z bound the interval over the core;
+        // the concave vertical curve reaches its minimum at an interval end.
+        float enter = 0, leave = 1;
+        if (!ProjectileAxisInterval(origin.X, delta.X, min.X, max.X, ref enter, ref leave) ||
+            !ProjectileAxisInterval(origin.Z, delta.Z, min.Z, max.Z, ref enter, ref leave) || leave <= 0)
+            return false;
+        float height = Math.Max(1, delta.Length() * .4f);
+        float Y(float t) => origin.Y + delta.Y * t + 4 * height * t * (1 - t);
+        float low = Math.Min(Y(enter), Y(leave));
+        float peak = Math.Clamp((delta.Y + 4 * height) / (8 * height), enter, leave);
+        return low <= max.Y && Y(peak) >= min.Y;
     }
 
     private void OnZombieDamaged(Zombie zombie)

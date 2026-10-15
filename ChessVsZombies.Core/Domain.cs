@@ -18,13 +18,13 @@ public enum ToolKind { Shovel, Pickaxe }
 public enum PieceKind { Pawn, Knight, Bishop, Rook }
 public enum UpgradeKind { HP, ATK, Orthogonal, PlaneDiagonal, SpaceDiagonal, Jump }
 public enum ZombieKind { Basic, Armed, Armored, ArmedArmored }
-public enum ZombieSize { Standard, Milli, Kilo }
+public enum ZombieSize { Standard, Milli, Kilo, Mega }
 public enum KiloEquipmentMode { Covers, Buckets }
 public enum GearTier { Wood, Stone, Copper, Iron, Gold, Diamond, Osmium }
 public enum GamePhase { Building, Combat, Defeat }
 public enum ShotKind { Melee, Pellet, Lob }
 public enum DamageKind { Pierce, Blunt, Chemical, Thermal }
-public enum ArmorSlot { Shield, Chestplate, Helmet }
+public enum ArmorSlot { Shield, Chestplate, Helmet, Boots }
 public sealed record BlockDrop([property: JsonRequired] Cell Cell, [property: JsonRequired] Material Content,
     float? Hp = null, bool WasBarrier = false);
 
@@ -102,7 +102,8 @@ public sealed class Turret
     public float Hp { get; set; } = Balance.TurretHp;
     public float Cooldown { get; set; }
     public Dictionary<UpgradeKind, int> UpgradePoints { get; } = [];
-    public List<Cell> JumpPattern { get; } = [new(2, 0, 1), new(2, 0, -1), new(-2, 0, 1), new(-2, 0, -1), new(1, 0, 2), new(-1, 0, 2), new(1, 0, -2), new(-1, 0, -2)];
+    private List<Cell>? _jumpPattern;
+    public List<Cell> JumpPattern => _jumpPattern ??= JumpRules.DefaultPattern(Kind);
 }
 
 /// <summary>A reusable request; each click spends only the points the aimed turret can accept.</summary>
@@ -110,7 +111,7 @@ public sealed class UpgradeTemplate
 {
     public Dictionary<UpgradeKind, int> Points { get; set; } = [];
     public bool UseJumpPattern { get; set; }
-    public List<Cell> JumpPattern { get; set; } = [new(2, 0, 1), new(2, 0, -1), new(-2, 0, 1), new(-2, 0, -1), new(1, 0, 2), new(-1, 0, 2), new(1, 0, -2), new(-1, 0, -2)];
+    public List<Cell> JumpPattern { get; set; } = JumpRules.DefaultKnightPattern();
 }
 
 public sealed class Barrier
@@ -164,30 +165,32 @@ public sealed class Zombie
         }
     }
     public bool IsBoss { get; init; }
-    public float BodyScale => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, _ => 1 };
-    public float HealthMultiplier => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, _ => 1 };
+    public bool IsGiant => Size is ZombieSize.Kilo or ZombieSize.Mega;
+    public float BodyScale => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
+    public float HealthMultiplier => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
     public float MaxBodyHp => Balance.ZombieHp * HealthMultiplier;
-    public Vector3 BodyHalfExtents => Size == ZombieSize.Kilo ? Vector3.One : new Vector3(.2f, .39f, .2f) * BodyScale;
-    public int GridFootprint => Size == ZombieSize.Kilo ? 2 : 1;
+    public Vector3 BodyHalfExtents => IsGiant ? new Vector3(BodyScale * .5f) : new Vector3(.2f, .39f, .2f) * BodyScale;
+    public int GridFootprint => Size switch { ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
     public float StandingHeight => .5f * BodyScale;
     public bool HasWeapon => Kind is ZombieKind.Armed or ZombieKind.ArmedArmored;
     public float MovementSpeed => NavigationCosts.WalkTilesPerSecond * (HasWeapon ? 1 : 1.5f) *
-        (Size switch { ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, _ => 1 });
+        (Size switch { ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, ZombieSize.Mega => .5f, _ => 1 });
     public Vector3 StandAt(Cell cell) => cell.Center + new Vector3((GridFootprint - 1) * .5f, StandingHeight - .5f, (GridFootprint - 1) * .5f);
     public Vector3 Position { get; set; }
     public Vector3 Facing { get; private set; } = Vector3.UnitZ;
     private bool _carriesBucket;
-    public bool CarriesBucket { get => Size == ZombieSize.Kilo || _carriesBucket; set => _carriesBucket = value; }
+    public bool CarriesBucket { get => IsGiant || _carriesBucket; set => _carriesBucket = value; }
     public KiloEquipmentMode KiloEquipmentMode { get; internal set; } = KiloEquipmentMode.Covers;
     public float KiloBucketActionRemaining { get; internal set; }
     private readonly ZombieBucketLoad[] _bucketLoads = [new(), new()];
-    public int BucketCount => Size == ZombieSize.Kilo ? 2 : 1;
+    public int BucketCount => IsGiant ? 2 : 1;
+    public int BucketCapacity => Size == ZombieSize.Mega ? 15 : Balance.BucketCapacity;
     public IReadOnlyList<ZombieBucketLoad> BucketLoads => _bucketLoads;
     public int HeldBucketUnits => _bucketLoads[0].Units + _bucketLoads[1].Units;
     // Preserve the original one-bucket API for existing callers and checkpoints.
     public int BucketUnits { get => _bucketLoads[0].Units; internal set => _bucketLoads[0].Units = value; }
     public LiquidKind? BucketKind { get => _bucketLoads[0].Kind; internal set => _bucketLoads[0].Kind = value; }
-    public int CarriedBlocks { get => CarriesBucket && Size != ZombieSize.Kilo ? 0 : _carriedBlocks; internal set => _carriedBlocks = value; }
+    public int CarriedBlocks { get => CarriesBucket && !IsGiant ? 0 : _carriedBlocks; internal set => _carriedBlocks = value; }
     public Material CarriedBlockMaterial => Kind == ZombieKind.Basic ? Material.Dirt : Tier switch
     {
         GearTier.Wood => Material.Wood,
@@ -220,7 +223,7 @@ public sealed class Zombie
             }
         }
     }
-    public float MaxHp { get => _maximumHp ?? (Balance.ZombieHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 3 * Balance.GearHp(Tier) : 0)) * HealthMultiplier; init => _maximumHp = value; }
+    public float MaxHp { get => _maximumHp ?? (Balance.ZombieHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(Tier) : 0)) * HealthMultiplier; init => _maximumHp = value; }
     public float AirRemaining { get; internal set; } = Balance.AirSeconds;
     public bool SinksIn(LiquidKind liquid) => liquid switch
     {
@@ -286,7 +289,7 @@ public sealed class Zombie
         _maximumHp = null;
         _armor = null;
         EnsureArmor();
-        Attack = LevelCatalog.ZombieAttack(Kind, Tier);
+        Attack = LevelCatalog.ZombieAttack(Kind, Tier, Size);
         return Hp - before;
     }
 
@@ -307,10 +310,20 @@ public sealed class Zombie
             if (IsShieldFacingHit(incomingDirection)) AbsorbWith(ArmorSlot.Shield, ref damage);
             var delivery = shot ?? (kind == DamageKind.Pierce ? ShotKind.Pellet : ShotKind.Melee);
             if (delivery == ShotKind.Lob) AbsorbWith(ArmorSlot.Helmet, ref damage);
-            else if (delivery == ShotKind.Pellet) AbsorbWith(ArmorSlot.Chestplate, ref damage);
+            else if (delivery == ShotKind.Pellet) AbsorbWith(PelletArmorSlot(incomingDirection), ref damage);
         }
         _bodyHp = Math.Max(0, _bodyHp - damage);
         if (_bodyHp <= 0) SetGuardFacing(null);
+    }
+
+    private static ArmorSlot PelletArmorSlot(Vector3? incomingDirection)
+    {
+        if (incomingDirection is not { } incoming || !float.IsFinite(incoming.X) ||
+            !float.IsFinite(incoming.Y) || !float.IsFinite(incoming.Z)) return ArmorSlot.Chestplate;
+        // Even a grazing shot retains whether it came from above or below.
+        // The actual travel vector has zero Y for a level pellet.
+        if (incoming.Y == 0) return ArmorSlot.Chestplate;
+        return incoming.Y < 0 ? ArmorSlot.Helmet : ArmorSlot.Boots;
     }
 
     private bool IsShieldFacingHit(Vector3? incomingDirection)

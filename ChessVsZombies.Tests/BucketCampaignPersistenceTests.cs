@@ -68,6 +68,31 @@ public class BucketCampaignPersistenceTests
         });
     }
 
+    [Fact]
+    public void AnOlderCheckpointWithABucketAboveTheCeilingLoadsAndRecordsItsEscapeOnlyOnce()
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(CreatePayloads(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            var flight = document["Buckets"]!["Flights"]![0]!;
+            flight["Origin"]!["Y"] = 31.8f;
+            flight["Age"] = .2f;
+            File.WriteAllText(path, document.ToJsonString());
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+
+            Assert.Empty(restored!.Buckets.Flights);
+            Assert.Equal(10, restored.Liquids.GetEscapedUnits(LiquidKind.Lava));
+            Assert.Equal(4, restored.Buckets.PendingUnits);
+            SaveStore.Save(restored, path);
+            Assert.True(SaveStore.TryLoad(path, out var again, out error), error);
+            Assert.Equal(10, again!.Liquids.GetEscapedUnits(LiquidKind.Lava));
+            Assert.Empty(again.Buckets.Flights);
+            Assert.Equal(4, again.Buckets.PendingUnits);
+        });
+    }
+
     [Theory]
     [InlineData("missing-origin-x")]
     [InlineData("missing-origin")]
@@ -111,7 +136,7 @@ public class BucketCampaignPersistenceTests
                 case "invalid-kind": flight["Kind"] = "Oil"; break;
                 case "integer-kind": flight["Kind"] = 2; break;
                 case "empty-flight": flight["Units"] = 0; break;
-                case "oversized-flight": flight["Units"] = 11; break;
+                case "oversized-flight": flight["Units"] = 16; break;
                 case "empty-splash": splash["Units"] = 0; break;
                 case "invalid-direction": flight["Direction"]!["Y"] = 1; break;
                 case "outside-origin": flight["Origin"]!["X"] = -1; break;

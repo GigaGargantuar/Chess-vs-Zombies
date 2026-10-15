@@ -8,6 +8,7 @@ public sealed partial class GameSession
     public LiquidBucketSystem Buckets => _buckets ??= new LiquidBucketSystem(World, Liquids);
     private readonly Dictionary<Cell, Cell> _bucketRoutes = [];
     private readonly Dictionary<ZombieSize, Dictionary<Cell, Cell>> _sizedBucketRoutes = [];
+    private readonly Dictionary<ZombieSize, Dictionary<Cell, Cell>> _waterAttackRoutes = [];
     private readonly HashSet<Cell> _bucketWorkCells = [];
     private int _bucketWorldRevision = -1, _bucketTopologyRevision = -1;
     private long _bucketLiquidRevision = -1;
@@ -17,6 +18,7 @@ public sealed partial class GameSession
         _buckets = null;
         _bucketRoutes.Clear();
         _sizedBucketRoutes.Clear();
+        _waterAttackRoutes.Clear();
         _bucketWorkCells.Clear();
         _bucketWorldRevision = _bucketTopologyRevision = -1;
         _bucketLiquidRevision = -1;
@@ -66,24 +68,38 @@ public sealed partial class GameSession
         if (zombie.HeldBucketUnits > 0)
         {
             if (zombie.Cooldown > 0) return grounded;
-            // Remove the obstruction from the approach rather than throwing it
-            // deeper into the crossing being cleared.
-            var direction = zombie.Position - new Vector3(16, zombie.Position.Y, 16);
-            if (direction.LengthSquared() < .0001f) direction = -zombie.Facing;
+            bool waterWork = CarriesWaterForLava(zombie);
+            if (waterWork && !TryGetWaterThrowDirection(zombie, out _) &&
+                TryGetBucketWorkRoute(zombie, zombie.Cell, out var waterStep, attackLava: true) && waterStep != zombie.Cell)
+                return false;
+            // A filled worker carries its real payload to a reachable outer bank.
+            // If no such route exists it can still move the liquid away from the
+            // objective instead of camping forever with a full bucket.
+            if (!waterWork && !WithinDisposalThrowRange(zombie) &&
+                TryGetBucketDisposalStep(zombie, zombie.Cell, out var disposalStep) && disposalStep != zombie.Cell)
+                return false;
             bool launched = false;
             for (int index = 0; index < zombie.BucketCount; index++)
             {
                 var load = zombie.BucketLoads[index];
+                if (waterWork && load.Kind != LiquidKind.Water && !WithinDisposalThrowRange(zombie)) continue;
+                Vector3 direction = DisposalDirection(zombie.Position);
+                if (load.Kind == LiquidKind.Water && waterWork)
+                {
+                    // Supplied water is a tool for solidifying the lava barrier,
+                    // never a waste parcel thrown away while that work remains.
+                    if (!TryGetWaterThrowDirection(zombie, out direction)) continue;
+                }
                 if (load.Units <= 0 || load.Kind is not { } kind ||
                     !Buckets.Launch(BucketHandPosition(zombie, index), direction, kind, load.Units,
                         standingHeight: zombie.Position.Y - zombie.StandingHeight)) continue;
                 load.Units = 0;
                 load.Kind = null;
+                zombie.FaceToward(direction);
                 launched = true;
             }
             if (!launched) return false;
             BeginKiloBucketAction(zombie);
-            zombie.FaceToward(direction);
             zombie.Cooldown = Balance.BucketActionSeconds;
             return grounded;
         }
@@ -93,13 +109,17 @@ public sealed partial class GameSession
         for (int index = 0; index < zombie.BucketCount; index++)
         {
             var hand = BucketHandPosition(zombie, index);
-            if (!TryReachBucketLiquidFromHand(hand, out var source)) continue;
-            int units = Liquids.TakeSurfaceLiquid(source, Balance.BucketCapacity, out var liquid);
-            if (units == 0) continue;
-            zombie.BucketLoads[index].Units = units;
-            zombie.BucketLoads[index].Kind = liquid;
-            zombie.FaceToward(source.Center - zombie.Position);
-            collected = true;
+            var load = zombie.BucketLoads[index];
+            while (load.Units < zombie.BucketCapacity &&
+                   TryReachBucketLiquidFromHand(hand, out var source, load.Kind))
+            {
+                int units = Liquids.TakeSurfaceLiquid(source, zombie.BucketCapacity - load.Units, out var liquid);
+                if (units == 0) break;
+                load.Units += units;
+                load.Kind = liquid;
+                zombie.FaceToward(source.Center - zombie.Position);
+                collected = true;
+            }
         }
         if (!collected) return false;
         BeginKiloBucketAction(zombie);
@@ -121,12 +141,85 @@ public sealed partial class GameSession
     private bool TryGetBucketRoute(Zombie zombie, Cell current, out Cell next)
     {
         next = default;
-        if (!zombie.CarriesBucket || zombie.HeldBucketUnits > 0) return false;
+        if (!zombie.CarriesBucket) return false;
+        if (zombie.HeldBucketUnits > 0)
+            return CarriesWaterForLava(zombie)
+                ? TryGetBucketWorkRoute(zombie, current, out next, attackLava: true)
+                : TryGetBucketDisposalStep(zombie, current, out next);
         return TryGetBucketWorkRoute(zombie, current, out next);
+    }
+
+    private bool CarriesWaterForLava(Zombie zombie)
+    {
+        if (!zombie.BucketLoads.Any(load => load.Units > 0 && load.Kind == LiquidKind.Water)) return false;
+        RefreshBucketRoutes();
+        if (!_bucketWorkCells.Any(cell => Liquids.GetUnits(cell, LiquidKind.Lava) > 0)) return false;
+        // Buried or physically unreachable lava cannot use this payload yet.
+        // Empty it outside normally so the worker can scoop the covering liquid.
+        return TryGetWaterThrowDirection(zombie, out _) ||
+            TryGetBucketWorkRoute(zombie, zombie.Cell, out _, attackLava: true);
+    }
+
+    private static Vector3 DisposalDirection(Vector3 position)
+    {
+        float closest = position.X;
+        var direction = -Vector3.UnitX;
+        if (WorldGrid.Size - position.X < closest) { closest = WorldGrid.Size - position.X; direction = Vector3.UnitX; }
+        if (position.Z < closest) { closest = position.Z; direction = -Vector3.UnitZ; }
+        if (WorldGrid.Size - position.Z < closest) direction = Vector3.UnitZ;
+        return direction;
+    }
+
+    private static bool WithinDisposalThrowRange(Zombie zombie) =>
+        Math.Min(Math.Min(zombie.Position.X, WorldGrid.Size - zombie.Position.X),
+            Math.Min(zombie.Position.Z, WorldGrid.Size - zombie.Position.Z)) <= 2.5f;
+
+    private bool TryGetBucketDisposalStep(Zombie zombie, Cell current, out Cell next)
+    {
+        next = current;
+        if (!_retreatRoutes.TryGetValue(zombie.Size, out var routes) || routes.WorldRevision != World.Revision ||
+            routes.TopologyRevision != _topologyRevision ||
+            routes.LiquidRevision != Liquids.Revision && _retreatNavigationTime - routes.BuiltAt >= .5f)
+            _retreatRoutes[zombie.Size] = routes = BuildRetreatRoutes(zombie.Size);
+        if (!routes.Steps.TryGetValue(current, out var step) || !RetreatStandIsDry(zombie, step)) return false;
+        next = step;
+        return true;
+    }
+
+    private bool TryGetWaterThrowDirection(Zombie zombie, out Vector3 direction, Cell? targetSource = null)
+    {
+        direction = default;
+        RefreshBucketRoutes();
+        float best = float.PositiveInfinity;
+        IEnumerable<Cell> sources = targetSource.HasValue ? [targetSource.Value] : _bucketWorkCells;
+        foreach (var source in sources)
+        {
+            if (!Liquids.TryGetSurfaceLiquid(source, out var kind, out _) || kind != LiquidKind.Lava) continue;
+            var target = new Vector3(source.Center.X, Liquids.GetSurfaceHeight(source), source.Center.Z);
+            var horizontal = target - zombie.Position;
+            horizontal.Y = 0;
+            float distance = horizontal.Length();
+            if (distance < 1.5f || distance > 4.25f || distance >= best ||
+                Math.Abs(target.Y - (zombie.Position.Y - zombie.StandingHeight)) > 1.01f) continue;
+            var aim = horizontal / distance;
+            var landing = BucketHandPosition(zombie, 0) + aim * 3;
+            // The actual three-by-three splash must overlap the lava cell.
+            if (Math.Abs(landing.X - target.X) > 1.45f || Math.Abs(landing.Z - target.Z) > 1.45f) continue;
+            direction = aim;
+            best = distance;
+        }
+        return float.IsFinite(best);
     }
 
     private bool HasReachableBucketWork(Zombie zombie) =>
         TryGetBucketWorkRoute(zombie, zombie.Cell, out _) || TryReachZombieBucketLiquid(zombie, out _);
+
+    private bool NeedsWaterForLava(Zombie zombie)
+    {
+        RefreshBucketRoutes();
+        return _bucketWorkCells.Any(cell => Liquids.GetUnits(cell, LiquidKind.Lava) > 0) &&
+            NeedsBucketCarrier(zombie.Cell, zombie);
+    }
 
     private bool TryReachZombieBucketLiquid(Zombie zombie, out Cell source)
     {
@@ -136,27 +229,28 @@ public sealed partial class GameSession
         return false;
     }
 
-    private bool TryGetBucketWorkRoute(Zombie zombie, Cell current, out Cell next)
+    private bool TryGetBucketWorkRoute(Zombie zombie, Cell current, out Cell next, bool attackLava = false)
     {
         RefreshBucketRoutes();
-        if (zombie.Size == ZombieSize.Standard) return _bucketRoutes.TryGetValue(current, out next);
-        if (!_sizedBucketRoutes.TryGetValue(zombie.Size, out var routes))
-            _sizedBucketRoutes[zombie.Size] = routes = BuildSizedBucketRoutes(zombie.Size);
+        if (!attackLava && zombie.Size == ZombieSize.Standard) return _bucketRoutes.TryGetValue(current, out next);
+        var cache = attackLava ? _waterAttackRoutes : _sizedBucketRoutes;
+        if (!cache.TryGetValue(zombie.Size, out var routes))
+            cache[zombie.Size] = routes = BuildSizedBucketRoutes(zombie.Size, attackLava);
         return routes.TryGetValue(current, out next);
     }
 
     private static Vector3 BucketHandPosition(Zombie zombie, int index)
     {
         var position = zombie.Position + Vector3.UnitY * .15f;
-        if (zombie.Size != ZombieSize.Kilo) return position;
+        if (!zombie.IsGiant) return position;
         var right = new Vector3(zombie.Facing.Z, 0, -zombie.Facing.X);
-        return position + right * (index == 0 ? -.45f : .45f);
+        return position + right * ((index == 0 ? -.45f : .45f) * zombie.BodyScale / 2);
     }
 
     private bool TryReachBucketLiquid(Vector3 position, out Cell source) =>
         TryReachBucketLiquidFromHand(position + Vector3.UnitY * .15f, out source);
 
-    private bool TryReachBucketLiquidFromHand(Vector3 hand, out Cell source)
+    private bool TryReachBucketLiquidFromHand(Vector3 hand, out Cell source, LiquidKind? requiredKind = null)
     {
         source = default;
         var cell = ToCell(hand);
@@ -167,7 +261,8 @@ public sealed partial class GameSession
                 for (int z = -reach; z <= reach; z++)
                 {
                     var candidate = cell + new Cell(x, y, z);
-                    if (!_bucketWorkCells.Contains(candidate) || !Liquids.TryGetSurfaceLiquid(candidate, out _, out _)) continue;
+                    if (!_bucketWorkCells.Contains(candidate) || !Liquids.TryGetSurfaceLiquid(candidate, out var kind, out _) ||
+                        requiredKind.HasValue && kind != requiredKind.Value) continue;
                     var surface = new Vector3(candidate.Center.X, Liquids.GetSurfaceHeight(candidate) + .01f, candidate.Center.Z);
                     float distance = Vector3.DistanceSquared(hand, surface);
                     if (distance > Balance.BucketReach * Balance.BucketReach || distance >= best || !HasLineOfSight(hand, surface)) continue;
@@ -189,7 +284,7 @@ public sealed partial class GameSession
         return true;
     }
 
-    private Dictionary<Cell, Cell> BuildSizedBucketRoutes(ZombieSize size)
+    private Dictionary<Cell, Cell> BuildSizedBucketRoutes(ZombieSize size, bool attackLava = false)
     {
         var shape = new Zombie { Size = size };
         var routes = new Dictionary<Cell, Cell>();
@@ -202,15 +297,15 @@ public sealed partial class GameSession
         }
         foreach (var source in _bucketWorkCells)
         {
-            if (!Liquids.TryGetSurfaceLiquid(source, out _, out _)) continue;
-            for (int x = -3; x <= 2; x++)
+            if (!Liquids.TryGetSurfaceLiquid(source, out var liquid, out _) || attackLava && liquid != LiquidKind.Lava) continue;
+            for (int x = attackLava ? -5 : -3; x <= (attackLava ? 4 : 2); x++)
                 for (int y = -2; y <= 2; y++)
-                    for (int z = -3; z <= 2; z++)
+                    for (int z = attackLava ? -5 : -3; z <= (attackLava ? 4 : 2); z++)
                     {
                         var stand = source + new Cell(x, y, z);
                         if (routes.ContainsKey(stand) || !IsStand(stand)) continue;
                         shape.Position = shape.StandAt(stand);
-                        if (!TryReachZombieBucketLiquid(shape, out _)) continue;
+                        if (!(attackLava ? TryGetWaterThrowDirection(shape, out _, source) : TryReachZombieBucketLiquid(shape, out _))) continue;
                         routes[stand] = stand;
                         frontier.Enqueue(stand);
                     }
@@ -243,6 +338,7 @@ public sealed partial class GameSession
             _bucketLiquidRevision == Liquids.Revision) return;
         _bucketRoutes.Clear();
         _sizedBucketRoutes.Clear();
+        _waterAttackRoutes.Clear();
         _bucketWorkCells.Clear();
         var wet = Liquids.Cells.Where(cell => cell.Water + cell.Mercury + cell.Lava > 0).Select(cell => cell.Cell).ToHashSet();
         var connected = new Queue<Cell>();

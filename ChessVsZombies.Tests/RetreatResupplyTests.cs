@@ -125,7 +125,7 @@ public sealed class RetreatResupplyTests
     }
 
     [Fact]
-    public void AnIrrelevantFullBucketDoesNotKeepAStrandedArmyInTheField()
+    public void AnIrrelevantFullBucketCanBeDisposedBeforeAStrandedArmyRetreats()
     {
         var game = CreateDefense();
         ExcavateMoat(game);
@@ -135,10 +135,19 @@ public sealed class RetreatResupplyTests
         Set(zombie, nameof(Zombie.BucketUnits), 10);
 
         Assert.False((bool)Invoke(game, "CanZombieOpenCoreRoute", zombie)!);
+        var origin = zombie.Position;
         game.Update(1.2f);
+
+        Assert.False(game.IsZombieRetreating(zombie));
+        Assert.True(Vector3.Distance(origin, zombie.Position) > .1f,
+            "A real full bucket did not begin its reachable disposal trip.");
+        AdvanceUntil(game, 25, () => game.IsZombieRetreating(zombie));
 
         Assert.True(game.IsZombieRetreating(zombie));
         Assert.Equal(0, zombie.CarriedBlocks);
+        Assert.Equal(0, zombie.HeldBucketUnits);
+        Assert.Equal(10, game.Liquids.GetEscapedUnits(LiquidKind.Water) +
+            game.Buckets.Flights.Sum(flight => flight.Units) + game.Buckets.PendingUnits + game.Liquids.Cells.Sum(cell => cell.Water));
     }
 
     [Fact]

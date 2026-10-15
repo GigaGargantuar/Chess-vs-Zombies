@@ -52,19 +52,19 @@ public sealed partial class GameSession
 
     public bool IsZombieHurled(Zombie zombie) => zombie.Hp > 0 && _hurledAllies.ContainsKey(zombie.Id);
 
-    public bool IsKiloUsingBuckets(Zombie zombie) => zombie.Hp > 0 && zombie.Size == ZombieSize.Kilo &&
+    public bool IsKiloUsingBuckets(Zombie zombie) => zombie.Hp > 0 && zombie.IsGiant &&
         zombie.KiloEquipmentMode == KiloEquipmentMode.Buckets;
 
     private static void BeginKiloBucketAction(Zombie zombie)
     {
-        if (zombie.Size != ZombieSize.Kilo) return;
+        if (!zombie.IsGiant) return;
         zombie.KiloEquipmentMode = KiloEquipmentMode.Buckets;
         zombie.KiloBucketActionRemaining = Balance.BucketActionSeconds;
     }
 
     private static void UpdateKiloEquipment(Zombie zombie, float dt)
     {
-        if (zombie.Size != ZombieSize.Kilo || zombie.KiloEquipmentMode != KiloEquipmentMode.Buckets) return;
+        if (!zombie.IsGiant || zombie.KiloEquipmentMode != KiloEquipmentMode.Buckets) return;
         zombie.KiloBucketActionRemaining = Math.Max(0, zombie.KiloBucketActionRemaining - dt);
         if (zombie.KiloBucketActionRemaining <= .00001f)
         {
@@ -147,7 +147,7 @@ public sealed partial class GameSession
         if (direction.LengthSquared() < .0001f) return false;
         direction = Math.Abs(direction.X) >= Math.Abs(direction.Z)
             ? new Vector3(MathF.Sign(direction.X), 0, 0) : new Vector3(0, 0, MathF.Sign(direction.Z));
-        foreach (var ally in Zombies.Where(ally => ally.Id != kilo.Id && ally.Hp > 0 && ally.Size != ZombieSize.Kilo &&
+        foreach (var ally in Zombies.Where(ally => ally.Id != kilo.Id && ally.Hp > 0 && !ally.IsGiant &&
                      !IsZombieRetreating(ally) && !ally.NextCell.HasValue && !_hurledAllies.ContainsKey(ally.Id) &&
                      Vector3.DistanceSquared(ally.Position, kilo.Position) <= 9).OrderBy(ally => Vector3.DistanceSquared(ally.Position, kilo.Position)))
         {
@@ -226,8 +226,6 @@ public sealed partial class GameSession
         // A fallen teammate leaves ordinary world terrain. Recover reachable
         // blocks beside/above the body before excavating another floor block.
         if (TryGrabNearbyKiloCover(zombie, center, blockIndex)) return true;
-        if (Zombies.Any(ally => ally.Id != zombie.Id && ally.Hp > 0 &&
-            Vector3.DistanceSquared(ally.Position, zombie.Position) <= 9)) return false;
         var front = zombie.Position + KiloFacingOnSquare(zombie) *
             (Math.Max(zombie.BodyHalfExtents.X, zombie.BodyHalfExtents.Z) + .5f);
         var footY = zombie.Position.Y - zombie.StandingHeight;
@@ -305,7 +303,8 @@ public sealed partial class GameSession
             foreach (var held in blocks)
             {
                 var center = zombie.Position + held.Offset;
-                if (ProjectileBoxIntersection(from, to - from, center - new Vector3(.5f), center + new Vector3(.5f), out var hit) && hit < fraction)
+                if (ProjectileBoxIntersection(from, to - from, center - new Vector3(.5f), center + new Vector3(.5f), out var hit) &&
+                    (hit < fraction || hit == fraction && (zombie.Id < carrierId || zombie.Id == carrierId && held.BlockIndex < blockIndex)))
                 { fraction = hit; carrierId = zombie.Id; blockIndex = held.BlockIndex; }
             }
         }
@@ -353,6 +352,7 @@ public sealed partial class GameSession
     {
         _hurledAllies.Remove(zombie.Id);
         _kiloActionCooldowns.Remove(zombie.Id);
+        _megaActionCooldowns.Remove(zombie.Id);
         if (!_kiloBlocks.Remove(zombie.Id, out var blocks)) return;
         foreach (var held in blocks)
         {

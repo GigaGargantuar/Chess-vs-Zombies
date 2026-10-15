@@ -131,7 +131,7 @@ public sealed class CoverCombatTests
         game.DamageZombie(zombie, 1, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitX);
 
         Assert.Equal(10, zombie.BodyHp);
-        Assert.Equal(39, zombie.Hp);
+        Assert.Equal(49, zombie.Hp);
         Assert.False(game.IsZombieHiding(zombie));
         game.Update(.4f);
         Assert.True(zombie.Position.X > HidingCell.Center.X);
@@ -161,7 +161,7 @@ public sealed class CoverCombatTests
         game.DamageZombie(zombie, 1, DamageKind.Thermal);
         game.Update(.05f);
 
-        Assert.Equal(640, zombie.Hp);
+        Assert.Equal(850, zombie.Hp);
         Assert.True(game.IsZombieHiding(zombie));
         Assert.Equal(HidingCell.Center, zombie.Position);
     }

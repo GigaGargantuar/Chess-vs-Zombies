@@ -96,7 +96,7 @@ public sealed class ReturningZombieValidationTests
                 case "wrong-wave": zombie["TargetWaveIndex"] = 1; break;
                 case "invalid-kind": zombie["Kind"] = "Mage"; break;
                 case "invalid-tier": zombie["Tier"] = "Uranium"; break;
-                case "invalid-size": zombie["Size"] = "Mega"; break;
+                case "invalid-size": zombie["Size"] = "Unknown"; break;
                 case "integer-enum": zombie["Size"] = 2; break;
                 case "standard-boss": zombie["Size"] = "Standard"; break;
                 case "dead-body": zombie["BodyHp"] = 0; break;
@@ -109,7 +109,7 @@ public sealed class ReturningZombieValidationTests
                 case "null-armor": zombie["Armor"] = null; break;
                 case "null-armor-piece": zombie["Armor"]![0] = null; break;
                 case "duplicate-armor-slot": zombie["Armor"]![1]!["Slot"] = armor["Slot"]!.DeepClone(); break;
-                case "invalid-armor-slot": armor["Slot"] = "Boots"; break;
+                case "invalid-armor-slot": armor["Slot"] = "Gorget"; break;
                 case "invalid-armor-tier": armor["Tier"] = "Uranium"; break;
                 case "dead-armor": armor["Hp"] = 0; break;
                 case "oversized-armor": armor["Hp"] = 841; break;

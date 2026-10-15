@@ -13,18 +13,18 @@ public class LiquidCombatTests
     {
         var game = new GameSession();
         var zombie = new Zombie { Kind = ZombieKind.Armored, Tier = GearTier.Wood, WaveIndex = -1 };
-        Assert.Equal(40, zombie.Hp);
+        Assert.Equal(50, zombie.Hp);
         var kind = shot == ShotKind.Pellet ? DamageKind.Pierce : DamageKind.Blunt;
         game.DamageZombie(zombie, 11, kind, shot, -zombie.Facing);
         Assert.Equal(10, zombie.BodyHp);
-        Assert.Equal(29, zombie.Hp);
-        Assert.Equal(new[] { ArmorSlot.Chestplate, ArmorSlot.Helmet }, zombie.ArmorPieces.Select(piece => piece.Slot));
+        Assert.Equal(39, zombie.Hp);
+        Assert.Equal(new[] { ArmorSlot.Chestplate, ArmorSlot.Helmet, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
         Assert.Equal(9, Assert.Single(zombie.ArmorPieces, piece => piece.Slot == matching).Hp);
         game.DamageZombie(zombie, 11, kind, shot, -zombie.Facing);
-        Assert.Equal(bypassed, Assert.Single(zombie.ArmorPieces).Slot);
-        Assert.Equal(10, Assert.Single(zombie.ArmorPieces).Hp);
+        Assert.Equal(new[] { bypassed, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
+        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(10, piece.Hp));
         Assert.Equal(8, zombie.BodyHp);
-        Assert.Equal(18, zombie.Hp);
+        Assert.Equal(28, zombie.Hp);
     }
 
     [Theory]
@@ -36,8 +36,8 @@ public class LiquidCombatTests
         var zombie = new Zombie { Kind = ZombieKind.ArmedArmored, Tier = GearTier.Diamond, WaveIndex = -1 };
         game.DamageZombie(zombie, 3, kind);
         Assert.Equal(7, zombie.BodyHp);
-        Assert.Equal(397, zombie.Hp);
-        Assert.Equal(3, zombie.ArmorPieces.Count);
+        Assert.Equal(527, zombie.Hp);
+        Assert.Equal(4, zombie.ArmorPieces.Count);
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(130, piece.Hp));
     }
 
@@ -46,20 +46,20 @@ public class LiquidCombatTests
     {
         var game = new GameSession();
         var zombie = new Zombie { Kind = ZombieKind.Armored, Tier = GearTier.Osmium, WaveIndex = -1 };
-        Assert.Equal(30, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
+        Assert.Equal(40, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
         game.DamageZombie(zombie, 50, DamageKind.Thermal); // Five seconds at the baseline lava damage rate.
         Assert.Equal(10, zombie.BodyHp);
-        Assert.Equal(25, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
+        Assert.Equal(35, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
         game.Update(1); // Time away from heat cannot replenish protection.
-        Assert.Equal(25, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
+        Assert.Equal(35, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
         game.DamageZombie(zombie, 210, DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
-        Assert.Equal(20, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
-        game.DamageZombie(zombie, 200, DamageKind.Thermal);
+        Assert.Equal(30, zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining));
+        game.DamageZombie(zombie, 300, DamageKind.Thermal);
         Assert.Equal(10, zombie.BodyHp);
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(0, piece.HeatProtectionRemaining));
         game.DamageZombie(zombie, 1, DamageKind.Thermal);
         Assert.Equal(9, zombie.BodyHp);
-        Assert.Equal(2, zombie.ArmorPieces.Count);
+        Assert.Equal(3, zombie.ArmorPieces.Count);
     }
 
     [Theory]
@@ -77,6 +77,7 @@ public class LiquidCombatTests
         Assert.Equal(sinks, zombie.SinksIn(liquid));
         game.DamageZombie(zombie, 2 * Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
         game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Blunt, ShotKind.Lob, Vector3.UnitY);
+        game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
         Assert.Equal(10, zombie.BodyHp);
         Assert.Empty(zombie.ArmorPieces);
         Assert.Equal(liquid == LiquidKind.Water, zombie.SinksIn(liquid));
@@ -96,6 +97,7 @@ public class LiquidCombatTests
         var zombie = BeginAt(game, new Cell(8, 13, 8));
         zombie.Position = new Vector3(8.5f, y, 8.5f);
         game.DamageZombie(zombie, 2 * Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
+        game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
         Assert.Single(zombie.ArmorPieces);
         Assert.True(zombie.SinksIn(liquid));
         zombie.NextCell = new Cell(8, 13, 8);
@@ -130,14 +132,14 @@ public class LiquidCombatTests
         var zombie = BeginAt(game, new Cell(8, 14, 8));
         zombie.Position = new Vector3(8.5f, 14.13f, 8.5f);
         game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
-        Assert.Equal(2, zombie.ArmorPieces.Count);
+        Assert.Equal(3, zombie.ArmorPieces.Count);
         Assert.False(zombie.SinksIn(liquid));
         zombie.NextCell = new Cell(8, 13, 8);
         zombie.MoveProgress = .5f;
 
         game.Update(.05f);
 
-        Assert.Equal(2, zombie.ArmorPieces.Count);
+        Assert.Equal(3, zombie.ArmorPieces.Count);
         Assert.Null(zombie.NextCell);
         Assert.Equal(0, zombie.MoveProgress);
         Assert.InRange(zombie.Position.Y, 14.229f, 14.231f);
@@ -154,7 +156,7 @@ public class LiquidCombatTests
         var zombie = BeginAt(game, new Cell(8, 14, 8));
         var before = zombie.Position.Y;
         game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
-        Assert.Equal(2, zombie.ArmorPieces.Count);
+        Assert.Equal(3, zombie.ArmorPieces.Count);
         Assert.True(zombie.SinksIn(liquid));
 
         game.Update(.25f);
@@ -182,9 +184,9 @@ public class LiquidCombatTests
         game.DamageZombie(zombie, 5, DamageKind.Chemical);
         Assert.Equal(0, zombie.BodyHp);
         Assert.Equal(0, zombie.Hp);
-        Assert.Equal(640, game.Waves[0].DamageTaken);
+        Assert.Equal(850, game.Waves[0].DamageTaken);
         game.DamageZombie(zombie, 1000);
-        Assert.Equal(640, game.Waves[0].DamageTaken);
+        Assert.Equal(850, game.Waves[0].DamageTaken);
         game.Update(.01f);
         Assert.True(game.Waves[1].Started);
         Assert.Single(game.Zombies, living => living.WaveIndex == 1);
@@ -256,11 +258,11 @@ public class LiquidCombatTests
         FillWell(game, LiquidKind.Water, 13, 15);
         var zombie = BeginAt(game, new Cell(8, 13, 8));
         game.Update(9.9f);
-        Assert.Equal(640, zombie.Hp);
+        Assert.Equal(850, zombie.Hp);
         Assert.InRange(zombie.AirRemaining, .09f, .11f);
         game.Update(.2f);
         Assert.Equal(0, zombie.BodyHp);
-        Assert.Equal(640, game.Waves[0].DamageTaken);
+        Assert.Equal(850, game.Waves[0].DamageTaken);
         Assert.Empty(game.Zombies);
     }
 
@@ -285,7 +287,7 @@ public class LiquidCombatTests
     }
 
     [Fact]
-    public void ThreeOsmiumPiecesProvideThirtySecondsOfCumulativeLavaProtection()
+    public void FourOsmiumPiecesProvideFortySecondsOfCumulativeLavaProtection()
     {
         var game = Battle(ZombieKind.Armored, GearTier.Osmium);
         // Keep a solid roof and walls so this fixture measures uninterrupted heat
@@ -294,14 +296,14 @@ public class LiquidCombatTests
         var zombie = BeginAt(game, new Cell(8, 13, 8));
         game.Update(15);
         Assert.Equal(10, zombie.BodyHp);
-        Assert.InRange(zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining), 14.99f, 15.01f);
+        Assert.InRange(zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining), 24.99f, 25.01f);
         zombie.Position = new Cell(3, 16, 3).Center;
         zombie.NextCell = null;
         game.Update(1);
-        Assert.InRange(zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining), 14.99f, 15.01f);
+        Assert.InRange(zombie.ArmorPieces.Sum(piece => piece.HeatProtectionRemaining), 24.99f, 25.01f);
         zombie.Position = new Cell(8, 13, 8).Center;
         zombie.NextCell = null;
-        game.Update(14.9f);
+        game.Update(24.9f);
         Assert.Equal(10, zombie.BodyHp);
         Assert.Equal(10, zombie.AirRemaining);
         game.Update(.2f);

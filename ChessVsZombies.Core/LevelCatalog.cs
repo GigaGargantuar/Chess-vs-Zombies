@@ -70,8 +70,8 @@ public sealed class LevelCatalog
                 throw new InvalidDataException("BossBudgetFraction must be between 0.01 and 0.05.");
             foreach (var group in wave.Groups)
                 if (group == null || group.Count <= 0 || !Enum.IsDefined(group.Kind) || !Enum.IsDefined(group.Tier) ||
-                    !Enum.IsDefined(group.Size) || group.IsBoss && group.Size != ZombieSize.Kilo)
-                    throw new InvalidDataException("Groups need positive Count and valid Kind, Tier, and Size values; bosses must be Kilos.");
+                    !Enum.IsDefined(group.Size) || group.IsBoss && group.Size is not (ZombieSize.Kilo or ZombieSize.Mega))
+                    throw new InvalidDataException("Groups need positive Count and valid Kind, Tier, and Size values; bosses must be Kilos or Megas.");
             if (wave.HpBudget.HasValue && !wave.Groups.Any(group => !group.IsBoss))
                 throw new InvalidDataException("A budgeted wave needs at least one normal spawn type.");
             if (!wave.HpBudget.HasValue && wave.Groups.Sum(group => (long)group.Count) > int.MaxValue)
@@ -82,17 +82,19 @@ public sealed class LevelCatalog
     public static int ZombieMaxHp(ZombieKind kind, GearTier tier, ZombieSize size = ZombieSize.Standard)
     {
         int standard = Balance.ZombieHp +
-            (kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 3 * Balance.GearHp(tier) : 0);
+            (kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(tier) : 0);
         return size switch
         {
             ZombieSize.Milli => standard / 2,
             ZombieSize.Standard => standard,
             ZombieSize.Kilo => standard * 4,
+            ZombieSize.Mega => standard * 9,
             _ => throw new ArgumentOutOfRangeException(nameof(size))
         };
     }
-    public static int ZombieAttack(ZombieKind kind, GearTier tier) => Balance.BaseAttack +
-        (kind is ZombieKind.Armed or ZombieKind.ArmedArmored ? Balance.WeaponAttack(tier) : 0);
+    public static int ZombieAttack(ZombieKind kind, GearTier tier, ZombieSize size = ZombieSize.Standard) =>
+        (Balance.BaseAttack + (kind is ZombieKind.Armed or ZombieKind.ArmedArmored ? Balance.WeaponAttack(tier) : 0)) *
+        (size == ZombieSize.Mega ? 9 : 1);
 
     /// <summary>The strongest armor unlocked by the generated campaign, or none before wave five.</summary>
     public static GearTier? HighestAvailableArmorTier(int levelNumber)
@@ -149,6 +151,11 @@ public sealed class LevelCatalog
         {
             Kind = unlockedArmor.HasValue ? ZombieKind.Armored : ZombieKind.Basic,
             Tier = tier, Size = ZombieSize.Kilo, IsBoss = true
+        });
+        groups.Add(new ZombieGroup
+        {
+            Kind = unlockedArmor.HasValue ? ZombieKind.ArmedArmored : ZombieKind.Basic,
+            Tier = tier, Size = ZombieSize.Mega, IsBoss = true
         });
         return new LevelDefinition
         {

@@ -22,13 +22,15 @@ public sealed partial class GameSession
         return false;
     }
 
-    private bool HasKiloGridSupport(Cell anchor)
+    private bool HasKiloGridSupport(Cell anchor) => HasGiantGridSupport(anchor, 2);
+
+    private bool HasGiantGridSupport(Cell anchor, int footprint)
     {
         if (!WorldGrid.IsInside(anchor) || anchor.Y <= 0) return false;
         // A canonical Kilo occupies four entire floor cells. Its grid support
         // query needs only their upper faces; free falls still scan real floors.
-        for (int x = 0; x < 2; x++)
-            for (int z = 0; z < 2; z++)
+        for (int x = 0; x < footprint; x++)
+            for (int z = 0; z < footprint; z++)
             {
                 var floor = anchor + new Cell(x, -1, z);
                 if (World.GetObsidian(floor) is { } crust)
@@ -58,7 +60,7 @@ public sealed partial class GameSession
 
     private List<Cell> FindSizedSpawnCells(Zombie shape)
     {
-        if (shape.Size != ZombieSize.Kilo) return _spawnCells;
+        if (!shape.IsGiant) return _spawnCells;
         if (_sizedSpawnCells.TryGetValue(shape.Size, out var cached) &&
             cached.WorldRevision == World.Revision && cached.TopologyRevision == _topologyRevision) return cached.Cells;
         var cells = new List<Cell>();

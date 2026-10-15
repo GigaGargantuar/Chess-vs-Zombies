@@ -85,6 +85,7 @@ public sealed class LiquidBucketFlight
 /// <summary>Owns conserved bucket payloads from release until they enter ordinary liquid simulation.</summary>
 public sealed class LiquidBucketSystem
 {
+    public const int MaximumBucketCapacity = 15;
     private const float MaximumStep = .02f;
     private const float Epsilon = .001f;
     private readonly WorldGrid _world;
@@ -122,7 +123,8 @@ public sealed class LiquidBucketSystem
     public bool Spill(Vector3 origin, LiquidKind kind, int units)
     {
         if (!Finite(origin) || !ValidPayload(kind, units)) return false;
-        _pending.Add(new LiquidBucketSplashState(ClampToWorld(origin), kind, units));
+        if (!InsideVolume(origin)) _liquids.ReleaseOutside(kind, units);
+        else _pending.Add(new LiquidBucketSplashState(origin, kind, units));
         return true;
     }
 
@@ -143,15 +145,16 @@ public sealed class LiquidBucketSystem
                 {
                     var approach = to - from;
                     if (approach.LengthSquared() > .000001f) impact -= Vector3.Normalize(approach) * Epsilon;
-                    _pending.Add(new LiquidBucketSplashState(ClampToWorld(impact), flight.Kind, flight.Units));
+                    if (InsideVolume(impact)) _pending.Add(new LiquidBucketSplashState(impact, flight.Kind, flight.Units));
+                    else _liquids.ReleaseOutside(flight.Kind, flight.Units);
                     _flights.RemoveAt(index);
                     break;
                 }
                 flight.Age += step;
                 remaining -= step;
-                if (to.X < 0 || to.X >= WorldGrid.Size || to.Z < 0 || to.Z >= WorldGrid.Size || to.Y < 0)
+                if (!InsideVolume(to))
                 {
-                    _pending.Add(new LiquidBucketSplashState(ClampToWorld(to), flight.Kind, flight.Units));
+                    _liquids.ReleaseOutside(flight.Kind, flight.Units);
                     _flights.RemoveAt(index);
                     break;
                 }
@@ -185,6 +188,7 @@ public sealed class LiquidBucketSystem
         ArgumentNullException.ThrowIfNull(state);
         if (state.Flights is null || state.PendingSplashes is null) throw new InvalidDataException("Missing bucket state.");
         var flights = new List<LiquidBucketFlight>();
+        var oldCeilingEscapes = new List<LiquidBucketFlightState>();
         foreach (var flight in state.Flights)
         {
             if (flight is null || !ValidOrigin(flight.Origin) || !ValidPayload(flight.Kind, flight.Units) ||
@@ -196,15 +200,24 @@ public sealed class LiquidBucketSystem
             if (!Finite(restored.Position) || restored.Position.X < 0 || restored.Position.X >= WorldGrid.Size ||
                 restored.Position.Z < 0 || restored.Position.Z >= WorldGrid.Size || restored.Position.Y < 0)
                 throw new InvalidDataException("Bucket flight lies outside the battlefield.");
-            flights.Add(restored);
+            // Older checkpoints allowed an arc above the ceiling. Its actual
+            // parcel has already crossed today's open boundary, so migrate it
+            // into escape accounting instead of rejecting the whole campaign.
+            if (restored.Position.Y >= WorldGrid.Size) oldCeilingEscapes.Add(flight);
+            else flights.Add(restored);
         }
         foreach (var splash in state.PendingSplashes)
             if (splash is null || !ValidOrigin(splash.Center) || !ValidPayload(splash.Kind, splash.Units))
                 throw new InvalidDataException("Invalid pending bucket splash.");
+        foreach (var kind in Enum.GetValues<LiquidKind>())
+            if (oldCeilingEscapes.Where(flight => flight.Kind == kind).Sum(flight => (long)flight.Units) >
+                long.MaxValue - _liquids.GetEscapedUnits(kind))
+                throw new InvalidDataException("Escaped bucket volume exceeds its saved accounting limit.");
         _flights.Clear();
         _flights.AddRange(flights);
         _pending.Clear();
         _pending.AddRange(state.PendingSplashes);
+        foreach (var flight in oldCeilingEscapes) _liquids.ReleaseOutside(flight.Kind, flight.Units);
     }
 
     private int Distribute(LiquidBucketSplashState splash, Func<Cell, bool>? occupied)
@@ -216,12 +229,18 @@ public sealed class LiquidBucketSystem
             foreach (int dx in new[] { 0, -1, 1 })
             {
                 int x = centerX + dx, z = centerZ + dz;
-                if (x < 0 || x >= WorldGrid.Size || z < 0 || z >= WorldGrid.Size) continue;
+                if (x < 0 || x >= WorldGrid.Size || z < 0 || z >= WorldGrid.Size)
+                {
+                    candidates.Add(new Cell(x, (int)MathF.Floor(center.Y), z));
+                    continue;
+                }
                 var start = new Vector3(x + .5f, center.Y, z + .5f);
                 // Splash cannot pour through a wall to an enclosed void on the other side.
                 if (TryFirstContact(center, start, occupied, false, out _)) continue;
                 var bottom = new Vector3(start.X, 0, start.Z);
-                var landing = TryFirstContact(start, bottom, occupied, true, out var impact) ? impact + Vector3.UnitY * Epsilon : bottom;
+                bool contact = TryFirstContact(start, bottom, occupied, true, out var impact);
+                var landing = contact ? impact + Vector3.UnitY * Epsilon : bottom;
+                if (!contact) { candidates.Add(new Cell(x, -1, z)); continue; }
                 var cell = CellAt(landing);
                 if (WorldGrid.IsInside(cell) && occupied?.Invoke(cell) != true && _liquids.CanReceiveFromAbove(cell, splash.Kind))
                     candidates.Add(cell);
@@ -229,13 +248,15 @@ public sealed class LiquidBucketSystem
         int remaining = splash.Units;
         while (remaining > 0)
         {
-            var cell = candidates.Where(candidate => occupied?.Invoke(candidate) != true &&
+            var cell = candidates.Where(candidate => !WorldGrid.IsInside(candidate) || occupied?.Invoke(candidate) != true &&
                     _liquids.CanReceiveFromAbove(candidate, splash.Kind))
                 .OrderBy(candidate => _liquids.GetTotalUnits(candidate))
                 .ThenBy(candidate => Math.Abs(candidate.X - centerX) + Math.Abs(candidate.Z - centerZ))
                 .ThenBy(candidate => candidate.Z).ThenBy(candidate => candidate.X)
                 .Select(candidate => (Cell?)candidate).FirstOrDefault();
-            if (!cell.HasValue || !_liquids.TryAdd(cell.Value, splash.Kind, 1)) break;
+            if (!cell.HasValue) break;
+            if (!WorldGrid.IsInside(cell.Value)) _liquids.ReleaseOutside(splash.Kind, 1);
+            else if (!_liquids.TryAdd(cell.Value, splash.Kind, 1)) break;
             remaining--;
         }
         return remaining;
@@ -282,9 +303,11 @@ public sealed class LiquidBucketSystem
         return enter <= leave && leave >= 0 && enter <= 1;
     }
 
-    private static bool ValidPayload(LiquidKind kind, int units) => Enum.IsDefined(kind) && units is > 0 and <= LiquidSystem.UnitsPerBlock;
+    private static bool ValidPayload(LiquidKind kind, int units) => Enum.IsDefined(kind) && units is > 0 and <= MaximumBucketCapacity;
     private static bool ValidUpwardVelocity(float velocity) => float.IsFinite(velocity) && velocity > 0 && velocity <= LiquidBucketFlight.UpwardSpeed * 2;
     private static bool ValidOrigin(Vector3 point) => Finite(point) && point.X >= 0 && point.X < WorldGrid.Size &&
+        point.Z >= 0 && point.Z < WorldGrid.Size && point.Y >= 0 && point.Y < WorldGrid.Size;
+    private static bool InsideVolume(Vector3 point) => point.X >= 0 && point.X < WorldGrid.Size &&
         point.Z >= 0 && point.Z < WorldGrid.Size && point.Y >= 0 && point.Y < WorldGrid.Size;
     private static bool Finite(Vector3 vector) => float.IsFinite(vector.X) && float.IsFinite(vector.Y) && float.IsFinite(vector.Z);
     private static Vector3 ClampToWorld(Vector3 point) => Vector3.Clamp(point, new Vector3(Epsilon), new Vector3(WorldGrid.Size - Epsilon));

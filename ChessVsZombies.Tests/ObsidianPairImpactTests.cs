@@ -43,7 +43,7 @@ public sealed class ObsidianPairImpactTests
         Assert.Equal(9, settled.Parts.Single(part => part.Face == CrustFace.West).Hp);
         Assert.Equal(7, settled.Parts.Single(part => part.Face == CrustFace.East).Hp);
         Assert.Equal(500, game.World.GetBarrier(landing + new Cell(0, 1, 0))!.Hp);
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         Assert.Single(game.Feedback.Hits);
         var movingCrust = Assert.Single(game.Falls.Blocks, block => block.Crust is not null);
         Assert.Equal(CrustFace.East, movingCrust.Crust!.Face);
@@ -54,7 +54,7 @@ public sealed class ObsidianPairImpactTests
 
         game.Update(.01f);
 
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         Assert.Single(game.Feedback.Hits);
         Assert.Equal(4, game.World.ObsidianCells.Sum(crust => crust.Units));
     }

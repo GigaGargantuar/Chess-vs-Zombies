@@ -45,7 +45,7 @@ public class GameSessionTests
             new WaveDefinition { SpawnInterval = 1, Groups = [new() { Count = 1, Kind = ZombieKind.Armored }] });
         Assert.True(game.StartLevel());
         Assert.Equal(40, game.Waves[0].TotalHp);
-        Assert.Equal(40, game.Waves[1].TotalHp);
+        Assert.Equal(50, game.Waves[1].TotalHp);
         game.Update(.01f);
         var first = Assert.Single(game.Zombies);
         Assert.True(WorldGrid.IsSpawnZone(first.Cell));

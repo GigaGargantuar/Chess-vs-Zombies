@@ -14,7 +14,7 @@ public sealed class BucketCarrierIntegrationTests
         var source = new Cell(12, 16, 14);
         Assert.True(game.Liquids.TryAdd(source, LiquidKind.Water, 10));
         var worker = BeginWithWorker(game, new Cell(11, 16, 14));
-        int initial = TotalOwnedLiquid(game);
+        long initial = TotalOwnedLiquid(game);
         var shorePosition = worker.Position;
 
         game.Update(.02f);
@@ -31,12 +31,15 @@ public sealed class BucketCarrierIntegrationTests
         Assert.Empty(game.Buckets.Flights);
         Assert.Equal(initial, TotalOwnedLiquid(game));
 
-        AdvanceUntil(game, 2, () => game.Buckets.Flights.Count > 0, () => Assert.Equal(initial, TotalOwnedLiquid(game)));
+        AdvanceUntil(game, 20, () => game.Buckets.Flights.Count > 0, () => Assert.Equal(initial, TotalOwnedLiquid(game)));
 
         var flight = Assert.Single(game.Buckets.Flights);
         Assert.Equal(0, worker.BucketUnits);
         Assert.Null(worker.BucketKind);
         Assert.Equal(10, flight.Units);
+        Assert.True(worker.Position.X < 3 || worker.Position.X > 29 || worker.Position.Z < 3 || worker.Position.Z > 29,
+            "A full clearing bucket was thrown before physically reaching an outside bank.");
+        Assert.True(Vector3.Distance(shorePosition, worker.Position) > 5);
         Assert.Equal(LiquidKind.Water, flight.Kind);
         var nominalLanding = flight.GetPositionAt(1);
         Assert.Equal(shorePosition.Y - .5f, nominalLanding.Y, 4);
@@ -48,7 +51,8 @@ public sealed class BucketCarrierIntegrationTests
         AdvanceUntil(game, 3, () => game.Buckets.Flights.Count == 0, () => Assert.Equal(initial, TotalOwnedLiquid(game)));
         Assert.Empty(game.Buckets.Flights);
         Assert.Equal(initial, TotalOwnedLiquid(game));
-        Assert.Equal(10, game.Liquids.Cells.Sum(cell => cell.Water) + game.Buckets.PendingUnits);
+        Assert.Equal(10, game.Liquids.Cells.Sum(cell => cell.Water) + game.Buckets.PendingUnits + game.Liquids.GetEscapedUnits(LiquidKind.Water));
+        Assert.Equal(10, game.Liquids.GetEscapedUnits(LiquidKind.Water));
         Assert.Empty(game.PendingBlockDrops);
         Assert.Empty(game.World.ObsidianCells);
     }
@@ -89,7 +93,7 @@ public sealed class BucketCarrierIntegrationTests
     {
         var game = CreateDefense();
         ExcavateFloatingCorePit(game);
-        int initial = TotalOwnedLiquid(game);
+        long initial = TotalOwnedLiquid(game);
         Assert.True(game.StartLevel(), game.Message);
         game.Update(.02f);
         var worker = Assert.Single(game.Zombies);
@@ -159,10 +163,11 @@ public sealed class BucketCarrierIntegrationTests
                 }
     }
 
-    private static int TotalOwnedLiquid(GameSession game) =>
+    private static long TotalOwnedLiquid(GameSession game) =>
         game.Liquids.Cells.Sum(cell => cell.Water + cell.Mercury + cell.Lava) +
-        game.Zombies.Sum(zombie => zombie.BucketUnits) +
-        game.Buckets.Flights.Sum(flight => flight.Units) + game.Buckets.PendingUnits;
+        game.Zombies.Sum(zombie => zombie.HeldBucketUnits) +
+        game.Buckets.Flights.Sum(flight => flight.Units) + game.Buckets.PendingUnits +
+        Enum.GetValues<LiquidKind>().Sum(game.Liquids.GetEscapedUnits);
 
     private static void AdvanceUntil(GameSession game, float seconds, Func<bool> complete, Action? inspect = null)
     {

@@ -137,22 +137,32 @@ public sealed class KiloLoadoutTests
         AddSources(game);
         Assert.True(BucketAction(game, kilo));
         var blocks = BlockInventory(game);
+        float startingHp = kilo.BodyHp;
 
         Invoke(game, "UpdateZombie", kilo, .45f);
         FireAtFirstHand(game, kilo, 1);
+        Assert.Equal(startingHp - 1, kilo.BodyHp);
         Invoke(game, "UpdateZombie", kilo, .45f);
 
         Assert.True(game.IsKiloUsingBuckets(kilo));
         Assert.Equal(20, kilo.HeldBucketUnits);
         Assert.Empty(game.Buckets.Flights);
         Assert.Equal(blocks, BlockInventory(game));
+        // The full bucket's walking trip is covered by the public carrier
+        // integration test. Stage this work-window fixture at its real dry
+        // outside bank before the throw, retaining both exact payloads/blocks.
+        kilo.Position = kilo.StandAt(new Cell(0, 16, 10));
         Invoke(game, "UpdateZombie", kilo, .11f);
         Assert.Equal(0, kilo.HeldBucketUnits);
         Assert.Equal(2, game.Buckets.Flights.Count);
         Assert.Equal(20, game.Buckets.Flights.Sum(flight => flight.Units));
         Assert.True(game.IsKiloUsingBuckets(kilo));
+        // Incoming shots must originate inside the world; the defender's edge
+        // throw is complete, while its hands are still busy for the full second.
+        kilo.Position = kilo.StandAt(new Cell(12, 16, 10));
         Invoke(game, "UpdateZombie", kilo, .45f);
         FireAtFirstHand(game, kilo, 1);
+        Assert.Equal(startingHp - 2, kilo.BodyHp);
         Invoke(game, "UpdateZombie", kilo, .45f);
         Assert.True(game.IsKiloUsingBuckets(kilo));
         Assert.Equal(blocks, BlockInventory(game));
@@ -166,6 +176,9 @@ public sealed class KiloLoadoutTests
         Assert.Equal(blocks, BlockInventory(game));
         float hp = kilo.BodyHp;
         float coverHp = game.KiloCovers.Sum(block => block.Hp);
+        // Move the staged defender off the battlefield edge so the next real
+        // incoming pellet starts inside the playable volume.
+        kilo.Position = kilo.StandAt(new Cell(12, 16, 10));
         FireAtFirstHand(game, kilo, 1);
         Assert.Equal(hp, kilo.BodyHp);
         Assert.Equal(coverHp - 1, game.KiloCovers.Sum(block => block.Hp));

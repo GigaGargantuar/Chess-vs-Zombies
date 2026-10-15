@@ -226,7 +226,7 @@ public sealed class BucketFlightTests
     }
 
     [Fact]
-    public void CrossingTheBattlefieldEdgeConservesTheBucketAtTheBoundary()
+    public void CrossingTheBattlefieldEdgePermanentlyRemovesAndAccountsForTheBucket()
     {
         var (_, liquids, buckets) = Create();
         Assert.True(buckets.Launch(new Vector3(31.5f, 20, 8.5f), Vector3.UnitX, LiquidKind.Water, 10));
@@ -234,8 +234,8 @@ public sealed class BucketFlightTests
         buckets.Update(2);
 
         Assert.Empty(buckets.Flights);
-        Assert.Equal(10, Total(liquids) + buckets.PendingUnits);
-        Assert.All(liquids.Cells.Where(cell => cell.Water > 0), cell => Assert.InRange(cell.Cell.X, 30, 31));
+        Assert.Equal(0, Total(liquids) + buckets.PendingUnits);
+        Assert.Equal(10, liquids.GetEscapedUnits(LiquidKind.Water));
     }
 
     [Fact]
@@ -268,7 +268,7 @@ public sealed class BucketFlightTests
         var invalid = new BucketSystemState
         {
             Flights = before.Flights,
-            PendingSplashes = [new(new Vector3(8.5f, 16.5f, 8.5f), LiquidKind.Water, 11)]
+            PendingSplashes = [new(new Vector3(8.5f, 16.5f, 8.5f), LiquidKind.Water, 16)]
         };
 
         Assert.Throws<InvalidDataException>(() => buckets.RestoreState(invalid));

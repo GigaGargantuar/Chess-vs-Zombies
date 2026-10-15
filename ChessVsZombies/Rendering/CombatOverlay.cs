@@ -51,13 +51,14 @@ public static class CombatOverlay
             var x = anchor.X - 52;
             var y = anchor.Y - rows * 12;
             Bar("HP", zombie.BodyHp, zombie.MaxBodyHp, new Color(242, 134, 115), x, ref y);
-            foreach (var slot in new[] { ArmorSlot.Helmet, ArmorSlot.Chestplate, ArmorSlot.Shield })
+            foreach (var slot in new[] { ArmorSlot.Helmet, ArmorSlot.Chestplate, ArmorSlot.Shield, ArmorSlot.Boots })
             {
                 var piece = zombie.ArmorPieces.FirstOrDefault(p => p.Slot == slot);
                 if (piece is null) continue;
-                var label = slot == ArmorSlot.Helmet ? "HELM" : slot == ArmorSlot.Chestplate ? "CHEST" : "SHIELD";
+                var label = slot switch { ArmorSlot.Helmet => "HELM", ArmorSlot.Chestplate => "CHEST", ArmorSlot.Boots => "BOOTS", _ => "SHIELD" };
                 var color = slot == ArmorSlot.Helmet ? new Color(240, 200, 113) :
-                    slot == ArmorSlot.Chestplate ? new Color(126, 209, 223) : new Color(182, 160, 239);
+                    slot == ArmorSlot.Chestplate ? new Color(126, 209, 223) :
+                    slot == ArmorSlot.Boots ? new Color(178, 220, 145) : new Color(182, 160, 239);
                 Bar(label, piece.Hp, piece.MaxHp, color, x, ref y);
             }
             if (zombie.AirRemaining < Balance.AirSeconds)

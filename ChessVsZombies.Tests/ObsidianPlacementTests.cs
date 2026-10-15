@@ -145,7 +145,7 @@ public sealed class ObsidianPlacementTests
         Assert.Equal(1337, iron.Hp);
         Assert.Equal(Material.Stone, stone.Content);
         Assert.Equal(321, stone.Hp);
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         var hit = Assert.Single(game.Feedback.Hits);
         Assert.Equal(DamageKind.Pierce, hit.Kind);
         Assert.Equal(20, hit.Amount);
@@ -156,7 +156,7 @@ public sealed class ObsidianPlacementTests
         Assert.Equal((source + new Cell(0, 2, 0)).Center, game.Falls.Blocks.Single(fall => fall.Destination == GroundCell + new Cell(0, 1, 0)).Position);
 
         game.Update(.01f);
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         Assert.Single(game.Feedback.Hits);
     }
 
@@ -173,7 +173,7 @@ public sealed class ObsidianPlacementTests
 
         Assert.Null(game.World.GetObsidian(GroundCell));
         Assert.Equal(412, game.World.GetBarrier(GroundCell)!.Hp);
-        Assert.Equal(140, witness.Hp);
+        Assert.Equal(190, witness.Hp);
         Assert.Single(game.Falls.Blocks);
     }
 
@@ -191,7 +191,7 @@ public sealed class ObsidianPlacementTests
 
         Assert.Equal(units, game.World.GetObsidian(source)!.Units);
         Assert.NotNull(game.World.GetBarrier(source + new Cell(0, 1, 0)));
-        Assert.Equal(160, witness.Hp);
+        Assert.Equal(210, witness.Hp);
         Assert.Empty(game.Feedback.Hits);
         Assert.Empty(game.Falls.Blocks);
     }
@@ -241,7 +241,7 @@ public sealed class ObsidianPlacementTests
         game.Update(.01f);
 
         Assert.Equal(new ObsidianCell(GroundCell, 2, CrustFace.Bottom, 8), game.World.GetObsidian(GroundCell));
-        Assert.Equal(160, witness.Hp);
+        Assert.Equal(210, witness.Hp);
         Assert.Empty(game.Feedback.Hits);
     }
 
@@ -287,7 +287,7 @@ public sealed class ObsidianPlacementTests
             Position = GroundCell.Center + Vector3.UnitX
         };
         game.Zombies.Add(zombie);
-        Assert.Equal(160, zombie.Hp);
+        Assert.Equal(210, zombie.Hp);
         return zombie;
     }
 

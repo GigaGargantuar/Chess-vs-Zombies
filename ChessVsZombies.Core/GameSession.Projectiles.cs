@@ -6,6 +6,7 @@ public sealed partial class GameSession
 {
     private void UpdateProjectiles(float dt)
     {
+        UpdateMegaHeldPoses();
         for (var i = Projectiles.Count - 1; i >= 0; i--)
         {
             var projectile = Projectiles[i];
@@ -41,7 +42,7 @@ public sealed partial class GameSession
                 var to = projectile.GetPositionAt(endAge);
                 if (!ProjectilePointIsFinite(from) || !ProjectilePointIsFinite(to)) { stopped = true; break; }
                 bool hitSomething = FindProjectileImpact(from, to, out var fraction, out var terrain, out var zombie, out var crustFace);
-                if (zombie is { Size: ZombieSize.Kilo }) TryInterceptKiloShot(zombie, from, to, fraction);
+                if (zombie != null) TryInterceptKiloShot(zombie, from, to, fraction);
                 if (TryFindKiloCoverImpact(from, to, out var coverFraction, out var carrierId, out var blockIndex) && coverFraction <= fraction)
                 {
                     DamageKiloCover(carrierId, blockIndex, projectile.Damage);
@@ -118,7 +119,7 @@ public sealed partial class GameSession
         foreach (var candidate in Zombies)
         {
             if (candidate.Hp <= 0) continue;
-            bool intersects = candidate.Size == ZombieSize.Kilo
+            bool intersects = candidate.IsGiant
                 ? ProjectileBoxIntersection(from, delta, candidate.Position - candidate.BodyHalfExtents, candidate.Position + candidate.BodyHalfExtents, out var hit)
                 : ProjectileBodyIntersection(from, delta, candidate.Position, out hit, candidate.BodyScale);
             if (!intersects || hit >= fraction) continue;

@@ -16,9 +16,9 @@ public class ArmorHitTests
         new GameSession().DamageZombie(zombie, 25, kind, shot, -Vector3.UnitZ);
 
         Assert.Equal(5, zombie.BodyHp);
-        Assert.Equal(15, zombie.Hp);
-        Assert.Equal(survivor, Assert.Single(zombie.ArmorPieces).Slot);
-        Assert.Equal(10, Assert.Single(zombie.ArmorPieces).Hp);
+        Assert.Equal(25, zombie.Hp);
+        Assert.Equal(new[] { survivor, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
+        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(10, piece.Hp));
     }
 
     [Theory]
@@ -31,8 +31,8 @@ public class ArmorHitTests
         new GameSession().DamageZombie(zombie, 15, kind, shot, Vector3.UnitZ);
 
         Assert.Equal(5, zombie.BodyHp);
-        Assert.Equal(25, zombie.Hp);
-        Assert.Equal(2, zombie.ArmorPieces.Count);
+        Assert.Equal(35, zombie.Hp);
+        Assert.Equal(3, zombie.ArmorPieces.Count);
         Assert.DoesNotContain(zombie.ArmorPieces, piece => piece.Slot == removed);
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(10, piece.Hp));
     }
@@ -47,7 +47,7 @@ public class ArmorHitTests
         game.DamageZombie(zombie, 3, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitZ);
 
         Assert.Equal(7, zombie.BodyHp);
-        Assert.Equal(new[] { ArmorSlot.Shield, ArmorSlot.Helmet }, zombie.ArmorPieces.Select(piece => piece.Slot));
+        Assert.Equal(new[] { ArmorSlot.Shield, ArmorSlot.Helmet, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(10, piece.Hp));
     }
 
@@ -59,7 +59,7 @@ public class ArmorHitTests
         new GameSession().DamageZombie(zombie, 15, DamageKind.Blunt, ShotKind.Melee, -Vector3.UnitZ);
 
         Assert.Equal(5, zombie.BodyHp);
-        Assert.Equal(new[] { ArmorSlot.Chestplate, ArmorSlot.Helmet }, zombie.ArmorPieces.Select(piece => piece.Slot));
+        Assert.Equal(new[] { ArmorSlot.Chestplate, ArmorSlot.Helmet, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(10, piece.Hp));
     }
 
@@ -192,16 +192,16 @@ public class ArmorHitTests
     [Fact]
     public void AssigningTotalHpKeepsSequentialCompatibilityIndependentOfTypedHitCoverage()
     {
-        var zombie = new Zombie { Kind = ZombieKind.Armored, Tier = GearTier.Wood, Hp = 29 };
-        Assert.Equal(29, zombie.Hp);
+        var zombie = new Zombie { Kind = ZombieKind.Armored, Tier = GearTier.Wood, Hp = 39 };
+        Assert.Equal(39, zombie.Hp);
         Assert.Equal(10, zombie.BodyHp);
-        Assert.Equal(new[] { ArmorSlot.Chestplate, ArmorSlot.Helmet }, zombie.ArmorPieces.Select(piece => piece.Slot));
+        Assert.Equal(new[] { ArmorSlot.Chestplate, ArmorSlot.Helmet, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
         Assert.Equal(9, ArmorHp(zombie, ArmorSlot.Chestplate));
         Assert.Equal(10, ArmorHp(zombie, ArmorSlot.Helmet));
 
-        zombie.Hp = 40;
-        Assert.Equal(40, zombie.Hp);
-        Assert.Equal(3, zombie.ArmorPieces.Count);
+        zombie.Hp = 50;
+        Assert.Equal(50, zombie.Hp);
+        Assert.Equal(4, zombie.ArmorPieces.Count);
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(10, piece.Hp));
         zombie.Hp = 0;
         Assert.Equal(0, zombie.Hp);

@@ -18,16 +18,16 @@ public sealed class ZombieSizeTests
     public void SizesScaleActualBodyAndEveryGearPieceWithoutChangingWeaponStatus(ZombieSize size, ZombieKind kind)
     {
         var zombie = new Zombie { Size = size, Kind = kind, Tier = GearTier.Osmium };
-        var healthMultiplier = size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, _ => 1 };
-        var bodyScale = size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, _ => 1 };
+        var healthMultiplier = size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
+        var bodyScale = size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
         bool armored = kind is ZombieKind.Armored or ZombieKind.ArmedArmored;
 
         Assert.Equal(10 * healthMultiplier, zombie.BodyHp);
-        Assert.Equal(size == ZombieSize.Kilo ? Vector3.One : new Vector3(.2f, .39f, .2f) * bodyScale, zombie.BodyHalfExtents);
+        Assert.Equal(zombie.IsGiant ? new Vector3(bodyScale * .5f) : new Vector3(.2f, .39f, .2f) * bodyScale, zombie.BodyHalfExtents);
         Assert.Equal(.5f * bodyScale, zombie.StandingHeight);
-        Assert.Equal(armored ? 3 : 0, zombie.ArmorPieces.Count);
+        Assert.Equal(armored ? 4 : 0, zombie.ArmorPieces.Count);
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(210 * healthMultiplier, piece.Hp));
-        Assert.Equal((10 + (armored ? 630 : 0)) * healthMultiplier, zombie.Hp);
+        Assert.Equal((10 + (armored ? 840 : 0)) * healthMultiplier, zombie.Hp);
         Assert.Equal(zombie.Hp, zombie.MaxHp);
         Assert.Equal(zombie.MaxHp, LevelCatalog.ZombieMaxHp(kind, GearTier.Osmium, size));
         Assert.Equal(kind is ZombieKind.Armed or ZombieKind.ArmedArmored, zombie.HasWeapon);
@@ -49,14 +49,14 @@ public sealed class ZombieSizeTests
         zombie.NextCell = new Cell(6, 16, 5);
         var start = zombie.Position;
         float weaponSpeed = kind is ZombieKind.Armed or ZombieKind.ArmedArmored ? .85f : 1.275f;
-        float sizeSpeed = size switch { ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, _ => 1 };
+        float sizeSpeed = size switch { ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, ZombieSize.Mega => .5f, _ => 1 };
 
         // Keep this interval within one real walking step, avoiding the separate
         // grid decision slice at a completed tile boundary.
         game.Update(.25f);
 
         Assert.Equal(weaponSpeed * sizeSpeed, zombie.MovementSpeed, 5);
-        Assert.Equal(weaponSpeed * sizeSpeed * .25f, zombie.Position.X - start.X, 5);
+        Assert.InRange(Math.Abs(weaponSpeed * sizeSpeed * .25f - (zombie.Position.X - start.X)), 0, .000002f);
         Assert.Equal(start.Y, zombie.Position.Y, 5);
         Assert.Equal(start.Z, zombie.Position.Z, 5);
     }
@@ -65,6 +65,7 @@ public sealed class ZombieSizeTests
     [InlineData(ZombieSize.Milli, 16.25f)]
     [InlineData(ZombieSize.Standard, 16.5f)]
     [InlineData(ZombieSize.Kilo, 17f)]
+    [InlineData(ZombieSize.Mega, 17.5f)]
     public void SpawningUsesTheSizedStandingHeightAndKeepsTheNavigationFootAnchor(ZombieSize size, float expectedY)
     {
         var levels = new LevelCatalog();
@@ -83,14 +84,14 @@ public sealed class ZombieSizeTests
         var zombie = Assert.Single(game.Zombies);
         Assert.Equal(size, zombie.Size);
         Assert.Equal(expectedY, zombie.Position.Y, 5);
-        if (size == ZombieSize.Kilo)
+        if (zombie.IsGiant)
         {
             var min = zombie.Position - zombie.BodyHalfExtents;
             var max = zombie.Position + zombie.BodyHalfExtents;
             Assert.Equal(new Vector3(zombie.Cell.X, zombie.Cell.Y, zombie.Cell.Z), min);
             Assert.True(min.X == 0 || min.Z == 0 || max.X == WorldGrid.Size || max.Z == WorldGrid.Size);
-            Assert.InRange(max.X, 2, WorldGrid.Size);
-            Assert.InRange(max.Z, 2, WorldGrid.Size);
+            Assert.InRange(max.X, zombie.GridFootprint, WorldGrid.Size);
+            Assert.InRange(max.Z, zombie.GridFootprint, WorldGrid.Size);
         }
         else Assert.Equal(spawnCell, zombie.Cell);
         Assert.True(game.World.IsSolidAt(zombie.Position - Vector3.UnitY * (zombie.StandingHeight + .01f)));
@@ -165,7 +166,7 @@ public sealed class ZombieSizeTests
         Assert.Equal(zombie.MaxBodyHp, zombie.BodyHp);
         Invoke(game, "UpdateLiquidExposure", zombie, 5.01f);
         Assert.Equal(submerged ? 0 : zombie.MaxBodyHp, zombie.BodyHp);
-        if (submerged) Assert.Equal(0, zombie.Hp); // Even a 2,560-HP Kilo dies without air.
+        if (submerged) Assert.Equal(0, zombie.Hp); // Armor durability cannot prevent suffocation.
     }
 
     [Theory]

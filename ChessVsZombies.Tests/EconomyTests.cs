@@ -121,21 +121,23 @@ public class EconomyTests
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
         Assert.True(economy.HasJump(knight));
-        Assert.Equal(8, economy.GetJumpBudget(knight));
+        Assert.Equal(24, economy.GetJumpBudget(knight));
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 1), new Cell(0, 2, -1)], out _));
         var accepted = knight.JumpPattern.ToArray();
         Assert.False(economy.TrySetJumpPattern(knight, [new Cell(1, 0, 0)], out _));
         Assert.False(economy.TrySetJumpPattern(knight, [new Cell(3, 0, 0)], out _));
         Assert.False(economy.TrySetJumpPattern(knight, [], out _));
         Assert.False(economy.TrySetJumpPattern(knight,
-            Enumerable.Range(-2, 5).SelectMany(x => new[] { new Cell(x, 2, 0), new Cell(x, -2, 0) }), out _));
+            Enumerable.Range(-2, 5).SelectMany(x => Enumerable.Range(-2, 5)
+                .SelectMany(y => Enumerable.Range(-2, 5).Select(z => new Cell(x, y, z))))
+                .Where(offset => offset.Chebyshev == 2).Take(25), out _));
         Assert.Equal(accepted, knight.JumpPattern);
 
         var progress = economy.GetProgress(UpgradeKind.Jump);
         progress.PullCount = 11;
         progress.Available = 1;
         economy.Apply(knight, UpgradeKind.Jump);
-        Assert.Equal(12, economy.GetJumpBudget(knight));
+        Assert.Equal(28, economy.GetJumpBudget(knight));
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(3, 1, 0)], out _));
         Assert.Contains(new Cell(3, 1, 0), economy.GetAttackPattern(knight));
     }

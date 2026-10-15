@@ -25,13 +25,13 @@ public sealed class SavedReturningZombie
         TargetLevel = TargetLevel, TargetWaveIndex = TargetWaveIndex, Id = Id,
         Kind = Kind, Tier = Tier, Size = Size, IsBoss = IsBoss, BodyHp = BodyHp,
         RetreatReturns = RetreatReturns, OriginalBudgetCost = OriginalBudgetCost,
-        CarriesBucket = Size == ZombieSize.Kilo || CarriesBucket, CarriedBlocks = CarriedBlocks,
+        CarriesBucket = (Size is ZombieSize.Kilo or ZombieSize.Mega) || CarriesBucket, CarriedBlocks = CarriedBlocks,
         Armor = Armor.Select(piece => new SavedZombieArmor
         { Slot = piece.Slot, Tier = piece.Tier, Hp = piece.Hp, HeatProtectionRemaining = piece.HeatProtectionRemaining }).ToList(),
         // Earlier Kilos exchanged their entire block loadout for buckets. Give
         // those saved block carriers the now-standard two empty buckets while
         // retaining every existing block and every actual liquid payload.
-        Buckets = Size == ZombieSize.Kilo && !CarriesBucket && Buckets.Count == 0
+        Buckets = (Size is ZombieSize.Kilo or ZombieSize.Mega) && !CarriesBucket && Buckets.Count == 0
             ? [new(), new()]
             : Buckets.Select(load => new SavedZombieBucket { Units = load.Units, Kind = load.Kind }).ToList(),
         HeldBlocks = HeldBlocks.Select(block => new SavedKiloBlock

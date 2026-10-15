@@ -243,7 +243,7 @@ public sealed class Economy
     {
         UpgradeKind.HP => (int.MaxValue - Balance.TurretHp) / Balance.HpUpgradePerPoint,
         UpgradeKind.ATK => (int.MaxValue - Balance.BaseAttack) / Balance.AtkUpgradePerPoint,
-        UpgradeKind.Jump => (int.MaxValue - 8) / 4 + (piece == PieceKind.Knight ? 0 : 1),
+        UpgradeKind.Jump => piece == PieceKind.Knight ? (int.MaxValue - 24) / 4 : (int.MaxValue - 8) / 4 + 1,
         UpgradeKind.Orthogonal when piece == PieceKind.Pawn => int.MaxValue - 1,
         _ => int.MaxValue
     };
@@ -301,7 +301,7 @@ public sealed class Economy
     public int GetJumpBudget(Turret turret)
     {
         if (!HasJump(turret)) return 0;
-        return checked(8 + 4 * (GetRange(turret, UpgradeKind.Jump) - 2));
+        return checked((turret.Kind == PieceKind.Knight ? 24 : 8) + 4 * (GetRange(turret, UpgradeKind.Jump) - 2));
     }
 
     /// <summary>

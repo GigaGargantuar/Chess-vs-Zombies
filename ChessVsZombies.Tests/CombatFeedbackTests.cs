@@ -22,7 +22,7 @@ public class CombatFeedbackTests
         Assert.Equal(0, hit.Age);
         Assert.Equal(1, game.Feedback.GetFlash(zombie.Id));
         Assert.Equal(5, zombie.BodyHp);
-        Assert.Equal(ArmorSlot.Helmet, Assert.Single(zombie.ArmorPieces).Slot);
+        Assert.Equal(new[] { ArmorSlot.Helmet, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
     }
 
     [Fact]
@@ -54,9 +54,9 @@ public class CombatFeedbackTests
 
         game.DamageZombie(zombie, 1000, DamageKind.Chemical);
 
-        Assert.Equal(640, game.Waves[0].DamageTaken);
+        Assert.Equal(850, game.Waves[0].DamageTaken);
         Assert.Equal(10, Assert.Single(game.Feedback.Hits).Amount);
-        Assert.Equal(3, zombie.ArmorPieces.Count);
+        Assert.Equal(4, zombie.ArmorPieces.Count);
         game.Update(.01f);
         Assert.Empty(game.Zombies);
         var hit = Assert.Single(game.Feedback.Hits);
@@ -76,7 +76,7 @@ public class CombatFeedbackTests
         game.DamageZombie(zombie, 1000, DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
 
         Assert.Equal(30, Assert.Single(game.Feedback.Hits).Amount);
-        Assert.Equal(ArmorSlot.Helmet, Assert.Single(zombie.ArmorPieces).Slot);
+        Assert.Equal(new[] { ArmorSlot.Helmet, ArmorSlot.Boots }, zombie.ArmorPieces.Select(piece => piece.Slot));
         Assert.Equal(0, zombie.BodyHp);
     }
 
@@ -104,7 +104,7 @@ public class CombatFeedbackTests
     {
         var game = new GameSession();
         var zombie = Armored(GearTier.Osmium);
-        game.DamageZombie(zombie, 295, DamageKind.Thermal);
+        game.DamageZombie(zombie, 395, DamageKind.Thermal);
         Assert.Empty(game.Feedback.Hits);
 
         game.DamageZombie(zombie, 10, DamageKind.Thermal);

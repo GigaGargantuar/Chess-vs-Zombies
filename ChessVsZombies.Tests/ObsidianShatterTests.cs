@@ -61,7 +61,7 @@ public class ObsidianShatterTests
 
         game.Update(.2f);
 
-        Assert.All(zombies, zombie => Assert.Equal(140, zombie.Hp));
+        Assert.All(zombies, zombie => Assert.Equal(190, zombie.Hp));
         Assert.Equal(60, game.Waves[0].DamageTaken);
         Assert.Equal(3, game.Feedback.Hits.Count);
         Assert.False(game.World.DamageObsidian(Source, 100));
@@ -79,11 +79,11 @@ public class ObsidianShatterTests
         game.Update(.01f);
 
         Assert.Equal(9, game.World.GetObsidian(Source)!.Hp);
-        Assert.All(zombies, zombie => Assert.Equal(160, zombie.Hp));
+        Assert.All(zombies, zombie => Assert.Equal(210, zombie.Hp));
         Assert.Empty(game.Feedback.Hits);
         Assert.True(game.World.DamageObsidian(Source, 9));
         game.Update(.01f);
-        Assert.All(zombies, zombie => Assert.Equal(160, zombie.Hp));
+        Assert.All(zombies, zombie => Assert.Equal(210, zombie.Hp));
         Assert.Empty(game.Feedback.Hits);
         Assert.Equal(0, game.Waves[0].DamageTaken);
     }
@@ -130,6 +130,7 @@ public class ObsidianShatterTests
         Position(attacker, Source.Center);
         game.DamageZombie(victim, 50, DamageKind.Pierce, ShotKind.Pellet, -victim.Facing);
         game.DamageZombie(victim, 50, DamageKind.Blunt, ShotKind.Lob, Vector3.UnitY);
+        game.DamageZombie(victim, 50, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
         game.DamageZombie(victim, 30, DamageKind.Pierce, ShotKind.Pellet, victim.Facing);
         Assert.Equal(20, Assert.Single(victim.ArmorPieces).Hp);
         Assert.True(victim.SinksIn(LiquidKind.Lava));

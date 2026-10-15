@@ -54,9 +54,9 @@ public sealed class DefenseGame : Game
         IsMouseVisible = false;
         IsFixedTimeStep = true;
         TargetElapsedTime = TimeSpan.FromSeconds(1d / 60);
-        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes");
+        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes") || args.Contains("--smoke-megas") || args.Contains("--smoke-merged");
         smokeCombat = args.Contains("--smoke-combat");
-        smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : "";
+        smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : args.Contains("--smoke-megas") ? "megas" : args.Contains("--smoke-merged") ? "merged" : "";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
         if (smoke) IsFixedTimeStep = false;
@@ -66,6 +66,7 @@ public sealed class DefenseGame : Game
         if (smokePanel == "bridges") cameraControl = new FlyCamera(new System.Numerics.Vector3(20.5f, 21, 31), MathF.PI, -.39f);
         if (smokePanel == "buckets") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 20.5f, 12), .26f, -.35f);
         if (smokePanel == "sizes") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 31), MathF.PI, -.35f);
+        if (smokePanel == "megas") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 26, 42), MathF.PI, -.34f);
         int frameIndex = Array.IndexOf(args, "--capture-frame");
         if (frameIndex >= 0 && frameIndex + 1 < args.Length && int.TryParse(args[frameIndex + 1], out var requestedFrame))
             captureFrame = Math.Clamp(requestedFrame, 1, 600);
@@ -96,7 +97,7 @@ public sealed class DefenseGame : Game
             session.Economy.Apply(selected, UpgradeKind.ATK);
             session.Inventory.Add(Material.Dirt, 3); session.Inventory.Add(Material.Stone, 2);
             session.BuildBarrier(new Cell(13, 16, 13), Material.Stone); session.BuildBarrier(new Cell(13, 17, 13), Material.Dirt);
-            if (smokeCombat) { session.StartLevel(); session.Update(12f); }
+            if (smokeCombat && smokePanel != "merged") { session.StartLevel(); session.Update(12f); }
             if (smokePanel == "gacha") panel = 1;
             if (smokePanel == "template")
             {
@@ -140,12 +141,70 @@ public sealed class DefenseGame : Game
             if (smokePanel == "bridges") PrepareBridgeSmoke();
             if (smokePanel == "buckets") PrepareBucketSmoke();
             if (smokePanel == "sizes") PrepareSizeSmoke();
-            SetNotice(smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
+            if (smokePanel == "megas") PrepareMegaSmoke();
+            if (smokePanel == "merged")
+            {
+                session.SetMergeFiveLevels(true);
+                if (smokeCombat) { session.StartLevel(); session.Update(12f); }
+                Capture(false);
+            }
+            SetNotice(smokePanel == "merged" ? "Five levels in one battle. Every surviving tower pays 25 currency on victory." :
+                smokePanel == "megas" ? "Mega / 3 x 3 x 3. Two hands, two real blocks per hand. Stick left / chunky throw right." :
+                smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
                 smokeCombat ? "Live simulation / rendered validation" : "Crosshair placement / rendered validation");
         }
         else LoadCheckpoint();
         CenterMouse();
         base.LoadContent();
+    }
+    private void PrepareMegaSmoke()
+    {
+        // This isolated demonstration acquires every weapon block through the
+        // real simulation. It never loads, resets, or writes the player's save.
+        var levels = new LevelCatalog();
+        levels.Set(new LevelDefinition
+        {
+            Number = 1, Name = "Mega weapon demonstration",
+            Waves = [new WaveDefinition { SpawnInterval = 1000, Groups = [new ZombieGroup { Kind = ZombieKind.Basic }] }]
+        });
+        session = new GameSession(levels: levels);
+        session.StartLevel();
+        session.Waves[0].Spawned = session.Waves[0].TotalCount;
+        Cell[] positions = [new(7, 16, 23), new(20, 16, 23)];
+        GearTier[] tiers = [GearTier.Iron, GearTier.Osmium];
+        for (int index = 0; index < positions.Length; index++)
+        {
+            var mega = new Zombie
+            {
+                Id = 100 + index, WaveIndex = -1, IsBoss = true, Size = ZombieSize.Mega,
+                Kind = ZombieKind.Armored, Tier = tiers[index],
+                Attack = LevelCatalog.ZombieAttack(ZombieKind.Armored, tiers[index], ZombieSize.Mega)
+            };
+            mega.Position = mega.StandAt(positions[index]);
+            mega.FaceToward(System.Numerics.Vector3.UnitZ);
+            session.Zombies.Add(mega);
+        }
+        for (int tick = 0; tick < 320 && session.MegaWeapons.Count < 8; tick++) session.Update(.05f);
+        if (session.MegaWeapons.Count != 8)
+            throw new InvalidOperationException("The Mega demonstration could not acquire its eight real weapon blocks.");
+        session.Update(.5f); // Let the last pickup finish before staging either throw.
+        for (int index = 0; index < positions.Length; index++)
+        {
+            var mega = session.Zombies.Single(zombie => zombie.Id == 100 + index);
+            // Only the demonstration stages the camera subjects; production
+            // movement and every later weapon flight use their normal physics.
+            mega.Position = mega.StandAt(positions[index]);
+            mega.NextCell = null;
+            mega.MoveProgress = 0;
+            mega.Cooldown = 0;
+            mega.FaceToward(System.Numerics.Vector3.UnitZ);
+        }
+        session.Deploy(PieceKind.Pawn, new Cell(8, 16, 16));
+        session.Deploy(PieceKind.Pawn, new Cell(20, 16, 16));
+        session.Deploy(PieceKind.Pawn, new Cell(21, 16, 16));
+        selected = null;
+        showZones = false;
+        paused = true;
     }
     private void PrepareSizeSmoke()
     {
@@ -327,6 +386,9 @@ public sealed class DefenseGame : Game
         }
         var oldPhase = session.Phase;
         if (!paused && (IsActive || smoke)) session.Update(dt);
+        // Frame 30 shows both two-block hands and all four armor slots. Frame
+        // 90 shows the stick/chunk arcs; around frame 150 they scatter as debris.
+        if (smokePanel == "megas" && frameCount == 60) paused = false;
         if (smokeArmorDemo != null && frameCount == 30)
             session.DamageZombie(smokeArmorDemo, Balance.GearHp(GearTier.Osmium), DamageKind.Pierce, ShotKind.Pellet, -smokeArmorDemo.Facing);
         if (smokePanel == "armor" && frameCount == 55)
@@ -347,7 +409,12 @@ public sealed class DefenseGame : Game
                 Position = new Cell(17, 22, 23).Center, Attack = 1 });
         }
         if (oldPhase == GamePhase.Combat && session.Phase == GamePhase.Building) { SetNotice(session.Message); SaveCheckpoint(); }
-        if (oldPhase != GamePhase.Defeat && session.Phase == GamePhase.Defeat) { Capture(false); SetNotice("The core has fallen. Retry the saved preparation with R."); }
+        if (oldPhase != GamePhase.Defeat && session.Phase == GamePhase.Defeat)
+        {
+            Capture(false);
+            SetNotice("The core has fallen. Retry the saved preparation with R.");
+            if (!smoke && !saveBlocked && !SaveStore.TryClearMergeSelection(savePath, out var error)) SetNotice(error);
+        }
         // Keep selection tied to the current view even while menus are open or
         // simulation moves/destroys a tower under the stationary crosshair.
         Aim();
@@ -415,6 +482,15 @@ public sealed class DefenseGame : Game
         if (panel == 3) panel = 2;
         SaveCheckpoint(); session.StartLevel(); SetNotice(session.Message);
     }
+    private void ToggleMergedLevels()
+    {
+        if (!session.SetMergeFiveLevels(!session.MergeFiveLevels)) { SetNotice(session.Message); return; }
+        SetNotice(session.MergeFiveLevels
+            ? $"Levels {session.LevelNumber}-{session.EndLevelNumber} merged / no preparation breaks / 25 currency per surviving tower."
+            : "Single-level defense selected / 2 currency per surviving tower.");
+        SaveCheckpoint();
+    }
+    private string LevelRange => session.LevelSpan == 1 ? $"{session.LevelNumber:00}" : $"{session.LevelNumber:00}-{session.EndLevelNumber:00}";
     private void Pull(int count)
     {
         if (session.Phase != GamePhase.Building) { SetNotice("Pull components during preparation between levels."); return; }
@@ -558,7 +634,7 @@ public sealed class DefenseGame : Game
         Fill(0, 0, width, 92, Background); Fill(0, 91, width, 1, new Color(40, 56, 65));
         Fill(28, 25, 4, 44, Teal); Text("CHESS", 44, 12, 30); Text("vs ZOMBIES", 45, 48, 17, Muted);
         float divider = 265; Fill(divider, 22, 1, 48, new Color(48, 63, 73));
-        Text($"LEVEL {session.LevelNumber:00}", divider + 25, 19, 21); Text(session.Phase == GamePhase.Building ? "PREPARATION" : session.Phase == GamePhase.Combat ? "DEFENSE IN PROGRESS" : "CORE LOST", divider + 25, 50, 13, session.Phase == GamePhase.Defeat ? Red : Teal);
+        Text($"{(session.LevelSpan == 1 ? "LEVEL" : "LEVELS")} {LevelRange}", divider + 25, 19, 21); Text(session.Phase == GamePhase.Building ? "PREPARATION" : session.Phase == GamePhase.Combat ? "DEFENSE IN PROGRESS" : "CORE LOST", divider + 25, 50, 13, session.Phase == GamePhase.Defeat ? Red : Teal);
         Text("CORE INTEGRITY", width * .43f, 19, 13, Muted); Text($"{session.CoreHp:0} / {Balance.CoreHp}", width * .43f + 137, 17, 17, Teal);
         Fill(width * .43f, 49, 235, 6, new Color(44, 59, 66)); Fill(width * .43f, 49, 235 * session.CoreHp / Balance.CoreHp, 6, Teal);
         Text("CURRENCY", width - 320, 19, 13, Muted); Text(session.Economy.Currency.ToString("N0"), width - 320, 39, 29, Gold);
@@ -592,7 +668,7 @@ public sealed class DefenseGame : Game
         }
         float left = 28;
         Text("SECTOR  /  32 x 32 x 32", left, 116, 14, Muted);
-        Text(session.Level.Name, left, 139, 25);
+        Text(session.LevelSpan == 1 ? session.Level.Name : $"Levels {LevelRange} / merged defense", left, 139, 25);
         if (session.Phase == GamePhase.Combat)
         {
             int started = session.Waves.Count(w => w.Started), total = session.Waves.Sum(w => w.TotalCount), spawned = session.Waves.Sum(w => w.Spawned);
@@ -602,7 +678,7 @@ public sealed class DefenseGame : Game
             float y = 210;
             foreach (var wave in session.Waves)
             {
-                Text($"{wave.Index + 1:00}  {(wave.Started ? "HP REMAINING" : "WAITING")}", left, y, 12, Muted);
+                Text($"{wave.Index + 1:00}  L{session.GetSourceLevelNumber(wave.Index):00}  {(wave.Started ? "HP REMAINING" : "WAITING")}", left, y, 12, Muted);
                 float remaining = wave.TotalHp > 0 ? Math.Clamp(1 - wave.DamageTaken / wave.TotalHp, 0, 1) : 0;
                 Fill(left, y + 23, 220, 5, Raised); Fill(left, y + 23, 220 * remaining, 5, wave.Started ? Red : Muted * .4f);
                 Fill(left + 110, y + 21, 1, 9, TextColor); y += 47;
@@ -611,10 +687,11 @@ public sealed class DefenseGame : Game
         else
         {
             Text("Build. Equip. Hold the center.", left, 180, 16, Muted);
-            Text($"Next level: {session.PreparedWaves.Sum(w => w.SpawnCount) + session.PendingReinforcementCount} zombies / {session.Level.Waves.Count} wave(s)", left, 206, 15, Muted);
+            Text($"Next {LevelRange}: {session.PreparedWaves.Sum(w => w.SpawnCount) + session.PendingReinforcementCount} zombies / {session.PreparedWaves.Count} wave(s)", left, 206, 15, Muted);
             Text($"HP budget {session.PreparedWaves.Sum(w => w.HpBudget) + session.PendingReinforcementBudget:N0} / boss reserve {session.PreparedWaves.Sum(w => w.BossBudget) + session.PendingBossReinforcementBudget:N0}", left, 232, 13, Muted);
+            Text($"Victory / {session.SurvivorRewardPerTower} currency per surviving tower", left, 254, 13, Gold);
             if (session.PendingReinforcementCount > 0)
-                Text($"Includes {session.PendingReinforcementCount} returning survivors", left, 254, 13, Gold);
+                Text($"Includes {session.PendingReinforcementCount} returning survivors", left, 276, 13, Gold);
         }
         float px = width - 340, py = 112;
         Fill(px, py, 312, height - 248, Panel);
@@ -648,20 +725,26 @@ public sealed class DefenseGame : Game
     private void DrawDeployPanel(float x, float y)
     {
         Text("BUILD YOUR DEFENSE", x + 20, y, 18);
-        string[] names = ["Pawn", "Knight", "Bishop", "Rook"], descriptions = ["Adjacent orthogonal melee", "Custom jumps / lobbed shots", "Unlimited plane rays / pellets", "Unlimited orthogonal / pellets"];
+        string[] names = ["Pawn", "Knight", "Bishop", "Rook"], descriptions = ["Adjacent orthogonal melee", "24 jumps / 3 planes / lobbed shots", "Unlimited plane rays / pellets", "Unlimited orthogonal / pellets"];
         for (int i = 0; i < 4; i++)
         {
-            int k = i; float row = y + 37 + i * 69; bool active = tool == i;
-            Button($"{i + 1}   {names[i]}", x + 16, row, 280, 60, () => { tool = k; panel = 0; }, active);
+            int k = i; float row = y + 34 + i * 59; bool active = tool == i;
+            Button($"{i + 1}   {names[i]}", x + 16, row, 280, 51, () => { tool = k; panel = 0; }, active);
             Text(Balance.PieceCost((PieceKind)i).ToString(), x + 269, row + 9, 19, active ? Background : Gold);
-            Text(descriptions[i], x + 54, row + 36, 12, active ? new Color(30, 75, 64) : Muted);
+            Text(descriptions[i], x + 54, row + 32, 12, active ? new Color(30, 75, 64) : Muted);
         }
-        float next = y + 322;
-        Button("Terrain / tools & blocks", x + 16, next, 280, 40, () => panel = 5);
-        Button("Liquids / water, mercury & lava", x + 16, next + 47, 280, 40, () => panel = 6);
-        Text("Pieces: outside the 8-cube enclosure", x + 20, next + 96, 14, Muted);
-        Text("Place, remove and upgrade during waves.", x + 20, next + 120, 13, Gold);
-        Button(session.Phase == GamePhase.Building ? "ENTER  /  Start level" : "DEFENSE ACTIVE", x + 16, height - 201, 280, 47, BeginLevel, session.Phase == GamePhase.Building, session.Phase == GamePhase.Building);
+        float next = y + 274;
+        Button("Terrain / tools & blocks", x + 16, next, 280, 34, () => panel = 5, textSize: 17);
+        Button("Liquids / water, mercury & lava", x + 16, next + 39, 280, 34, () => panel = 6, textSize: 17);
+        Text("Pieces: outside the 8-cube enclosure", x + 20, next + 82, 12, Muted);
+        Text("Place, remove and upgrade during waves.", x + 20, next + 101, 12, Gold);
+        bool preparation = session.Phase == GamePhase.Building;
+        Button($"MERGE 5 LEVELS  /  {(session.MergeFiveLevels ? "ON" : "OFF")}", x + 16, height - 283, 280, 40,
+            ToggleMergedLevels, session.MergeFiveLevels, preparation, textSize: 17);
+        Text($"{(session.LevelSpan == 1 ? "Level" : "Levels")} {LevelRange} / {session.PreparedWaves.Count} wave(s) / {session.SurvivorRewardPerTower} C per tower", x + 20, height - 238, 12, Gold);
+        Text(session.MergeFiveLevels ? "One battle / resets after win or loss" : "Select five levels for 25 C per survivor", x + 20, height - 222, 11, Muted);
+        Button(preparation ? $"ENTER  /  Start {(session.LevelSpan == 1 ? "level" : "levels")}" : "DEFENSE ACTIVE", x + 16, height - 201, 280, 47,
+            BeginLevel, preparation, preparation);
     }
     private void DrawTerrainPanel(float x, float y)
     {
@@ -773,7 +856,7 @@ public sealed class DefenseGame : Game
         float x = width / 2 - 350, y = 140; Fill(x, y, 700, 610, Panel); Fill(x, y, 700, 3, Gold);
         Text("TEMPLATE JUMP PATTERN", x + 25, y + 22, 26); Text("Configure now; middle-click applies it together with your chosen points.", x + 25, y + 64, 15, Muted);
         var preview = TemplatePreview();
-        int range = Math.Max(2, session.Economy.GetRange(preview, UpgradeKind.Jump)), budget = Math.Max(8, session.Economy.GetJumpBudget(preview));
+        int range = Math.Max(2, session.Economy.GetRange(preview, UpgradeKind.Jump)), budget = session.Economy.GetJumpBudget(preview);
         Text($"RANGE {range}     DESTINATIONS {draftPattern.Count}/{budget}     Y {jumpY:+0;-0;0}", x + 25, y + 95, 16, Gold);
         Button("Y -", x + 482, y + 127, 85, 36, () => jumpY = Math.Max(-range, jumpY - 1)); Button("Y +", x + 577, y + 127, 85, 36, () => jumpY = Math.Min(range, jumpY + 1));
         int displayRange = Math.Min(range, 4); int n = displayRange * 2 + 1; float size = Math.Min(54, 365f / n), gx = x + 42, gy = y + 164;
@@ -794,7 +877,7 @@ public sealed class DefenseGame : Game
             Button("Z -", x + 482, y + 437, 85, 34, () => jumpZ = Math.Max(-range + 4, jumpZ - 4));
             Button("Z +", x + 577, y + 437, 85, 34, () => jumpZ = Math.Min(range - 4, jumpZ + 4));
         }
-        Button("Reset to knight pattern", x + 482, y + 487, 180, 34, () => { draftPattern.Clear(); draftPattern.AddRange(new Turret().JumpPattern); jumpX = jumpY = jumpZ = 0; });
+        Button("Reset to knight pattern", x + 482, y + 487, 180, 34, () => { draftPattern.Clear(); draftPattern.AddRange(JumpRules.DefaultKnightPattern()); jumpX = jumpY = jumpZ = 0; });
         Button("Use in template", x + 25, y + 541, 315, 44, () =>
         {
             if (draftPattern.Count == 0) { SetNotice("Keep at least one jump destination."); return; }

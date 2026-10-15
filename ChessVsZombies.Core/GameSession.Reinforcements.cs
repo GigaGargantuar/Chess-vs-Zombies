@@ -13,7 +13,7 @@ public sealed partial class GameSession
 
     private GearTier? BestAvailableArmorTier(int waveIndex)
     {
-        GearTier? best = LevelCatalog.HighestAvailableArmorTier(LevelNumber);
+        GearTier? best = LevelCatalog.HighestAvailableArmorTier(GetSourceLevelNumber(waveIndex));
         if (waveIndex >= 0 && waveIndex < Level.Waves.Count)
             foreach (var group in Level.Waves[waveIndex].Groups)
                 if (group.Kind != ZombieKind.Basic && (!best.HasValue || group.Tier > best)) best = group.Tier;
@@ -25,7 +25,7 @@ public sealed partial class GameSession
         if (zombie.Hp <= 0 || !Zombies.Contains(zombie)) return;
         int targetWave = zombie.WaveIndex + 1;
         int targetLevel = LevelNumber;
-        if (targetWave < 0 || targetWave >= Waves.Count) { targetLevel++; targetWave = 0; }
+        if (targetWave < 0 || targetWave >= Waves.Count) { targetLevel = checked(LevelNumber + LevelSpan); targetWave = 0; }
         var held = _kiloBlocks.GetValueOrDefault(zombie.Id);
         var saved = new SavedReturningZombie
         {
@@ -58,6 +58,7 @@ public sealed partial class GameSession
         ClearZombieMovement(zombie);
         _kiloBlocks.Remove(zombie.Id);
         _kiloActionCooldowns.Remove(zombie.Id);
+        _megaActionCooldowns.Remove(zombie.Id);
         _hurledAllies.Remove(zombie.Id);
         _fallStartHeights.Remove(zombie.Id);
         _coverWaiting.Remove(zombie.Id);
@@ -92,10 +93,10 @@ public sealed partial class GameSession
         {
             Id = saved.Id, WaveIndex = wave.Index, Kind = saved.Kind, Tier = saved.Tier, Size = saved.Size,
             IsBoss = saved.IsBoss, Position = shape.StandAt(cell),
-            Attack = LevelCatalog.ZombieAttack(saved.Kind, saved.Tier),
+            Attack = LevelCatalog.ZombieAttack(saved.Kind, saved.Tier, saved.Size),
             CarriesBucket = saved.CarriesBucket, CarriedBlocks = saved.CarriedBlocks,
             OriginalBudgetCost = saved.OriginalBudgetCost, RetreatReturns = 0,
-            Lane = cell.X == 0 ? 0 : cell.X == 31 ? 1 : cell.Z == 0 ? 2 : 3
+            Lane = cell.X == 0 ? 0 : cell.X + shape.GridFootprint == WorldGrid.Size ? 1 : cell.Z == 0 ? 2 : 3
         };
         zombie.RestoreBodyAndArmor(saved.BodyHp, saved.Armor.Select(piece => new ArmorPiece
         {

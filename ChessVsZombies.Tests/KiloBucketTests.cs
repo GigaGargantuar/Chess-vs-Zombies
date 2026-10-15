@@ -36,7 +36,7 @@ public sealed class KiloBucketTests
         Assert.True(kilo.CarriesBucket);
         Assert.Equal(2, kilo.BucketCount);
         Assert.Equal(1, kilo.CarriedBlocks);
-        Assert.Equal(3, kilo.ArmorPieces.Count);
+        Assert.Equal(4, kilo.ArmorPieces.Count);
         Assert.All(kilo.ArmorPieces, armor => Assert.Equal(GearTier.Wood, armor.Tier));
         Assert.Equal(10, wave.BudgetSpent);
         // Move the naturally equipped actor to the bank to isolate the actual
@@ -49,12 +49,14 @@ public sealed class KiloBucketTests
         Assert.Equal(20, kilo.HeldBucketUnits);
         Assert.Equal(initial - 20, WorldUnits(game));
         FinishAction(kilo);
+        Assert.False(Action(game, kilo));
+        kilo.Position = kilo.StandAt(new Cell(0, 16, 10));
         Assert.True(Action(game, kilo));
 
         Assert.Equal(2, game.Buckets.Flights.Count);
         Assert.All(game.Buckets.Flights, flight => { Assert.Equal(10, flight.Units); Assert.Equal(LiquidKind.Lava, flight.Kind); });
         Assert.Equal(initial, WorldUnits(game) + game.Buckets.Flights.Sum(flight => flight.Units));
-        Assert.Equal(3, kilo.ArmorPieces.Count);
+        Assert.Equal(4, kilo.ArmorPieces.Count);
         Assert.Empty(game.KiloCovers);
     }
 
@@ -89,6 +91,8 @@ public sealed class KiloBucketTests
         Assert.True(Action(game, kilo));
         Assert.Empty(game.Buckets.Flights);
         FinishAction(kilo);
+        Assert.False(Action(game, kilo));
+        kilo.Position = kilo.StandAt(new Cell(0, 16, 10));
 
         Assert.True(Action(game, kilo));
 
@@ -106,7 +110,8 @@ public sealed class KiloBucketTests
                 new(flight.GetPositionAt(1).X, flight.GetPositionAt(1).Z)), 4);
         });
         game.Buckets.Update(3);
-        Assert.Equal(20, WorldUnits(game) + game.Buckets.PendingUnits + game.Buckets.Flights.Sum(flight => flight.Units));
+        Assert.Equal(20, WorldUnits(game) + game.Buckets.PendingUnits + game.Buckets.Flights.Sum(flight => flight.Units) +
+            Enum.GetValues<LiquidKind>().Sum(game.Liquids.GetEscapedUnits));
     }
 
     [Fact]

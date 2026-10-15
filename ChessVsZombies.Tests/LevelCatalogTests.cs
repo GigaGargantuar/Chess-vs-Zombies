@@ -6,14 +6,14 @@ namespace ChessVsZombies.Tests;
 public class LevelCatalogTests
 {
     [Theory]
-    [InlineData(GearTier.Wood, 40, 3)]
-    [InlineData(GearTier.Stone, 70, 4)]
-    [InlineData(GearTier.Copper, 100, 6)]
-    [InlineData(GearTier.Iron, 160, 9)]
-    [InlineData(GearTier.Gold, 250, 14)]
-    [InlineData(GearTier.Diamond, 400, 22)]
-    [InlineData(GearTier.Osmium, 640, 35)]
-    public void ThreeArmorItemsStackAndWeaponsAddToBaseAttack(GearTier tier, int armoredHp, int armedAttack)
+    [InlineData(GearTier.Wood, 50, 3)]
+    [InlineData(GearTier.Stone, 90, 4)]
+    [InlineData(GearTier.Copper, 130, 6)]
+    [InlineData(GearTier.Iron, 210, 9)]
+    [InlineData(GearTier.Gold, 330, 14)]
+    [InlineData(GearTier.Diamond, 530, 22)]
+    [InlineData(GearTier.Osmium, 850, 35)]
+    public void FourArmorItemsStackAndWeaponsAddToBaseAttack(GearTier tier, int armoredHp, int armedAttack)
     {
         Assert.Equal(10, LevelCatalog.ZombieMaxHp(ZombieKind.Basic, tier));
         Assert.Equal(10, LevelCatalog.ZombieMaxHp(ZombieKind.Armed, tier));

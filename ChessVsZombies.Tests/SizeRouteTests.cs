@@ -17,6 +17,13 @@ public class SizeRouteTests
     public void SizedZombiesActuallyWalkToTheCoreAtTheirOwnStandingHeight(ZombieSize size)
     {
         var (game, zombie, buddy) = RuntimeBattle(size, new Cell(11, 16, 15));
+        // Exercise the walking field independently of the optional real-block
+        // pickup now available even when other carriers are nearby.
+        if (size == ZombieSize.Kilo)
+        {
+            var cooldowns = (Dictionary<int, float>)typeof(GameSession).GetField("_kiloActionCooldowns", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(game)!;
+            cooldowns[zombie.Id] = cooldowns[buddy!.Id] = 100;
+        }
         var origin = zombie.Position;
         for (int step = 0; step < 500 && game.CoreHp == Balance.CoreHp; step++)
         {

@@ -190,8 +190,8 @@ public sealed class ReinforcementCampaignTests
         Assert.Equal(2, game.KiloCovers.Count);
         Invoke(game, "DamageKiloCover", kilo.Id, 0, 37.25f);
         Invoke(game, "DamageKiloCover", kilo.Id, 1, 1234.5f);
-        float[] hp = [277.125f, 130.375f, 401.25f];
-        float[] heat = [3.125f, .0625f, 9.5f];
+        float[] hp = [277.125f, 130.375f, 401.25f, 199.875f];
+        float[] heat = [3.125f, .0625f, 9.5f, 6.75f];
         var armor = kilo.ArmorPieces.ToArray();
         for (int i = 0; i < armor.Length; i++)
         {

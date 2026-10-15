@@ -4,35 +4,47 @@ namespace ChessVsZombies.Core;
 
 public sealed partial class GameSession
 {
-    private void TryInterceptKiloShot(Zombie kilo, Vector3 from, Vector3 to, float bodyFraction)
+    private void TryInterceptKiloShot(Zombie protectedZombie, Vector3 from, Vector3 to, float bodyFraction)
     {
-        if (IsKiloUsingBuckets(kilo) || !_kiloBlocks.TryGetValue(kilo.Id, out var blocks) || blocks.Count == 0) return;
         var entry = Vector3.Lerp(from, to, bodyFraction);
+        Zombie? selectedCarrier = null;
+        HeldKiloBlock? selectedHand = null;
+        Vector3 selectedOffset = default;
         float nearest = float.PositiveInfinity;
-        foreach (var block in blocks)
+        foreach (var kilo in Zombies)
         {
-            var center = kilo.Position + block.Offset;
-            // Resolve proximity when the bullet reaches the body, independent of
-            // how far this frame's segment began from it.
-            var closest = Vector3.Clamp(entry, center - new Vector3(.5f), center + new Vector3(.5f));
-            var distance = Vector3.DistanceSquared(entry, closest);
-            nearest = Math.Min(nearest, distance);
+            if (kilo.Hp <= 0 || kilo.Size != ZombieSize.Kilo || IsKiloUsingBuckets(kilo) ||
+                !_kiloBlocks.TryGetValue(kilo.Id, out var blocks) || blocks.Count == 0) continue;
+            // Clumped carriers share guard work, but each hand must still meet
+            // the real ray inside its owner's reserved body volume. Distant
+            // allies cannot lend an abstract shield or move a block across a gap.
+            var separation = Vector3.Abs(kilo.Position - protectedZombie.Position);
+            var combinedHalfExtents = kilo.BodyHalfExtents + new Vector3(protectedZombie.BodyScale * .5f);
+            if (kilo != protectedZombie && (separation.X > combinedHalfExtents.X ||
+                separation.Y > combinedHalfExtents.Y || separation.Z > combinedHalfExtents.Z)) continue;
+            var desired = Vector3.Clamp(entry - kilo.Position, new Vector3(-.5f), new Vector3(.5f));
+            foreach (var hand in blocks)
+            {
+                var center = kilo.Position + hand.Offset;
+                var closest = Vector3.Clamp(entry, center - new Vector3(.5f), center + new Vector3(.5f));
+                var distance = Vector3.DistanceSquared(entry, closest);
+                if (distance > nearest + .000001f) continue;
+                if (Math.Abs(distance - nearest) <= .000001f && selectedCarrier != null &&
+                    (kilo.Id > selectedCarrier.Id || kilo.Id == selectedCarrier.Id && hand.BlockIndex >= selectedHand!.BlockIndex)) continue;
+                var other = blocks.Count == 2 ? (blocks[0] == hand ? blocks[1] : blocks[0]) : null;
+                if (!TryFindKiloHandPosition(kilo, hand, other, desired, from, to, bodyFraction, out var offset)) continue;
+                nearest = distance;
+                selectedCarrier = kilo;
+                selectedHand = hand;
+                selectedOffset = offset;
+            }
         }
-        var desired = Vector3.Clamp(entry - kilo.Position, new Vector3(-.5f), new Vector3(.5f));
-        foreach (var hand in blocks)
-        {
-            var center = kilo.Position + hand.Offset;
-            var closest = Vector3.Clamp(entry, center - new Vector3(.5f), center + new Vector3(.5f));
-            if (Vector3.DistanceSquared(entry, closest) > nearest + .000001f) continue;
-            // Either equally close hand may catch a seam shot, provided its real
-            // cube can reach the bullet without overlapping the other hand.
-            var other = blocks.Count == 2 ? (blocks[0] == hand ? blocks[1] : blocks[0]) : null;
-            if (TryPositionKiloHand(kilo, hand, other, desired, from, to, bodyFraction)) return;
-        }
+        // Resolve the whole group before moving exactly one physical hand.
+        if (selectedHand != null) selectedHand.Offset = selectedOffset;
     }
 
-    private static bool TryPositionKiloHand(Zombie kilo, HeldKiloBlock hand, HeldKiloBlock? other,
-        Vector3 desired, Vector3 from, Vector3 to, float bodyFraction)
+    private static bool TryFindKiloHandPosition(Zombie kilo, HeldKiloBlock hand, HeldKiloBlock? other,
+        Vector3 desired, Vector3 from, Vector3 to, float bodyFraction, out Vector3 offset)
     {
         // Only this hand responds. The other hand retains its guard position;
         // candidate faces keep the two real full cubes from passing into each other.
@@ -46,7 +58,7 @@ public sealed partial class GameSession
             if (Math.Abs(other.Offset.Z) == .5f) candidates[count++] = desired with { Z = -other.Offset.Z };
         }
         float best = float.PositiveInfinity;
-        var offset = hand.Offset;
+        offset = hand.Offset;
         for (int i = 0; i < count; i++)
         {
             var candidate = candidates[i];
@@ -59,7 +71,6 @@ public sealed partial class GameSession
             best = movement;
             offset = candidate;
         }
-        hand.Offset = offset;
         return float.IsFinite(best);
     }
 }

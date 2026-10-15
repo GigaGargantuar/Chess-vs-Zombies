@@ -116,7 +116,7 @@ public class UpgradeTemplateTests
         Seed(economy, UpgradeKind.Jump, 11, 2);
         Assert.True(economy.TryApplyTemplate(turret, Template((UpgradeKind.Jump, points)), out _));
         Assert.Equal(range, economy.GetRange(turret, UpgradeKind.Jump));
-        Assert.Equal(range == 2 ? 8 : 12, economy.GetJumpBudget(turret));
+        Assert.Equal((kind == PieceKind.Knight ? 24 : 8) + 4 * (range - 2), economy.GetJumpBudget(turret));
     }
 
     [Fact]

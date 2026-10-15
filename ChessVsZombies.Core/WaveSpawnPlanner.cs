@@ -22,7 +22,8 @@ public sealed class WaveSpawnPlan
         BudgetSpent = groups.Sum(group => (long)group.Count * BudgetCost(group));
     }
 
-    public static int BudgetCost(ZombieGroup group) => group.IsBoss ? Balance.ZombieHp :
+    public static int BudgetCost(ZombieGroup group) => group.IsBoss ?
+        group.Size == ZombieSize.Mega ? Balance.ZombieHp * 3 / 2 : Balance.ZombieHp :
         LevelCatalog.ZombieMaxHp(group.Kind, group.Tier, group.Size);
 }
 
@@ -54,6 +55,11 @@ public static class WaveSpawnPlanner
             {
                 Kind = gear == null ? ZombieKind.Basic : ZombieKind.Armored,
                 Tier = gear?.Tier ?? GearTier.Wood, Size = ZombieSize.Kilo, IsBoss = true
+            });
+            bossTypes.Add(new ZombieGroup
+            {
+                Kind = gear == null ? ZombieKind.Basic : ZombieKind.Armored,
+                Tier = gear?.Tier ?? GearTier.Wood, Size = ZombieSize.Mega, IsBoss = true
             });
         }
         groups.AddRange(Allocate(bossTypes, bossBudget));

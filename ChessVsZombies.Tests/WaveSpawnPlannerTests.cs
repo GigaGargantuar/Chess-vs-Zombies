@@ -22,7 +22,7 @@ public class WaveSpawnPlannerTests
         Assert.Equal(ZombieKind.Armored, order[4].Kind);
         Assert.Equal(ZombieKind.Armored, order[9].Kind);
         Assert.Equal(8, order.Count(zombie => zombie.Kind == ZombieKind.Basic));
-        Assert.Equal(400, game.Waves[0].TotalHp);
+        Assert.Equal(500, game.Waves[0].TotalHp);
         Assert.Equal(0, game.Waves[0].DamageTaken);
     }
 
@@ -59,7 +59,7 @@ public class WaveSpawnPlannerTests
         var order = Enumerable.Range(0, basic + armored).Select(i => WaveSpawnPlanner.SelectGroup(wave, i)).ToArray();
         Assert.Equal(basic, order.Count(group => group.Kind == ZombieKind.Basic));
         Assert.Equal(armored, order.Count(group => group.Kind == ZombieKind.ArmedArmored));
-        Assert.Equal(basic * 10 + armored * 640, order.Sum(group => LevelCatalog.ZombieMaxHp(group.Kind, group.Tier)));
+        Assert.Equal(basic * 10 + armored * 850, order.Sum(group => LevelCatalog.ZombieMaxHp(group.Kind, group.Tier)));
         if (basic == 16) Assert.Equal(ZombieKind.ArmedArmored, order[4].Kind);
     }
 }

@@ -15,30 +15,30 @@ public class WaveBudgetTests
         });
         Assert.Equal(970, plan.NormalBudget);
         Assert.Equal(30, plan.BossBudget);
-        Assert.Equal(1000, plan.BudgetSpent);
-        Assert.Equal(21, plan.Groups.Single(group => !group.IsBoss && group.Kind == ZombieKind.Basic).Count);
-        Assert.Equal(19, plan.Groups.Single(group => !group.IsBoss && group.Kind == ZombieKind.Armored).Count);
-        var boss = Assert.Single(plan.Groups, group => group.IsBoss);
-        Assert.Equal(ZombieSize.Kilo, boss.Size);
-        Assert.Equal(3, boss.Count);
-        Assert.Equal(1450, plan.TotalHp);
-        Assert.Equal(43, plan.SpawnCount);
+        Assert.Equal(995, plan.BudgetSpent);
+        Assert.Equal(17, plan.Groups.Single(group => !group.IsBoss && group.Kind == ZombieKind.Basic).Count);
+        Assert.Equal(16, plan.Groups.Single(group => !group.IsBoss && group.Kind == ZombieKind.Armored).Count);
+        Assert.Equal(1, plan.Groups.Single(group => group.IsBoss && group.Size == ZombieSize.Kilo).Count);
+        Assert.Equal(1, plan.Groups.Single(group => group.IsBoss && group.Size == ZombieSize.Mega).Count);
+        Assert.Equal(1620, plan.TotalHp);
+        Assert.Equal(35, plan.SpawnCount);
     }
 
     [Theory]
-    [InlineData(.01f, 1)]
-    [InlineData(.03f, 3)]
-    [InlineData(.05f, 5)]
-    public void ReserveUsesTheConfiguredPercentageWithoutFloatRoundingLosingAPurchase(float fraction, int bosses)
+    [InlineData(.01f, 10, 1, 0, 1000, 1030)]
+    [InlineData(.03f, 30, 1, 1, 995, 1100)]
+    [InlineData(.05f, 50, 2, 2, 1000, 1210)]
+    public void ReserveUsesTheConfiguredPercentageAndEachBossPaysItsOwnCost(float fraction, int reserve, int kilos, int megas, int spent, int actualHp)
     {
         var plan = WaveSpawnPlanner.Plan(new WaveDefinition
         {
             HpBudget = 1000, BossBudgetFraction = fraction, Groups = [new() { Kind = ZombieKind.Basic }]
         });
-        Assert.Equal(bosses * 10, plan.BossBudget);
-        Assert.Equal(bosses, plan.Groups.Single(group => group.IsBoss).Count);
-        Assert.Equal(1000, plan.BudgetSpent);
-        Assert.Equal(1000 + bosses * 30, plan.TotalHp);
+        Assert.Equal(reserve, plan.BossBudget);
+        Assert.Equal(kilos, plan.Groups.Where(group => group.IsBoss && group.Size == ZombieSize.Kilo).Sum(group => group.Count));
+        Assert.Equal(megas, plan.Groups.Where(group => group.IsBoss && group.Size == ZombieSize.Mega).Sum(group => group.Count));
+        Assert.Equal(spent, plan.BudgetSpent);
+        Assert.Equal(actualHp, plan.TotalHp);
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public class WaveBudgetTests
         });
         long normalSpent = plan.Groups.Where(group => !group.IsBoss).Sum(group =>
             (long)group.Count * LevelCatalog.ZombieMaxHp(group.Kind, group.Tier, group.Size));
-        long bossSpent = plan.Groups.Where(group => group.IsBoss).Sum(group => (long)group.Count * 10);
+        long bossSpent = plan.Groups.Where(group => group.IsBoss).Sum(group => (long)group.Count * WaveSpawnPlan.BudgetCost(group));
         Assert.InRange(normalSpent, plan.NormalBudget - 4, plan.NormalBudget);
         Assert.InRange(bossSpent, plan.BossBudget - 9, plan.BossBudget);
         Assert.Equal(normalSpent + bossSpent, plan.BudgetSpent);
@@ -103,7 +103,7 @@ public class WaveBudgetTests
                 new() { Kind = ZombieKind.Armored, Tier = GearTier.Osmium, Count = int.MaxValue }
             ]
         });
-        Assert.InRange(plan.Groups.Count, 1, 3);
+        Assert.InRange(plan.Groups.Count, 1, 4);
         Assert.InRange(plan.BudgetSpent, 0, int.MaxValue);
         Assert.InRange(plan.SpawnCount, 1, int.MaxValue);
         Assert.NotNull(WaveSpawnPlanner.SelectGroup(plan, plan.SpawnCount - 1));

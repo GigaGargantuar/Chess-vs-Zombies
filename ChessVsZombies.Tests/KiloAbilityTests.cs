@@ -38,18 +38,20 @@ public sealed class KiloAbilityTests
     }
 
     [Fact]
-    public void NearbyAlliesPreventAnIdleKiloFromExcavatingAnotherCoverBlock()
+    public void NearbyAlliesOutsideTheLiftDoNotPreventARealCoverPickup()
     {
         var game = new GameSession();
         var kilo = Add(game, ZombieSize.Kilo, new Cell(5, 16, 5));
         kilo.FaceToward(Vector3.UnitX);
-        // Another Kilo cannot be thrown, but still means this carrier is not alone.
+        // Another Kilo is nearby but does not obstruct either real lift.
         Add(game, ZombieSize.Kilo, new Cell(5, 16, 8));
 
         Invoke(game, "TryKiloAction", kilo, .05f);
 
-        Assert.Empty(game.KiloCovers);
-        Assert.Equal(Material.Dirt, game.World.GetMaterial(GroundSource(kilo)));
+        Assert.Equal(2, game.KiloCovers.Count);
+        Assert.All(game.KiloCovers, block => Assert.Equal(kilo.Id, block.CarrierId));
+        Assert.Equal(0, kilo.CarriedBlocks);
+        Assert.Equal(Material.Air, game.World.GetMaterial(GroundSource(kilo)));
     }
 
     [Fact]
