@@ -95,10 +95,12 @@ public sealed partial class GameSession
             for (int sample = 0; sample < samples; sample++)
             {
                 var next = position + velocity * slice - Vector3.UnitY * (MegaWeaponGravity * slice * slice * .5f);
-                bool hit = FindMegaWeaponImpact(flight, position, next, out float fraction, out _, out _);
+                bool hit = FindMegaWeaponImpact(flight, position, velocity, slice, out float fraction, out _, out _);
                 float stop = hit ? Math.Clamp(fraction, 0, 1) : 1;
+                float elapsed = slice * stop;
+                var endpoint = position + velocity * elapsed - Vector3.UnitY * (MegaWeaponGravity * elapsed * elapsed * .5f);
                 sweeps.Add(new MegaFlightSweep(sample * slice, (sample + stop) * slice,
-                    position, Vector3.Lerp(position, next, stop), hit));
+                    position, endpoint, hit));
                 if (hit) break;
                 position = next;
                 velocity -= Vector3.UnitY * (MegaWeaponGravity * slice);

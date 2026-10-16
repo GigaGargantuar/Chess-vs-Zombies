@@ -119,6 +119,8 @@ public sealed class CampaignState
     // Optional preparation preference; older checkpoints continue one level at a time.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool MergeFiveLevels { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool AllInOne { get; set; }
     [JsonRequired]
     public float CoreHp { get; set; } = Balance.CoreHp;
     [JsonRequired]
@@ -309,6 +311,8 @@ public static class SaveStore
     private static void Validate(CampaignState state)
     {
         if (state.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8)) throw new InvalidDataException($"Unsupported checkpoint version {state.Version}.");
+        if (state.AllInOne && !state.MergeFiveLevels)
+            throw new InvalidDataException("All in one requires a five-level range.");
         var legacy = state.Version == 1;
         var legacyBlocks = state.Version < 3;
         if (state.LevelNumber < 1 || !float.IsFinite(state.CoreHp) || state.CoreHp <= 0 || state.CoreHp > Balance.CoreHp)

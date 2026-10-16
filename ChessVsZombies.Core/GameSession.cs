@@ -59,7 +59,7 @@ public sealed partial class GameSession
         {
             if (!ReferenceEquals(_previewLevel, Level))
             {
-                _previewPlans = Level.Waves.Select(WaveSpawnPlanner.Plan).ToArray();
+                _previewPlans = AllInOne ? [_allInOnePlan!] : Level.Waves.Select(WaveSpawnPlanner.Plan).ToArray();
                 _previewLevel = Level;
             }
             return _previewPlans;
@@ -125,7 +125,14 @@ public sealed partial class GameSession
         MigrationNotice = string.Empty;
     }
 
-    public Turret? TrySelectTurret(Cell cell) => Turrets.FirstOrDefault(turret => turret.Cell == cell && turret.Hp > 0);
+    public Turret? TrySelectTurret(Cell cell)
+    {
+        // Keep list order and public-state changes visible without allocating a
+        // captured predicate for every support, collision, and liquid query.
+        foreach (var turret in Turrets)
+            if (turret.Cell == cell && turret.Hp > 0) return turret;
+        return null;
+    }
     public bool HasTowerSupport(Cell cell) => WorldGrid.IsInside(cell) && cell.Y > 0 &&
         (World.GetMaterial(cell + new Cell(0, -1, 0)) != Material.Air || TrySelectTurret(cell + new Cell(0, -1, 0)) != null);
 
@@ -163,6 +170,7 @@ public sealed partial class GameSession
         {
             LevelNumber = LevelNumber,
             MergeFiveLevels = MergeFiveLevels,
+            AllInOne = AllInOne,
             CoreHp = CoreHp,
             Economy = Economy.ExportState(),
             UpgradeTemplate = SavedUpgradeTemplate.FromTemplate(UpgradeTemplate),
@@ -206,9 +214,11 @@ public sealed partial class GameSession
         }
         LevelNumber = state.LevelNumber;
         MergeFiveLevels = state.MergeFiveLevels;
-        var encounter = PrepareEncounter(LevelNumber, MergeFiveLevels);
+        AllInOne = state.AllInOne;
+        var encounter = PrepareEncounter(LevelNumber, MergeFiveLevels, AllInOne);
         Level = encounter.Level;
         _sourceLevelNumbers = encounter.SourceLevels;
+        _allInOnePlan = encounter.CombinedPlan;
         CoreHp = state.CoreHp;
         foreach (var cell in state.Excavated) World.Dig(cell);
         foreach (var placement in state.TerrainPlacements!) World.RestoreTerrainPlacement(placement.Cell, placement.Material);
@@ -372,12 +382,12 @@ public sealed partial class GameSession
             return Reject("The wallet cannot hold the full surviving-tower reward.");
         WaveSpawnPlan[] plans;
         var waves = new List<WaveState>();
-        (LevelDefinition Level, int[] SourceLevels) nextEncounter;
+        (LevelDefinition Level, int[] SourceLevels, WaveSpawnPlan? CombinedPlan) nextEncounter;
         try
         {
             LevelCatalog.Validate(Level);
             nextEncounter = PrepareEncounter(checked(LevelNumber + LevelSpan), merged: false);
-            plans = Level.Waves.Select(WaveSpawnPlanner.Plan).ToArray();
+            plans = AllInOne ? [_allInOnePlan!] : Level.Waves.Select(WaveSpawnPlanner.Plan).ToArray();
             for (var i = 0; i < plans.Length; i++)
             {
                 var plan = plans[i];
@@ -546,6 +556,8 @@ public sealed partial class GameSession
             {
                 var preparation = PrepareEncounter(LevelNumber, merged: false);
                 MergeFiveLevels = false;
+                AllInOne = false;
+                _allInOnePlan = null;
                 Level = preparation.Level;
                 _sourceLevelNumbers = preparation.SourceLevels;
                 _previewLevel = null;
@@ -562,6 +574,8 @@ public sealed partial class GameSession
             Economy.Credit(reward);
             LevelNumber = checked(LevelNumber + LevelSpan);
             MergeFiveLevels = false;
+            AllInOne = false;
+            _allInOnePlan = null;
             Level = _nextEncounter!;
             _sourceLevelNumbers = _nextSourceLevelNumbers;
             _nextEncounter = null;
@@ -885,7 +899,9 @@ public sealed partial class GameSession
         var contact = Liquids.GetLiquidAt(zombie.Position - new Vector3(0, .45f * zombie.BodyScale, 0)) ?? Liquids.GetLiquidAt(zombie.Position);
         var chemical = contact == LiquidKind.Mercury ? Balance.ChemicalDamagePerSecond : 0;
         var thermal = contact == LiquidKind.Lava ? Balance.LavaDamagePerSecond : 0;
-        foreach (var hazard in Liquids.Hazards)
+        // Exposure only reads the clouds. Damage and bucket spills happen after
+        // this loop, so the live read-only span cannot be invalidated here.
+        foreach (var hazard in Liquids.ActiveHazards)
         {
             var delta = Vector3.Abs(zombie.Position - hazard.Center.Center);
             var halfExtent = hazard.Radius + .5f;
@@ -902,6 +918,9 @@ public sealed partial class GameSession
 
     private bool UpdateBuoyancy(Zombie zombie, float dt)
     {
+        // A dry battlefield needs neither surface probes nor floor searches.
+        // Finish existing shoreline steps even if the last liquid disappeared.
+        if (!Liquids.HasLiquidCells && !_liquidDestinations.ContainsKey(zombie.Id)) return false;
         // A newly buoyant body takes priority over any cached walking, descending,
         // or shoreline transition. Armor is evaluated from the surviving pieces.
         if (TryBuoyantSurface(zombie, zombie.Position, out var risingSurface) &&
@@ -957,8 +976,15 @@ public sealed partial class GameSession
         {
             // A deep pool has no dry navigation node at the waterline. A light unit
             // can still enter it from a supported bank without stepping into thin air.
-            if (!HasSolidFooting(zombie.Position, zombie: zombie) || !Horizontal.Any(direction =>
-                TryBuoyantSurface(zombie, zombie.Position + new Vector3(direction.X, 0, direction.Z), out _))) return false;
+            if (!HasSolidFooting(zombie.Position, zombie: zombie)) return false;
+            bool nearbySurface = false;
+            foreach (var direction in Horizontal)
+                if (TryBuoyantSurface(zombie, zombie.Position + new Vector3(direction.X, 0, direction.Z), out _))
+                {
+                    nearbySurface = true;
+                    break;
+                }
+            if (!nearbySurface) return false;
             if (!zombie.NextCell.HasValue && TrySolidFloor(zombie.Position, out var dryFloor, zombie) &&
                 RecoverSupportedPosition(zombie, dryFloor, dt)) return true;
             if (FindBuoyantRouteStep(zombie) is not { } entry) return false;
@@ -1123,13 +1149,19 @@ public sealed partial class GameSession
         surface = float.NegativeInfinity;
         var column = ToCell(position);
         for (var y = Math.Max(0, column.Y - 1); y <= Math.Min(WorldGrid.Size - 1, column.Y + 1); y++)
-            foreach (var volume in Liquids.GetVolumes(new Cell(column.X, y, column.Z)))
+        {
+            var cell = new Cell(column.X, y, column.Z);
+            // Empty cells have no surface; avoid creating a volume iterator for
+            // each dry neighbor of every member of a crowd.
+            if (Liquids.GetTotalUnits(cell) == 0) continue;
+            foreach (var volume in Liquids.GetVolumes(cell))
             {
                 if (zombie.SinksIn(volume.Kind) || position.X < volume.Min.X || position.X >= volume.Max.X ||
                     position.Z < volume.Min.Z || position.Z >= volume.Max.Z ||
                     position.Y - .45f * zombie.BodyScale > volume.Max.Y + .15f || position.Y + .4f * zombie.BodyScale < volume.Min.Y) continue;
                 surface = Math.Max(surface, volume.Max.Y);
             }
+        }
         return float.IsFinite(surface);
     }
 
@@ -1473,13 +1505,18 @@ public sealed partial class GameSession
         _turretsByCell.Clear();
         foreach (var turret in Turrets)
             if (turret.Hp > 0) _turretsByCell[turret.Cell] = turret;
-        const int cellCount = WorldGrid.Size * WorldGrid.Size * WorldGrid.Size;
         const int edgesPerNode = 16;
         // Rows are one-based so a zero lookup means no node. Keep the original
         // x/y/z insertion order: it also determines equal-cost goal tie ordering.
-        var nodeRows = new int[cellCount];
-        var nodes = new List<Cell>(cellCount / 2);
-        var goals = new List<Cell>();
+        var workspace = _navigationWorkspace ??= new NavigationWorkspace();
+        var nodeRows = workspace.Rows;
+        var clearNodes = workspace.ClearNodes;
+        var nodes = workspace.Nodes;
+        var goals = workspace.Goals;
+        Array.Clear(nodeRows);
+        Array.Clear(clearNodes);
+        nodes.Clear();
+        goals.Clear();
         static int Index(Cell cell) => (cell.X * WorldGrid.Size + cell.Y) * WorldGrid.Size + cell.Z;
         bool IsNode(Cell cell) => WorldGrid.IsInside(cell) && nodeRows[Index(cell)] != 0;
         for (var x = 0; x < WorldGrid.Size; x++)
@@ -1489,6 +1526,7 @@ public sealed partial class GameSession
                     var cell = new Cell(x, y, z);
                     if (!HasZombieSupport(cell) || World.GetMaterial(cell) == Material.Core) continue;
                     nodeRows[Index(cell)] = nodes.Count + 1;
+                    clearNodes[Index(cell)] = World.GetMaterial(cell) == Material.Air && !HasLiveIndexedTurret(cell);
                     nodes.Add(cell);
                     foreach (var direction in Adjacent)
                         if (WorldGrid.IsCore(cell + direction)) { goals.Add(cell); break; }
@@ -1496,16 +1534,16 @@ public sealed partial class GameSession
         // All lanes use the same physical edges. Evaluate clearance and breach
         // costs once, using fixed slots instead of a dictionary/list per cell.
         // Slots retain Horizontal/dy/jump order from the original incoming graph.
-        var edgeCosts = new float[nodes.Count * edgesPerNode];
-        Array.Fill(edgeCosts, float.NaN);
-        var edgeOffsets = new int[edgesPerNode];
+        var edgeCosts = workspace.Edges;
+        Array.Fill(edgeCosts, float.NaN, 0, nodes.Count * edgesPerNode);
+        var edgeOffsets = workspace.EdgeOffsets;
         int offsetSlot = 0;
         foreach (var horizontal in Horizontal)
         {
             for (int dy = -1; dy <= 1; dy++) edgeOffsets[offsetSlot++] = Index(horizontal + new Cell(0, dy, 0));
             edgeOffsets[offsetSlot++] = Index(horizontal + horizontal);
         }
-        var breachCosts = new float[cellCount];
+        var breachCosts = workspace.Breaches;
         Array.Fill(breachCosts, float.NaN);
         // Four approach fields remain shared. The strongest configured zombie is
         // an optimistic level-wide digging estimate, not per-unit risk learning.
@@ -1526,24 +1564,35 @@ public sealed partial class GameSession
                 for (var dy = -1; dy <= 1; dy++, slot++)
                 {
                     var previous = cell + horizontal + new Cell(0, dy, 0);
-                    if (!IsNode(previous) || !CanPlanStep(previous, cell)) continue;
+                    // Node membership already guarantees both bounds, support,
+                    // and a non-core destination; these offsets are valid steps.
+                    if (!IsNode(previous)) continue;
                     var clearance = StepClearance(previous, cell);
+                    if (clearance.HasValue && World.GetMaterial(clearance.Value) == Material.Core) continue;
                     edgeCosts[slot] = (cell.Y == previous.Y ? 1f : 2f) + CachedBreachCost(cell) +
                         (clearance.HasValue ? CachedBreachCost(clearance.Value) : 0f);
                 }
                 var launch = cell + horizontal + horizontal;
-                if (IsNode(launch) && CanPlanJump(launch, cell, out _))
+                // Solid underground nodes are valid breach paths, but can never
+                // launch or receive a jump. Avoid repeating full support queries
+                // for every such node while retaining the exact arc check.
+                if (clearNodes[Index(cell)] && IsNode(launch) && clearNodes[Index(launch)] && CanPlanJump(launch, cell, out _))
                     // Two metres at the same horizontal speed as walking.
                     edgeCosts[slot] = 2f;
                 slot++;
             }
         }
-        var costs = new float[cellCount];
-        var nextIndices = new int[cellCount];
-        var routeOrder = new List<int>(nodes.Count);
-        var frontier = new PriorityQueue<int, float>(nodes.Count);
-        for (var lane = 0; lane < 4; lane++)
+        // Lanes share immutable edge geometry, but have independent queues and
+        // results. Finish all four before publishing a completed navigation
+        // revision or letting any zombie act on the new terrain.
+        Parallel.For(0, 4, new ParallelOptions { MaxDegreeOfParallelism = Math.Min(4, Environment.ProcessorCount) }, BuildLane);
+        void BuildLane(int lane)
         {
+            var laneWorkspace = workspace.Lanes[lane];
+            var costs = laneWorkspace.Costs;
+            var nextIndices = laneWorkspace.Next;
+            var routeOrder = laneWorkspace.Order;
+            var frontier = laneWorkspace.Frontier;
             _routes[lane].Clear();
             Array.Fill(costs, float.NaN);
             Array.Fill(nextIndices, -1);

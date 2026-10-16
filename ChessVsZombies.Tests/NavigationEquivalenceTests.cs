@@ -53,6 +53,27 @@ public class NavigationEquivalenceTests
         }
 
         Assert.True(game.StartLevel(), game.Message);
+        AssertOriginalRouteFields(game);
+    }
+
+    [Fact]
+    public void ReusedNavigationStorageRetainsExactRoutesAfterRepeatedTerrainChanges()
+    {
+        var game = new GameSession();
+        Assert.True(game.StartLevel());
+        var damage = Bind<Action<Cell, float, CrustFace?>>(game, "DamageProjectileTerrain");
+        var rebuild = Bind<Action>(game, "RebuildNavigation");
+        foreach (var cell in new[] { new Cell(8, 15, 8), new Cell(9, 15, 8), new Cell(10, 15, 8) })
+        {
+            damage(cell, 1000, null);
+            Assert.Equal(Material.Air, game.World.GetMaterial(cell));
+            rebuild();
+            AssertOriginalRouteFields(game);
+        }
+    }
+
+    private static void AssertOriginalRouteFields(GameSession game)
+    {
         var expected = BuildOriginalRouteFields(game);
         var actual = (Dictionary<Cell, Cell>[])typeof(GameSession)
             .GetField("_routes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(game)!;

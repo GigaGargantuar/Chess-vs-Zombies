@@ -15,19 +15,20 @@ public sealed partial class GameSession
 
     private void BuildSpentRoutes(List<Cell> nodes, int[] nodeRows, float[] edgeCosts, int[] edgeOffsets, int edgesPerNode)
     {
-        const int count = WorldGrid.Size * WorldGrid.Size * WorldGrid.Size;
         static int Index(Cell cell) => (cell.X * WorldGrid.Size + cell.Y) * WorldGrid.Size + cell.Z;
         static int CoreDistance(int coordinate) => Math.Abs(coordinate - Math.Clamp(coordinate, 15, 16));
 
-        var horizontalDistances = new int[count];
-        var verticalDistances = new int[count];
-        var travelCosts = new float[count];
-        var nextIndices = new int[count];
+        var workspace = _navigationWorkspace ??= new NavigationWorkspace();
+        var horizontalDistances = workspace.Horizontal;
+        var verticalDistances = workspace.Vertical;
+        var travelCosts = workspace.Travel;
+        var nextIndices = workspace.Next;
         Array.Fill(horizontalDistances, int.MaxValue);
         Array.Fill(verticalDistances, int.MaxValue);
         Array.Fill(travelCosts, float.PositiveInfinity);
         Array.Fill(nextIndices, -1);
-        var frontier = new PriorityQueue<int, (int Horizontal, int Vertical, float Travel)>(nodes.Count);
+        var frontier = workspace.SpentFrontier;
+        frontier.Clear();
         _spentRoutes.Clear();
         if (_builderYields.Count > 0)
         {

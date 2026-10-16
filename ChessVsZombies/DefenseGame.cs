@@ -3,6 +3,8 @@ using ChessVsZombies.Rendering;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
+using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -36,11 +38,14 @@ public sealed class DefenseGame : Game
     private readonly List<Cell> draftPattern = [];
     private UpgradeTemplate upgradeTemplate => session.UpgradeTemplate;
     private readonly bool smoke, smokeCombat;
-    private readonly bool smokeMegaGuard, smokeGiantDeaths, smokeThrownCover, smokeTowerPenetration;
+    private readonly bool smokeHorde;
+    private readonly bool smokeMegaGuard, smokeGiantDeaths, smokeThrownCover, smokeTowerPenetration, smokeTerrainImpact;
     private readonly string smokePanel;
     private readonly string? capturePath;
     private Zombie? smokeArmorDemo;
     private int frameCount;
+    private List<double>? hordeUpdateTimes, hordeFrameTimes;
+    private long previousHordeFrame;
     private readonly int captureFrame = 90;
     private double elapsed;
     private readonly string savePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ChessVsZombies", "campaign.json");
@@ -59,13 +64,18 @@ public sealed class DefenseGame : Game
         smokeGiantDeaths = args.Contains("--smoke-giant-deaths");
         smokeThrownCover = args.Contains("--smoke-thrown-cover");
         smokeTowerPenetration = args.Contains("--smoke-tower-penetration");
-        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes") || args.Contains("--smoke-megas") || args.Contains("--smoke-merged");
-        smoke = smoke || smokeMegaGuard || smokeGiantDeaths || smokeThrownCover || smokeTowerPenetration;
+        smokeTerrainImpact = args.Contains("--smoke-terrain-impact");
+        smokeHorde = args.Contains("--smoke-horde");
+        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes") || args.Contains("--smoke-megas") || args.Contains("--smoke-merged") || args.Contains("--smoke-all-in-one");
+        smoke = smoke || smokeMegaGuard || smokeGiantDeaths || smokeThrownCover || smokeTowerPenetration || smokeTerrainImpact || smokeHorde;
         smokeCombat = args.Contains("--smoke-combat");
         smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : args.Contains("--smoke-megas") ? "megas" : args.Contains("--smoke-merged") ? "merged" : "";
+        if (args.Contains("--smoke-all-in-one")) smokePanel = "all-in-one";
         if (smokeMegaGuard || smokeGiantDeaths) smokePanel = "megas";
         if (smokeThrownCover) smokePanel = "thrown";
         if (smokeTowerPenetration) smokePanel = "penetration";
+        if (smokeTerrainImpact) smokePanel = "terrain-impact";
+        if (smokeHorde) smokePanel = "horde";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
         if (smoke) IsFixedTimeStep = false;
@@ -78,6 +88,8 @@ public sealed class DefenseGame : Game
         if (smokePanel == "megas") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 26, 42), MathF.PI, -.34f);
         if (smokeThrownCover) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 25, 32), MathF.PI, -.3f);
         if (smokeTowerPenetration) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 34), MathF.PI, -.54f);
+        if (smokeTerrainImpact) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 22, 32), MathF.PI, -.5f);
+        if (smokeHorde) cameraControl = new FlyCamera(new System.Numerics.Vector3(16, 43, 47), MathF.PI, -.72f);
         int frameIndex = Array.IndexOf(args, "--capture-frame");
         if (frameIndex >= 0 && frameIndex + 1 < args.Length && int.TryParse(args[frameIndex + 1], out var requestedFrame))
             captureFrame = Math.Clamp(requestedFrame, 1, 600);
@@ -99,7 +111,12 @@ public sealed class DefenseGame : Game
     {
         batch = new SpriteBatch(GraphicsDevice); pixel = new Texture2D(GraphicsDevice, 1, 1); pixel.SetData(new[] { Color.White });
         font = new UiFont(GraphicsDevice); renderer = new WorldRenderer(GraphicsDevice);
-        if (smoke)
+        if (smokeHorde)
+        {
+            PrepareHordeSmoke();
+            SetNotice("500 simultaneous zombies / 388 Standard, 97 Milli, 10 Kilo and 5 Mega / live rendered simulation.");
+        }
+        else if (smoke)
         {
             foreach (var c in new[] { new Cell(11, 16, 15), new Cell(11, 16, 16), new Cell(20, 16, 15), new Cell(20, 16, 16), new Cell(15, 16, 11), new Cell(16, 16, 11), new Cell(15, 16, 20), new Cell(16, 16, 20) })
                 session.Deploy((PieceKind)(session.Turrets.Count % 4), c);
@@ -108,7 +125,7 @@ public sealed class DefenseGame : Game
             session.Economy.Apply(selected, UpgradeKind.ATK);
             session.Inventory.Add(Material.Dirt, 3); session.Inventory.Add(Material.Stone, 2);
             session.BuildBarrier(new Cell(13, 16, 13), Material.Stone); session.BuildBarrier(new Cell(13, 17, 13), Material.Dirt);
-            if (smokeCombat && smokePanel != "merged") { session.StartLevel(); session.Update(12f); }
+            if (smokeCombat && smokePanel is not ("merged" or "all-in-one")) { session.StartLevel(); session.Update(12f); }
             if (smokePanel == "gacha") panel = 1;
             if (smokePanel == "template")
             {
@@ -155,16 +172,20 @@ public sealed class DefenseGame : Game
             if (smokePanel == "megas") PrepareMegaSmoke();
             if (smokeThrownCover) PrepareThrownCoverSmoke();
             if (smokeTowerPenetration) PrepareTowerPenetrationSmoke();
-            if (smokePanel == "merged")
+            if (smokeTerrainImpact) PrepareTerrainImpactSmoke();
+            if (smokePanel is "merged" or "all-in-one")
             {
-                session.SetMergeFiveLevels(true);
+                if (smokePanel == "all-in-one") session.SetAllInOne(true);
+                else session.SetMergeFiveLevels(true);
                 if (smokeCombat) { session.StartLevel(); session.Update(12f); }
                 Capture(false);
             }
-            SetNotice(smokeTowerPenetration ? "Tower penetration / a stone block pierces three weak towers, then stops at the fourth." :
+            SetNotice(smokeTerrainImpact ? "Terrain impact / a near-ground chunk scatters and settles while bullets keep flying." :
+                smokeTowerPenetration ? "Tower penetration / a stone block pierces three weak towers, then stops at the fourth." :
                 smokeThrownCover ? "Thrown cover / incoming fire damages real blocks in flight, leaving holes when they break." :
                 smokeMegaGuard ? "Mega mobile cover / advancing to the core while guarding sustained incoming fire." :
                 smokeGiantDeaths ? "Released Kilo hands and Mega chunks / finite blocks fall and settle after death." :
+                smokePanel == "all-in-one" ? "All in one / 5x spawn rate / final-wave equipment / 75 currency per surviving tower." :
                 smokePanel == "merged" ? "Five levels in one battle. Every surviving tower pays 25 currency on victory." :
                 smokePanel == "megas" ? "Mega / 3 x 3 x 3. Two hands, two real blocks per hand. Stick left / chunky throw right." :
                 smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
@@ -173,6 +194,76 @@ public sealed class DefenseGame : Game
         else LoadCheckpoint();
         CenterMouse();
         base.LoadContent();
+    }
+    private void PrepareHordeSmoke()
+    {
+        var levels = new LevelCatalog();
+        levels.Set(new LevelDefinition
+        {
+            Number = 1, Name = "500-zombie horde",
+            Waves = [new WaveDefinition
+            {
+                SpawnInterval = .28f,
+                Groups =
+                [
+                    new() { Count = 388, Size = ZombieSize.Standard, Kind = ZombieKind.ArmedArmored, Tier = GearTier.Osmium },
+                    new() { Count = 97, Size = ZombieSize.Milli, Kind = ZombieKind.Armored, Tier = GearTier.Osmium },
+                    new() { Count = 10, Size = ZombieSize.Kilo, Kind = ZombieKind.ArmedArmored, Tier = GearTier.Osmium, IsBoss = true },
+                    new() { Count = 5, Size = ZombieSize.Mega, Kind = ZombieKind.ArmedArmored, Tier = GearTier.Osmium, IsBoss = true }
+                ]
+            }]
+        });
+        session = new GameSession(levels: levels);
+        foreach (int z in new[] { 5, 10, 21, 26 })
+            foreach (int x in new[] { 3, 7, 11, 20, 24, 28 })
+                if (!session.Deploy((x + z) % 2 == 0 ? PieceKind.Rook : PieceKind.Knight, new Cell(x, 16, z)))
+                    throw new InvalidOperationException(session.Message);
+        session.Inventory.Add(Material.Dirt, 16);
+        foreach (int axis in new[] { 6, 12, 19, 25 })
+            foreach (var cell in new[] { new Cell(5, 16, axis), new Cell(26, 16, axis), new Cell(axis, 16, 5), new Cell(axis, 16, 26) })
+                if (!session.BuildBarrier(cell)) throw new InvalidOperationException(session.Message);
+        if (!session.StartLevel()) throw new InvalidOperationException(session.Message);
+        // Fill the authored wave through production spawning without advancing AI,
+        // timers or positions. This demonstration never loads or saves a checkpoint.
+        var spawn = typeof(GameSession).GetMethod("Spawn", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .CreateDelegate<Func<WaveState, bool>>(session);
+        var wave = session.Waves.Single();
+        while (wave.Spawned < wave.TotalCount)
+            if (!spawn(wave)) throw new InvalidOperationException($"Horde smoke could spawn only {wave.Spawned}/{wave.TotalCount} zombies.");
+        if (session.Zombies.Count != 500) throw new InvalidOperationException("Horde smoke requires exactly 500 live zombies.");
+        hordeUpdateTimes = [];
+        hordeFrameTimes = [];
+        showZones = false;
+        selected = null;
+        paused = false;
+        Capture(false);
+    }
+    private void ReportHordeSmoke()
+    {
+        const int warmup = 30;
+        static object Statistics(IEnumerable<double> samples)
+        {
+            var ordered = samples.Order().ToArray();
+            return ordered.Length == 0 ? new { Samples = 0, MeanMs = 0d, MedianMs = 0d, P95Ms = 0d, MaxMs = 0d } :
+                new { Samples = ordered.Length, MeanMs = ordered.Average(), MedianMs = ordered.Length % 2 == 0 ?
+                    (ordered[ordered.Length / 2 - 1] + ordered[ordered.Length / 2]) / 2 : ordered[ordered.Length / 2],
+                    P95Ms = ordered[(int)Math.Ceiling(ordered.Length * .95) - 1], MaxMs = ordered[^1] };
+        }
+        var metrics = new
+        {
+            Frames = frameCount, SimulatedSeconds = hordeUpdateTimes!.Count / 60d,
+            Spawned = session.Waves.Sum(w => w.Spawned), LiveZombies = session.Zombies.Count(z => z.Hp > 0),
+            LivingTowers = session.Turrets.Count(t => t.Hp > 0), session.CoreHp, session.Phase,
+            WarmupFramesExcluded = warmup,
+            CoreUpdate = Statistics(hordeUpdateTimes.Skip(warmup)),
+            // Intervals between completed draws include presentation and any frame
+            // limiting; they are native rendered-frame timings, not isolated GPU time.
+            RenderedFrame = Statistics(hordeFrameTimes!.Skip(warmup)),
+            Runtime = Environment.Version.ToString()
+        };
+        string json = JsonSerializer.Serialize(metrics, new JsonSerializerOptions { WriteIndented = true });
+        if (capturePath is not null) File.WriteAllText(Path.ChangeExtension(capturePath, ".metrics.json"), json);
+        Console.WriteLine(json);
     }
     private void PrepareMegaSmoke()
     {
@@ -306,6 +397,31 @@ public sealed class DefenseGame : Game
             session = restored!;
         }
         finally { if (File.Exists(fixture)) File.Delete(fixture); }
+    }
+    private void PrepareTerrainImpactSmoke()
+    {
+        session = new GameSession();
+        var state = session.ExportState();
+        state.MegaWeaponFlights = [new SavedMegaWeaponFlight
+        {
+            OwnerId = 100, Formation = MegaWeaponFormation.Chunk,
+            X = 16, Y = MathF.BitIncrement(16 + .49999f) + .5f, Z = 24.5f, Damage = 12,
+            Blocks = Enumerable.Range(0, 4).Select(index => new SavedMegaWeaponPart
+            {
+                BlockIndex = index, Material = index % 2 == 0 ? Material.Stone : Material.Wood,
+                Hp = index % 2 == 0 ? 311 : 123,
+                OffsetX = index % 2 - .5f, OffsetY = index / 2 - .5f
+            }).ToList()
+        }];
+        RestoreSmokeState(state);
+        for (int shot = 0; shot < 50; shot++)
+            session.Projectiles.Add(new Projectile
+            {
+                Origin = new System.Numerics.Vector3(28, 27, 24), Target = new System.Numerics.Vector3(29, 27, 24),
+                Duration = 10, Kind = ShotKind.Pellet, Damage = 1
+            });
+        selected = null;
+        showZones = false;
     }
     private void QueueThrownCoverSmokeShot(float damage)
     {
@@ -500,7 +616,16 @@ public sealed class DefenseGame : Game
         var oldPhase = session.Phase;
         if (smokeMegaGuard && frameCount > 0 && frameCount % 15 == 0) QueueMegaGuardSmokeVolley();
         if (smokeThrownCover && frameCount is 15 or 30) QueueThrownCoverSmokeShot(25);
-        if (!paused && (IsActive || smoke)) session.Update(dt);
+        if (!paused && (IsActive || smoke))
+        {
+            if (smokeHorde)
+            {
+                long start = Stopwatch.GetTimestamp();
+                session.Update(dt);
+                hordeUpdateTimes!.Add(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+            }
+            else session.Update(dt);
+        }
         // Frame 30 shows both two-block hands and all four armor slots. Frame
         // 90 shows the stick/chunk arcs; around frame 150 they scatter as debris.
         if (smokePanel == "megas" && frameCount == 60) paused = false;
@@ -597,10 +722,13 @@ public sealed class DefenseGame : Game
         if (panel == 3) panel = 2;
         SaveCheckpoint(); session.StartLevel(); SetNotice(session.Message);
     }
-    private void ToggleMergedLevels()
+    private void SelectBattleMode(int mode)
     {
-        if (!session.SetMergeFiveLevels(!session.MergeFiveLevels)) { SetNotice(session.Message); return; }
-        SetNotice(session.MergeFiveLevels
+        bool changed = mode == 2 ? session.SetAllInOne(true) : session.SetMergeFiveLevels(mode == 1);
+        if (!changed) { SetNotice(session.Message); return; }
+        SetNotice(session.AllInOne
+            ? $"Levels {session.LevelNumber}-{session.EndLevelNumber} / All in one / 5x spawn rate / 75 currency per surviving tower."
+            : session.MergeFiveLevels
             ? $"Levels {session.LevelNumber}-{session.EndLevelNumber} merged / no preparation breaks / 25 currency per surviving tower."
             : "Single-level defense selected / 2 currency per surviving tower.");
         SaveCheckpoint();
@@ -718,6 +846,12 @@ public sealed class DefenseGame : Game
         DrawHud();
         batch.End();
         frameCount++;
+        if (smokeHorde)
+        {
+            long now = Stopwatch.GetTimestamp();
+            if (previousHordeFrame != 0) hordeFrameTimes!.Add(Stopwatch.GetElapsedTime(previousHordeFrame, now).TotalMilliseconds);
+            previousHordeFrame = now;
+        }
         if (smoke && frameCount >= captureFrame)
         {
             if (capturePath is not null)
@@ -728,6 +862,7 @@ public sealed class DefenseGame : Game
                 using var texture = new Texture2D(GraphicsDevice, GraphicsDevice.PresentationParameters.BackBufferWidth, GraphicsDevice.PresentationParameters.BackBufferHeight);
                 texture.SetData(colors); using var stream = File.Create(capturePath); texture.SaveAsPng(stream, texture.Width, texture.Height);
             }
+            if (smokeHorde) ReportHordeSmoke();
             Exit();
         }
         base.Draw(gameTime);
@@ -783,7 +918,7 @@ public sealed class DefenseGame : Game
         }
         float left = 28;
         Text("SECTOR  /  32 x 32 x 32", left, 116, 14, Muted);
-        Text(session.LevelSpan == 1 ? session.Level.Name : $"Levels {LevelRange} / merged defense", left, 139, 25);
+        Text(session.LevelSpan == 1 ? session.Level.Name : $"Levels {LevelRange} / {(session.AllInOne ? "All in one" : "merged defense")}", left, 139, 25);
         if (session.Phase == GamePhase.Combat)
         {
             int started = session.Waves.Count(w => w.Started), total = session.Waves.Sum(w => w.TotalCount), spawned = session.Waves.Sum(w => w.Spawned);
@@ -793,7 +928,8 @@ public sealed class DefenseGame : Game
             float y = 210;
             foreach (var wave in session.Waves)
             {
-                Text($"{wave.Index + 1:00}  L{session.GetSourceLevelNumber(wave.Index):00}  {(wave.Started ? "HP REMAINING" : "WAITING")}", left, y, 12, Muted);
+                string source = session.AllInOne ? $"L{LevelRange}" : $"L{session.GetSourceLevelNumber(wave.Index):00}";
+                Text($"{wave.Index + 1:00}  {source}  {(wave.Started ? "HP REMAINING" : "WAITING")}", left, y, 12, Muted);
                 float remaining = wave.TotalHp > 0 ? Math.Clamp(1 - wave.DamageTaken / wave.TotalHp, 0, 1) : 0;
                 Fill(left, y + 23, 220, 5, Raised); Fill(left, y + 23, 220 * remaining, 5, wave.Started ? Red : Muted * .4f);
                 Fill(left + 110, y + 21, 1, 9, TextColor); y += 47;
@@ -804,9 +940,11 @@ public sealed class DefenseGame : Game
             Text("Build. Equip. Hold the center.", left, 180, 16, Muted);
             Text($"Next {LevelRange}: {session.PreparedWaves.Sum(w => w.SpawnCount) + session.PendingReinforcementCount} zombies / {session.PreparedWaves.Count} wave(s)", left, 206, 15, Muted);
             Text($"HP budget {session.PreparedWaves.Sum(w => w.HpBudget) + session.PendingReinforcementBudget:N0} / boss reserve {session.PreparedWaves.Sum(w => w.BossBudget) + session.PendingBossReinforcementBudget:N0}", left, 232, 13, Muted);
-            Text($"Victory / {session.SurvivorRewardPerTower} currency per surviving tower", left, 254, 13, Gold);
+            Text($"Victory / {session.SurvivorRewardPerTower} currency per surviving tower{(session.AllInOne ? " / 7.5x bonus" : "")}", left, 254, 13, Gold);
+            if (session.AllInOne)
+                Text("5x spawn rate / final-wave equipment from the start", left, 276, 13, Gold);
             if (session.PendingReinforcementCount > 0)
-                Text($"Includes {session.PendingReinforcementCount} returning survivors", left, 276, 13, Gold);
+                Text($"Includes {session.PendingReinforcementCount} returning survivors", left, session.AllInOne ? 298 : 276, 13, Gold);
         }
         float px = width - 340, py = 112;
         Fill(px, py, 312, height - 248, Panel);
@@ -852,12 +990,13 @@ public sealed class DefenseGame : Game
         Button("Terrain / tools & blocks", x + 16, next, 280, 34, () => panel = 5, textSize: 17);
         Button("Liquids / water, mercury & lava", x + 16, next + 39, 280, 34, () => panel = 6, textSize: 17);
         Text("Pieces: outside the 8-cube enclosure", x + 20, next + 82, 12, Muted);
-        Text("Place, remove and upgrade during waves.", x + 20, next + 101, 12, Gold);
         bool preparation = session.Phase == GamePhase.Building;
-        Button($"MERGE 5 LEVELS  /  {(session.MergeFiveLevels ? "ON" : "OFF")}", x + 16, height - 283, 280, 40,
-            ToggleMergedLevels, session.MergeFiveLevels, preparation, textSize: 17);
+        Text(preparation ? "BATTLE MODE / choose before starting" : "BATTLE MODE / locked during combat", x + 20, height - 306, 12, Muted);
+        Button("1 level", x + 16, height - 283, 78, 40, () => SelectBattleMode(0), !session.MergeFiveLevels, preparation, textSize: 14);
+        Button("Merge 5", x + 98, height - 283, 89, 40, () => SelectBattleMode(1), session.MergeFiveLevels && !session.AllInOne, preparation, textSize: 14);
+        Button("All in one", x + 191, height - 283, 105, 40, () => SelectBattleMode(2), session.AllInOne, preparation, textSize: 14);
         Text($"{(session.LevelSpan == 1 ? "Level" : "Levels")} {LevelRange} / {session.PreparedWaves.Count} wave(s) / {session.SurvivorRewardPerTower} C per tower", x + 20, height - 238, 12, Gold);
-        Text(session.MergeFiveLevels ? "One battle / resets after win or loss" : "Select five levels for 25 C per survivor", x + 20, height - 222, 11, Muted);
+        Text(session.AllInOne ? "5x spawns / final equipment / 7.5x bonus" : session.MergeFiveLevels ? "2.5x bonus / resets after win or loss" : "Merge 5: 25 C / All in one: 75 C per survivor", x + 20, height - 222, 11, Muted);
         Button(preparation ? $"ENTER  /  Start {(session.LevelSpan == 1 ? "level" : "levels")}" : "DEFENSE ACTIVE", x + 16, height - 201, 280, 47,
             BeginLevel, preparation, preparation);
     }

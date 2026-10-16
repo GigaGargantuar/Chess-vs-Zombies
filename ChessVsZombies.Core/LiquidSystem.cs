@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text.Json.Serialization;
 
 namespace ChessVsZombies.Core;
@@ -116,6 +117,10 @@ public sealed class LiquidSystem
     public IEnumerable<LiquidCell> Cells => _cells.Keys.Union(_world.ObsidianCells.Select(s => s.Cell))
         .OrderBy(c => c.X).ThenBy(c => c.Y).ThenBy(c => c.Z).Select(Snapshot).ToArray();
     public IEnumerable<VaporCloud> Hazards => _hazards.ToArray();
+    // Internal readers use these only while the simulation cannot mutate the
+    // liquid system. Public enumeration keeps its independent snapshot contract.
+    internal ReadOnlySpan<VaporCloud> ActiveHazards => CollectionsMarshal.AsSpan(_hazards);
+    internal bool HasLiquidCells => _cells.Count != 0;
     public static int PurchaseCost(LiquidKind kind) => kind switch
     {
         LiquidKind.Water => WaterCost, LiquidKind.Mercury => MercuryCost, LiquidKind.Lava => LavaCost,
@@ -207,6 +212,7 @@ public sealed class LiquidSystem
     {
         if (!IsFinite(point)) return null;
         var cell = CellAt(point);
+        if (GetTotalUnits(cell) == 0) return null;
         foreach (var volume in GetVolumes(cell))
             if (Contains(volume.Min, volume.Max, point)) return volume.Kind;
         return null;

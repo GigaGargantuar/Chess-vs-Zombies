@@ -166,9 +166,10 @@ public sealed partial class GameSession
         if (zombie.WaveIndex < 0 || zombie.WaveIndex >= Waves.Count) return false;
         var wave = Waves[zombie.WaveIndex];
         int remaining = Math.Max(0, wave.TotalCount - wave.Spawned);
+        if (remaining >= CoverAttackGroupSize) return false;
         foreach (var ally in Zombies)
-            if (ally.Hp > 0 && ally.WaveIndex == zombie.WaveIndex) remaining++;
-        return remaining < CoverAttackGroupSize;
+            if (ally.Hp > 0 && ally.WaveIndex == zombie.WaveIndex && ++remaining >= CoverAttackGroupSize) return false;
+        return true;
     }
 
     private void ReleaseCoverGroup(IEnumerable<Zombie> members)
@@ -190,11 +191,14 @@ public sealed partial class GameSession
     {
         var members = new List<Zombie>();
         foreach (var ally in Zombies)
-            if (ally.Hp > 0 && CanGatherBehindCover(ally) && !IsAdvancingFromCover(ally) && HasSolidFooting(ally.Position, ally) &&
-                Vector3.DistanceSquared(ally.Position, group.Anchor) <= CoverGatheringRadius * CoverGatheringRadius &&
-                TryFindCloseCover(ally.Position, group.Threat.Cell.Center, out _)) members.Add(ally);
+            if (IsAssembledCoverMember(ally, group)) members.Add(ally);
         return members;
     }
+
+    private bool IsAssembledCoverMember(Zombie ally, CoverGroup group) =>
+        ally.Hp > 0 && CanGatherBehindCover(ally) && !IsAdvancingFromCover(ally) &&
+        Vector3.DistanceSquared(ally.Position, group.Anchor) <= CoverGatheringRadius * CoverGatheringRadius &&
+        HasSolidFooting(ally.Position, ally) && TryFindCloseCover(ally.Position, group.Threat.Cell.Center, out _);
 
     private void UpdateCoverGroups(float dt)
     {
@@ -202,8 +206,11 @@ public sealed partial class GameSession
             if (zombie.Hp > 0 && CanGatherBehindCover(zombie) && IsFinalWaveGroup(zombie))
                 ReleaseCoverGroup(Zombies.Where(ally => ally.Hp > 0 && CanGatherBehindCover(ally) && ally.WaveIndex == zombie.WaveIndex));
 
-        foreach (var entry in _coverGroups.ToArray())
-            if (!IsActiveCoverGroup(entry.Value)) _coverGroups.Remove(entry.Key);
+        List<int>? inactive = null;
+        foreach (var entry in _coverGroups)
+            if (!IsActiveCoverGroup(entry.Value)) (inactive ??= []).Add(entry.Key);
+        if (inactive != null)
+            foreach (int id in inactive) _coverGroups.Remove(id);
 
         // Discover every occupied hiding spot before choosing a destination.
         // Otherwise the first zombie updated would claim the entire wave even
@@ -278,9 +285,17 @@ public sealed partial class GameSession
         foreach (var group in _coverGroups.Values)
         {
             if (!IsActiveCoverGroup(group)) continue;
-            var members = AssembledCoverGroup(group);
-            var strength = (Hp: members.Sum(zombie => (double)zombie.Hp),
-                Attack: members.Sum(zombie => (long)zombie.Attack), Count: members.Count, Leader: -(long)group.Leader.Id);
+            double hp = 0;
+            long attack = 0;
+            int count = 0;
+            foreach (var ally in Zombies)
+            {
+                if (!IsAssembledCoverMember(ally, group)) continue;
+                hp += ally.Hp;
+                attack = checked(attack + ally.Attack);
+                count++;
+            }
+            var strength = (Hp: hp, Attack: attack, Count: count, Leader: -(long)group.Leader.Id);
             if (strongest != null && strength.CompareTo(best) <= 0) continue;
             strongest = group;
             best = strength;

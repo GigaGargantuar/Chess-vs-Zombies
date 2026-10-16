@@ -5,34 +5,43 @@ public sealed partial class GameSession
     private int[] _sourceLevelNumbers = [];
     private LevelDefinition? _nextEncounter;
     private int[] _nextSourceLevelNumbers = [];
+    private WaveSpawnPlan? _allInOnePlan;
 
     /// <summary>Combine the next five levels for one battle; cleared when that battle ends.</summary>
     public bool MergeFiveLevels { get; private set; }
+    /// <summary>Compress the selected five-level range into one wave with final-wave equipment.</summary>
+    public bool AllInOne { get; private set; }
     public int LevelSpan => MergeFiveLevels ? 5 : 1;
     public int EndLevelNumber => checked(LevelNumber + (LevelSpan - 1));
-    public int SurvivorRewardPerTower => MergeFiveLevels ? 25 : Balance.SurvivorIncome;
+    public int SurvivorRewardPerTower => AllInOne ? 75 : MergeFiveLevels ? 25 : Balance.SurvivorIncome;
 
     public int GetSourceLevelNumber(int waveIndex) => waveIndex >= 0 && waveIndex < _sourceLevelNumbers.Length
         ? _sourceLevelNumbers[waveIndex] : LevelNumber;
 
-    public bool SetMergeFiveLevels(bool enabled)
+    public bool SetMergeFiveLevels(bool enabled) => SetEncounterMode(enabled, allInOne: false);
+
+    public bool SetAllInOne(bool enabled) => SetEncounterMode(enabled || MergeFiveLevels, enabled);
+
+    private bool SetEncounterMode(bool merged, bool allInOne)
     {
         if (Phase != GamePhase.Building) return Reject("Choose whether to merge levels during preparation.");
-        if (MergeFiveLevels == enabled) return true;
-        int reward = enabled ? 25 : Balance.SurvivorIncome;
+        if (MergeFiveLevels == merged && AllInOne == allInOne) return true;
+        int reward = allInOne ? 75 : merged ? 25 : Balance.SurvivorIncome;
         if (!CanHoldSurvivorReward(Economy.Currency, Turrets.Count(turret => turret.Hp > 0), reward))
             return Reject("The wallet cannot hold the full surviving-tower reward.");
         try
         {
-            int span = enabled ? 5 : 1;
+            int span = merged ? 5 : 1;
             int next = checked(LevelNumber + span);
-            var encounter = PrepareEncounter(LevelNumber, enabled);
+            var encounter = PrepareEncounter(LevelNumber, merged, allInOne);
             // Validate the following preparation snapshot before selecting an option
             // that could otherwise fail while committing a victory.
             _ = PrepareEncounter(next, merged: false);
-            MergeFiveLevels = enabled;
+            MergeFiveLevels = merged;
+            AllInOne = allInOne;
             Level = encounter.Level;
             _sourceLevelNumbers = encounter.SourceLevels;
+            _allInOnePlan = encounter.CombinedPlan;
             _previewLevel = null;
             _nextEncounter = null;
             _nextSourceLevelNumbers = [];
@@ -41,20 +50,21 @@ public sealed partial class GameSession
         {
             return Reject($"Cannot prepare this level selection: {error.Message}");
         }
-        Message = enabled
-            ? $"Levels {LevelNumber}–{EndLevelNumber} merged. Victory pays 25 currency per surviving tower."
+        Message = allInOne
+            ? $"All in one: levels {LevelNumber}–{EndLevelNumber}, 5x spawn rate and final-wave equipment. Victory pays 75 currency per surviving tower (7.5x)."
+            : merged ? $"Levels {LevelNumber}–{EndLevelNumber} merged. Victory pays 25 currency per surviving tower."
             : $"Prepare level {LevelNumber}. Victory pays {Balance.SurvivorIncome} currency per surviving tower.";
         return true;
     }
 
-    private (LevelDefinition Level, int[] SourceLevels) PrepareEncounter(int firstLevel, bool merged)
+    private (LevelDefinition Level, int[] SourceLevels, WaveSpawnPlan? CombinedPlan) PrepareEncounter(int firstLevel, bool merged, bool allInOne = false)
     {
         int span = merged ? 5 : 1;
         int lastLevel = checked(firstLevel + (span - 1));
         if (!merged)
         {
             var normal = _levels.Get(firstLevel);
-            return (normal, Enumerable.Repeat(firstLevel, normal.Waves.Count).ToArray());
+            return (normal, Enumerable.Repeat(firstLevel, normal.Waves.Count).ToArray(), null);
         }
         var combined = new LevelDefinition
         {
@@ -69,7 +79,20 @@ public sealed partial class GameSession
             combined.Waves.AddRange(level.Waves);
             sourceLevels.AddRange(Enumerable.Repeat(sourceLevel, level.Waves.Count));
         }
-        return (combined, sourceLevels.ToArray());
+        if (!allInOne) return (combined, sourceLevels.ToArray(), null);
+        var plan = WaveSpawnPlanner.Combine(combined.Waves);
+        var finalWave = combined.Waves[^1];
+        combined.Name = $"All in one: levels {firstLevel}–{lastLevel}";
+        combined.Waves = [new WaveDefinition
+        {
+            SpawnInterval = finalWave.SpawnInterval / 5,
+            Groups = plan.Groups.Select(group => new ZombieGroup
+            {
+                Kind = group.Kind, Tier = group.Tier, Count = group.Count, Size = group.Size, IsBoss = group.IsBoss
+            }).ToList()
+        }];
+        LevelCatalog.Validate(combined);
+        return (combined, [lastLevel], plan);
     }
 
     private static bool CanHoldSurvivorReward(long currency, int towerCount, int rewardPerTower) =>
@@ -78,6 +101,8 @@ public sealed partial class GameSession
     private void ResetLevelMerging()
     {
         MergeFiveLevels = false;
+        AllInOne = false;
+        _allInOnePlan = null;
         _sourceLevelNumbers = [];
         _nextEncounter = null;
         _nextSourceLevelNumbers = [];

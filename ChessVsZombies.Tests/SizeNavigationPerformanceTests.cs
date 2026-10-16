@@ -50,6 +50,70 @@ public sealed class SizeNavigationPerformanceTests
         AssertField(field, "Fallback", fallbackCount, fallbackHash);
     }
 
+    // Captured from the pre-500-zombie-optimization Core assembly. The three
+    // scenarios cover untouched terrain, trenches/offset and paired crusts,
+    // and indexed towers with a larger excavation. Every Mega goal, breach,
+    // fallback destination, and equal-cost next-step choice is included.
+    [Theory]
+    [InlineData(0, 14352, "57EDD852CC9ACD9A1C6FCE8CCB6637905A33DEAADAFE51743E337DB428827F49", "50ABF54CCBB6D55C8B390B67B60EE07F7B415077A6611E7D496208C28A1AECAD")]
+    [InlineData(1, 14472, "983690BF6FF4CE0115ABA150C9C31B8C2A39808A47B2385C07B6710B93367A71", "30F50BFE35C8DEEB9FCE07769145D059FACB56B19E4388F30BB6DBC47BC54FFF")]
+    [InlineData(2, 14475, "A4C9B7EF0E339E54D1729CEC860372C7A9A6F1EC9F443F763D811E15C1F6BAEB", "ADCCF1AB0F7F357BFF781367E7914614C4A1BD22D8BF45AC49FA12F205731ACC")]
+    public void MegaFieldsRetainEveryPreOptimizationRoute(int scenario, int count, string routesHash, string fallbackHash)
+    {
+        var game = Scenario(scenario);
+        var build = typeof(GameSession).GetMethod("BuildSizedNavigation", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var field = build.Invoke(game, [ZombieSize.Mega])!;
+
+        AssertField(field, "Routes", count, routesHash);
+        AssertField(field, "Fallback", count, fallbackHash);
+    }
+
+    [Fact]
+    public void ReusingSizedScratchDoesNotMutatePreviouslyPublishedDirectFields()
+    {
+        var game = Scenario(0);
+        var build = typeof(GameSession).GetMethod("BuildSizedNavigation", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var kilo = build.Invoke(game, [ZombieSize.Kilo])!;
+
+        build.Invoke(game, [ZombieSize.Milli]);
+        Assert.True((bool)typeof(WorldGrid).GetMethod("Dig", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(game.World, [new Cell(8, 15, 8)])!);
+        build.Invoke(game, [ZombieSize.Mega]);
+
+        AssertField(kilo, "Routes", 15358, "DDBAE052CE224AC8CD403E02EAAB58C00F6FF47918E6080BE474A5CAD606EE31");
+        AssertField(kilo, "Fallback", 15358, "1A3B71F37D9A0E2B0305DE7C8AB9B89984E20849C6C111C2E319A067FC9D8DB5");
+    }
+
+    [Fact]
+    public void CachedSizedRebuildRefillsItsMapsWithTheSameRoutesAsAnIndependentBuild()
+    {
+        var game = Scenario(0);
+        var getRoute = typeof(GameSession).GetMethod("TryGetSizedRoute", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var cache = (IDictionary)typeof(GameSession).GetField("_sizeRoutes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(game)!;
+        var zombie = new Zombie { Size = ZombieSize.Mega };
+        object?[] arguments = [zombie, new Cell(0, 16, 0), default(Cell), true];
+        getRoute.Invoke(game, arguments);
+        var previous = cache[ZombieSize.Mega]!;
+        Assert.True((bool)typeof(WorldGrid).GetMethod("Dig", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(game.World, [new Cell(8, 15, 8)])!);
+
+        getRoute.Invoke(game, arguments);
+        var rebuilt = cache[ZombieSize.Mega]!;
+        var independent = typeof(GameSession).GetMethod("BuildSizedNavigation", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(game, [ZombieSize.Mega])!;
+
+        foreach (string property in new[] { "Routes", "Fallback" })
+        {
+            var cachedMap = (IDictionary<Cell, Cell>)rebuilt.GetType().GetProperty(property)!.GetValue(rebuilt)!;
+            var directMap = (IDictionary<Cell, Cell>)independent.GetType().GetProperty(property)!.GetValue(independent)!;
+            Assert.Same(previous.GetType().GetProperty(property)!.GetValue(previous), cachedMap);
+            Assert.NotSame(cachedMap, directMap);
+            Assert.Equal(directMap.Count, cachedMap.Count);
+            foreach (var pair in directMap) Assert.Equal(pair.Value, cachedMap[pair.Key]);
+        }
+    }
+
     private static void AssertField(object field, string property, int count, string expectedHash)
     {
         var routes = (IDictionary<Cell, Cell>)field.GetType().GetProperty(property)!.GetValue(field)!;

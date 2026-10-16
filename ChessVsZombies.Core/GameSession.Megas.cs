@@ -209,11 +209,13 @@ public sealed partial class GameSession
                 float slice = Math.Min(maximumSlice, remaining);
                 var from = flight.Position;
                 var to = from + flight.Velocity * slice - Vector3.UnitY * (MegaWeaponGravity * slice * slice * .5f);
-                if (FindMegaWeaponImpact(flight, from, to, out float fraction, out var contactTowers, out var contactTerrain))
+                if (FindMegaWeaponImpact(flight, from, flight.Velocity, slice,
+                    out float fraction, out var contactTowers, out var contactTerrain))
                 {
                     fraction = Math.Clamp(fraction, 0, 1);
                     float elapsed = slice * fraction;
-                    flight.Position = Vector3.Lerp(from, to, fraction);
+                    flight.Position = from + flight.Velocity * elapsed -
+                        Vector3.UnitY * (MegaWeaponGravity * elapsed * elapsed * .5f);
                     flight.Velocity -= Vector3.UnitY * (MegaWeaponGravity * elapsed);
                     flight.Age += elapsed;
                     remaining -= elapsed;
@@ -239,7 +241,8 @@ public sealed partial class GameSession
                     _megaFlights.Remove(flight);
                     // Surviving towers end the impact; they are not repeatedly
                     // attacked by a stationary weapon. Only real surviving parts scatter.
-                    flight.Position = Vector3.Lerp(from, to, Math.Max(0, fraction - .0001f));
+                    // Release the surviving parts at the physical contact. An
+                    // earlier chord position can leave them suspended above it.
                     if (flight.IsDebris) SettleMegaWeaponBlocks(flight);
                     else
                         foreach (var child in ScatterMegaWeapon(flight))
@@ -267,7 +270,7 @@ public sealed partial class GameSession
         return flight.Damage * share * (block.Hp / Balance.DirtBlockHp);
     }
 
-    private bool FindMegaWeaponImpact(MegaWeaponFlight flight, Vector3 from, Vector3 to, out float fraction,
+    private bool FindMegaWeaponImpact(MegaWeaponFlight flight, Vector3 from, Vector3 velocity, float duration, out float fraction,
         out List<(Turret Tower, HeldKiloBlock Block)> towers, out List<(Cell Cell, HeldKiloBlock Block)> terrain)
     {
         fraction = float.PositiveInfinity;
@@ -278,19 +281,16 @@ public sealed partial class GameSession
         foreach (var block in flight.Blocks)
         {
             var start = from + block.Offset;
-            var end = to + block.Offset;
-            var delta = end - start;
             var half = new Vector3(.49999f);
             foreach (var turret in Turrets)
                 if (turret.Hp > 0 && !flight.DamagedTowerIds.Contains(turret.Id) &&
-                    ProjectileBoxIntersection(start, delta, turret.Cell.Center - new Vector3(.5f) - half,
+                    MegaBallisticBoxIntersection(start, velocity, duration, turret.Cell.Center - new Vector3(.5f) - half,
                         turret.Cell.Center + new Vector3(.5f) + half, out var hit))
                 {
                     towerHits.Add((turret, block, hit));
                     fraction = Math.Min(fraction, hit);
                 }
-            var min = Vector3.Min(start, end) - half;
-            var max = Vector3.Max(start, end) + half;
+            MegaBallisticBounds(start, velocity, duration, half, out var min, out var max);
             for (int x = Math.Max(0, (int)MathF.Floor(min.X)); x <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(max.X)); x++)
                 for (int y = Math.Max(0, (int)MathF.Floor(min.Y)); y <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(max.Y)); y++)
                     for (int z = Math.Max(0, (int)MathF.Floor(min.Z)); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(max.Z)); z++)
@@ -298,7 +298,7 @@ public sealed partial class GameSession
                         var cell = new Cell(x, y, z);
                         if (World.GetMaterial(cell) == Material.Air) continue;
                         foreach (var bounds in SolidCollisionBounds(cell))
-                            if (ProjectileBoxIntersection(start, delta, bounds.Min - half, bounds.Max + half, out var hit))
+                            if (MegaBallisticBoxIntersection(start, velocity, duration, bounds.Min - half, bounds.Max + half, out var hit))
                             {
                                 terrainHits.Add((cell, block, hit));
                                 fraction = Math.Min(fraction, hit);

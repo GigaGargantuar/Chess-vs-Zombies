@@ -30,6 +30,8 @@ public sealed record BlockDrop([property: JsonRequired] Cell Cell, [property: Js
 
 public static class Balance
 {
+    private static readonly int[] GearHitPoints = [10, 20, 30, 50, 80, 130, 210];
+    private static readonly int[] WeaponAttacks = [2, 3, 5, 8, 13, 21, 34];
     public const int StartingCurrency = 1000, PullCost = 5, SurvivorIncome = 2;
     public const int TurretHp = 30, BaseAttack = 1, ZombieHp = 10, CoreHp = 200;
     public const int ShovelCost = 100, PickaxeCost = 1000;
@@ -74,7 +76,7 @@ public static class Balance
         Material.Osmium => 2100,
         _ => 0
     };
-    public static int GearHp(GearTier tier) => new[] { 10, 20, 30, 50, 80, 130, 210 }[(int)tier];
+    public static int GearHp(GearTier tier) => GearHitPoints[(int)tier];
     public static int LiquidCost(LiquidKind kind) => kind switch
     {
         LiquidKind.Water => 100,
@@ -82,7 +84,7 @@ public static class Balance
         LiquidKind.Lava => 1000,
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     };
-    public static int WeaponAttack(GearTier tier) => new[] { 2, 3, 5, 8, 13, 21, 34 }[(int)tier];
+    public static int WeaponAttack(GearTier tier) => WeaponAttacks[(int)tier];
     public static float LaneThreshold(int level) => Math.Max(0f, .5f - .05f * (Math.Max(0, level - 1) / 5));
 }
 
@@ -208,7 +210,16 @@ public sealed class Zombie
     // Assignments retain the old sequential total-HP contract independently of hit coverage.
     public float Hp
     {
-        get => _bodyHp <= 0 ? 0 : _bodyHp + ArmorPieces.Sum(piece => piece.Hp);
+        get
+        {
+            if (_bodyHp <= 0) return 0;
+            EnsureArmor();
+            // Enumerable.Sum(float selector) accumulates in double. Retain its
+            // exact rounding without boxing a List enumerator on every AI check.
+            double armorHp = 0;
+            foreach (var piece in _armor!) armorHp += piece.Hp;
+            return _bodyHp + (float)armorHp;
+        }
         set
         {
             if (!float.IsFinite(value) || value < 0) throw new ArgumentOutOfRangeException(nameof(value));

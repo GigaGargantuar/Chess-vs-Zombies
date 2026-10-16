@@ -66,7 +66,34 @@ public static class WaveSpawnPlanner
         return new(groups, budget, normalBudget, bossBudget);
     }
 
-    private static List<ZombieGroup> Allocate(IReadOnlyList<ZombieGroup> choices, int budget)
+    /// <summary>Spend every included wave's budgets with the final wave's equipment available immediately.</summary>
+    public static WaveSpawnPlan Combine(IReadOnlyList<WaveDefinition> waves)
+    {
+        if (waves.Count == 0) throw new ArgumentException("At least one wave is required.", nameof(waves));
+        var plans = waves.Select(Plan).ToArray();
+        long normalBudget = plans.Sum(plan => plan.NormalBudget);
+        long bossBudget = plans.Sum(plan => plan.BossBudget);
+        // A valid authored final wave may contain only bosses. Retain the latest
+        // normal composition in that case, alongside the final wave's boss gear.
+        var normalTypes = waves.LastOrDefault(wave => wave.Groups.Any(group => !group.IsBoss))?
+            .Groups.Where(group => !group.IsBoss).ToList() ?? [];
+        var bossTypes = waves[^1].Groups.Where(group => group.IsBoss).ToList();
+        if (bossTypes.Count == 0)
+        {
+            var gear = normalTypes.Where(group => group.Kind != ZombieKind.Basic).MaxBy(group => group.Tier);
+            foreach (var size in new[] { ZombieSize.Kilo, ZombieSize.Mega })
+                bossTypes.Add(new ZombieGroup
+                {
+                    Kind = gear == null ? ZombieKind.Basic : ZombieKind.Armored,
+                    Tier = gear?.Tier ?? GearTier.Wood, Size = size, IsBoss = true
+                });
+        }
+        var groups = Allocate(normalTypes, normalBudget);
+        groups.AddRange(Allocate(bossTypes, bossBudget));
+        return new(groups, checked(normalBudget + bossBudget), normalBudget, bossBudget);
+    }
+
+    private static List<ZombieGroup> Allocate(IReadOnlyList<ZombieGroup> choices, long budget)
     {
         if (choices.Count == 0 || budget == 0) return [];
         long cycleCost = choices.Sum(group => (long)group.Count * WaveSpawnPlan.BudgetCost(group));
@@ -76,7 +103,7 @@ public static class WaveSpawnPlanner
         for (int index = 0; index < choices.Count; index++)
         {
             // Count is a composition weight for budgeted definitions, never a free spawn allowance.
-            counts[index] = (int)((long)choices[index].Count * budget / cycleCost);
+            counts[index] = checked((int)((decimal)choices[index].Count * budget / cycleCost));
             target[index] = (double)choices[index].Count * budget / cycleCost;
             remaining -= (long)counts[index] * WaveSpawnPlan.BudgetCost(choices[index]);
         }
@@ -93,7 +120,7 @@ public static class WaveSpawnPlanner
                 largestDeficit = deficit;
             }
             if (selected < 0) break;
-            counts[selected]++;
+            counts[selected] = checked(counts[selected] + 1);
             remaining -= WaveSpawnPlan.BudgetCost(choices[selected]);
         }
         var result = new List<ZombieGroup>();
