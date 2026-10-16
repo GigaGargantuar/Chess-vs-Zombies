@@ -115,6 +115,9 @@ public class CombatTowerInteractionTests
         var template = new UpgradeTemplate { UseJumpPattern = true };
         template.JumpPattern.Clear();
         template.JumpPattern.Add(new Cell(0, 2, 0));
+        var jump = game.Economy.GetProgress(UpgradeKind.Jump);
+        jump.PullCount = 11;
+        jump.Available = 2;
         Assert.True(game.StartLevel());
 
         Assert.True(game.ApplyUpgradeTemplate(cell, template), game.Message);

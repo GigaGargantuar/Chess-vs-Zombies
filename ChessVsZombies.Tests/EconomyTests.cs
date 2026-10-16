@@ -121,37 +121,39 @@ public class EconomyTests
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
         Assert.True(economy.HasJump(knight));
-        Assert.Equal(24, economy.GetJumpBudget(knight));
+        var progress = economy.GetProgress(UpgradeKind.Jump);
+        progress.PullCount = 21;
+        progress.Available = 4;
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 1), new Cell(0, 2, -1)], out _));
         var accepted = knight.JumpPattern.ToArray();
         Assert.False(economy.TrySetJumpPattern(knight, [new Cell(1, 0, 0)], out _));
-        Assert.False(economy.TrySetJumpPattern(knight, [new Cell(3, 0, 0)], out _));
+        Assert.False(economy.TrySetJumpPattern(knight, [new Cell(4, 0, 0)], out _));
         Assert.False(economy.TrySetJumpPattern(knight, [], out _));
-        Assert.False(economy.TrySetJumpPattern(knight,
+        Assert.Equal(accepted, knight.JumpPattern);
+        Assert.True(economy.TrySetJumpPattern(knight,
             Enumerable.Range(-2, 5).SelectMany(x => Enumerable.Range(-2, 5)
                 .SelectMany(y => Enumerable.Range(-2, 5).Select(z => new Cell(x, y, z))))
                 .Where(offset => offset.Chebyshev == 2).Take(25), out _));
-        Assert.Equal(accepted, knight.JumpPattern);
+        Assert.Equal(25, knight.JumpPattern.Count);
+        Assert.Equal(2, progress.Available);
 
-        var progress = economy.GetProgress(UpgradeKind.Jump);
-        progress.PullCount = 11;
-        progress.Available = 1;
-        economy.Apply(knight, UpgradeKind.Jump);
-        Assert.Equal(28, economy.GetJumpBudget(knight));
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(3, 1, 0)], out _));
         Assert.Contains(new Cell(3, 1, 0), economy.GetAttackPattern(knight));
+        Assert.Equal(1, progress.Available);
     }
 
     [Fact]
-    public void NonJumpPiecesNeedAJumpComponentBeforeTheyCanUseAnEditedPattern()
+    public void NonJumpPiecesNeedEnoughMatchingJumpPointsAndCapForTheFormation()
     {
         var economy = new Economy();
         var turret = new Turret { Kind = PieceKind.Pawn };
         Assert.False(economy.TrySetJumpPattern(turret, [new Cell(2, 0, 0)], out _));
-        economy.GetProgress(UpgradeKind.Jump).PullCount = 1;
+        economy.GetProgress(UpgradeKind.Jump).PullCount = 11;
         economy.GetProgress(UpgradeKind.Jump).Available = 1;
-        economy.Apply(turret, UpgradeKind.Jump);
+        Assert.False(economy.TrySetJumpPattern(turret, [new Cell(2, 0, 0)], out _));
+        economy.GetProgress(UpgradeKind.Jump).Available = 2;
         Assert.True(economy.TrySetJumpPattern(turret, [new Cell(2, 0, 0)], out _));
+        Assert.Equal(0, economy.GetProgress(UpgradeKind.Jump).Available);
     }
 
     [Fact]

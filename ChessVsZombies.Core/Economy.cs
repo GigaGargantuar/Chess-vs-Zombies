@@ -31,6 +31,23 @@ public sealed class Economy
 
     public int GetAllocated(Turret turret, UpgradeKind kind) => turret.UpgradePoints.GetValueOrDefault(kind);
 
+    public int GetUpgradeCapacity(Turret turret, UpgradeKind kind)
+    {
+        if (!Enum.IsDefined(kind) || !Enum.IsDefined(turret.Kind) || IsInnatelyInfinite(turret.Kind, kind)) return 0;
+        int existing = GetAllocated(turret, kind);
+        return Math.Max(0, Math.Min(GetAllocationCap(kind), SupportedAllocationLimit(turret.Kind, kind)) - existing);
+    }
+
+    /// <summary>Checks every type before deducting any points from a batch purchase.</summary>
+    public bool TrySpendUpgradeBatch(IReadOnlyDictionary<UpgradeKind, long> costs)
+    {
+        ArgumentNullException.ThrowIfNull(costs);
+        if (costs.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value < 0 ||
+            pair.Value > _progress[pair.Key].Available)) return false;
+        foreach (var (kind, amount) in costs) _progress[kind].Available -= (int)amount;
+        return true;
+    }
+
     public EconomyState ExportState() => new()
     {
         Currency = Currency,
@@ -188,6 +205,50 @@ public sealed class Economy
             spent += added;
         }
 
+        List<Cell>? nextPattern = null;
+        if (template.UseJumpPattern)
+        {
+            if (template.JumpPattern is null)
+                skipped.Add("Jump pattern skipped: no pattern was provided");
+            else if (template.JumpPattern.Count == 0 || template.JumpPattern.Distinct().Count() != template.JumpPattern.Count ||
+                template.JumpPattern.Any(offset => !IsWithinJumpRange(offset, int.MaxValue)))
+                skipped.Add("Jump pattern skipped: destinations must be unique and at least two tiles from the origin");
+            else
+            {
+                long radius = JumpRules.FormationRadius(template.JumpPattern);
+                bool unchanged = turret.JumpPattern.Count == template.JumpPattern.Count &&
+                    turret.JumpPattern.ToHashSet().SetEquals(template.JumpPattern);
+                int allocated = GetAllocated(projected, UpgradeKind.Jump);
+                // Allocated Jump points already pay toward the radius. A smaller edited
+                // formation does not return previously spent points.
+                long shortfall = unchanged ? 0 : Math.Max(0, radius - allocated);
+                int freePoints = _progress[UpgradeKind.Jump].Available - additions.GetValueOrDefault(UpgradeKind.Jump);
+                int capSpace = GetAllocationCap(UpgradeKind.Jump) - allocated;
+                int statSpace = SupportedAllocationLimit(turret.Kind, UpgradeKind.Jump) - allocated;
+                if (shortfall > freePoints || shortfall > capSpace || shortfall > statSpace)
+                    skipped.Add($"Jump pattern skipped: radius {radius} needs {shortfall} more matching Jump points within this tower's collection cap");
+                else
+                {
+                    int extra = (int)shortfall;
+                    if (extra > 0) projected.UpgradePoints[UpgradeKind.Jump] = allocated + extra;
+                    if (!ValidateJumpPattern(projected, template.JumpPattern, out var candidate, out var patternError))
+                    {
+                        if (extra > 0) projected.UpgradePoints[UpgradeKind.Jump] = allocated;
+                        skipped.Add($"Jump pattern skipped: {patternError}");
+                    }
+                    else
+                    {
+                        nextPattern = candidate;
+                        if (extra > 0)
+                        {
+                            additions[UpgradeKind.Jump] = additions.GetValueOrDefault(UpgradeKind.Jump) + extra;
+                            spent += extra;
+                            applied.Add($"Jump formation +{extra}");
+                        }
+                    }
+                }
+            }
+        }
         int previousMaxHp, nextMaxHp;
         try
         {
@@ -195,7 +256,6 @@ public sealed class Economy
             nextMaxHp = GetMaxHp(projected);
             _ = GetAttack(projected);
             foreach (var kind in UpgradeKinds) _ = GetRange(projected, kind);
-            _ = GetJumpBudget(projected);
         }
         catch (OverflowException)
         {
@@ -203,16 +263,6 @@ public sealed class Economy
         }
         if (turret.Hp > previousMaxHp)
             return Reject("This piece's current HP exceeds its maximum.", out error);
-
-        List<Cell>? nextPattern = null;
-        if (template.UseJumpPattern)
-        {
-            if (template.JumpPattern is null)
-                skipped.Add("Jump pattern skipped: no pattern was provided");
-            else if (!ValidateJumpPattern(projected, template.JumpPattern, out var candidate, out var patternError))
-                skipped.Add($"Jump pattern skipped: {patternError}");
-            else nextPattern = candidate;
-        }
         if (nextPattern is null && HasJump(projected) &&
             !ValidateJumpPattern(projected, turret.JumpPattern, out _, out error)) return false;
         if (spent == 0 && nextPattern is null)
@@ -298,14 +348,8 @@ public sealed class Economy
         return distance <= GetRange(turret, kind);
     }
 
-    public int GetJumpBudget(Turret turret)
-    {
-        if (!HasJump(turret)) return 0;
-        return checked((turret.Kind == PieceKind.Knight ? 24 : 8) + 4 * (GetRange(turret, UpgradeKind.Jump) - 2));
-    }
-
     /// <summary>
-    /// Jump offsets are explicit: each destination costs one construction point.
+    /// Jump offsets are explicit and do not consume a point for each selected destination.
     /// Intermediate cells do not belong to a jump's attack pattern.
     /// </summary>
     public bool TrySetJumpPattern(Turret turret, IEnumerable<Cell> offsets, out string error)
@@ -322,7 +366,6 @@ public sealed class Economy
             return Reject("Allocate a jump point before applying a jump pattern to this piece.", out error);
 
         int range = GetRange(turret, UpgradeKind.Jump);
-        int budget = GetJumpBudget(turret);
         var unique = new HashSet<Cell>();
         foreach (var cell in offsets)
         {
@@ -331,8 +374,6 @@ public sealed class Economy
             if (!unique.Add(cell))
                 return Reject("Each jump destination must be unique.", out error);
             pattern.Add(cell);
-            if (pattern.Count > budget)
-                return Reject($"This piece has {budget} construction points; each destination costs one.", out error);
         }
         if (pattern.Count == 0)
             return Reject("Keep at least one jump destination in the pattern.", out error);

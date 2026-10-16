@@ -178,7 +178,7 @@ public sealed class CoreTargetingTests
 
     private static void ConfigureJump(GameSession game, Turret turret, Cell offset)
     {
-        int allocated = offset.Chebyshev - (turret.Kind == PieceKind.Knight ? 2 : 1);
+        int allocated = offset.Chebyshev;
         var progress = game.Economy.GetProgress(UpgradeKind.Jump);
         progress.PullCount = 1 + (allocated - 1) * Balance.DuplicatesPerRank;
         progress.Available = allocated;

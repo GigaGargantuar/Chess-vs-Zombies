@@ -35,7 +35,7 @@ public sealed class Knight3DPatternTests
             }
         Assert.True(expected.SetEquals(pattern));
         var economy = new Economy();
-        Assert.Equal(24, economy.GetJumpBudget(knight));
+        Assert.Equal(2, JumpRules.FormationRadius(pattern));
         Assert.True(economy.GetAttackPattern(knight).ToHashSet().SetEquals(expected));
     }
 
@@ -54,23 +54,19 @@ public sealed class Knight3DPatternTests
 
         Assert.True(economy.Apply(piece, UpgradeKind.Jump));
 
-        Assert.Equal(8, economy.GetJumpBudget(piece));
         Assert.Equal(2, economy.GetRange(piece, UpgradeKind.Jump));
     }
 
     [Fact]
-    public void KnightRangeExtensionsAddFourConstructionPointsToItsTwentyFourPointBase()
+    public void KnightFormationRadiusCanExpandWithoutASeparateDestinationCountCost()
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
-        economy.GetProgress(UpgradeKind.Jump).PullCount = 1;
-        economy.GetProgress(UpgradeKind.Jump).Available = 1;
-
-        Assert.True(economy.Apply(knight, UpgradeKind.Jump));
-
-        Assert.Equal(3, economy.GetRange(knight, UpgradeKind.Jump));
-        Assert.Equal(28, economy.GetJumpBudget(knight));
+        economy.GetProgress(UpgradeKind.Jump).PullCount = 21;
+        economy.GetProgress(UpgradeKind.Jump).Available = 3;
         Assert.True(economy.TrySetJumpPattern(knight, JumpRules.DefaultKnightPattern().Append(new Cell(3, 1, 0)), out _));
+        Assert.Equal(25, knight.JumpPattern.Count);
+        Assert.Equal(0, economy.GetProgress(UpgradeKind.Jump).Available);
     }
 
     [Theory]
