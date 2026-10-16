@@ -4,6 +4,7 @@ namespace ChessVsZombies.Core;
 
 public sealed partial class GameSession
 {
+    public ProjectileDiagnostics? ProjectileDiagnostics { get; set; }
     private readonly record struct MegaFlightSweep(float Start, float End, Vector3 From, Vector3 To, bool EndsAtImpact);
     private readonly Dictionary<MegaWeaponFlight, List<MegaFlightSweep>> _megaInterceptionSweeps = [];
     private float _megaInterceptionDuration;
@@ -11,12 +12,14 @@ public sealed partial class GameSession
 
     private void UpdateProjectiles(float dt)
     {
+        ProjectileDiagnostics?.BeginFrame(Projectiles);
         // Choose one simultaneous guard pose for this simulation interval.
         // Event subdivisions must not give a carrier a new pose for every shot.
         UpdateMegaHeldPoses();
         float remaining = dt;
         while (remaining > 0)
         {
+            if (ProjectileDiagnostics is { } diagnostics) diagnostics.Slices++;
             BeginMegaInterceptionFrame(remaining);
             float slice = remaining;
             if (_megaInterceptionSweeps.Count > 0)
@@ -57,6 +60,8 @@ public sealed partial class GameSession
 
     private float NextMegaInterceptionTime(Projectile projectile, float dt)
     {
+        if (ProjectileDiagnostics is { } diagnostics)
+        { diagnostics.ForecastRequests++; diagnostics.ForecastEvaluations++; }
         if (projectile.Kind == ShotKind.Melee || !float.IsFinite(projectile.Age) || !float.IsFinite(projectile.Duration) ||
             !ProjectilePointIsFinite(projectile.Origin) || !ProjectilePointIsFinite(projectile.Target)) return dt;
         float speedBound = Math.Max(projectile.GetTravelDirection(projectile.Age).Length(),
@@ -113,6 +118,7 @@ public sealed partial class GameSession
     private bool TryFindMegaFlightImpact(Vector3 from, Vector3 to, float startTime, float endTime,
         out float fraction, out MegaWeaponFlight? flightHit, out HeldKiloBlock? blockHit)
     {
+        if (ProjectileDiagnostics is { } diagnostics) diagnostics.FlightQueries++;
         fraction = float.PositiveInfinity;
         flightHit = null;
         blockHit = null;

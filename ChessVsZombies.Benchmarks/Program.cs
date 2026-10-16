@@ -14,6 +14,7 @@ static int Run(string[] arguments)
 {
     try
     {
+        if (arguments.Contains("--projectile-probe")) return ProjectileProbe.Run(arguments, Snapshot);
         var options = Options.Parse(arguments);
         if (options.Help)
         {

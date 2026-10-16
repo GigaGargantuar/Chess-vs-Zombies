@@ -292,6 +292,7 @@ public sealed partial class GameSession
 
     private bool TryFindKiloCoverImpact(Vector3 from, Vector3 to, out float fraction, out int carrierId, out int blockIndex)
     {
+        if (ProjectileDiagnostics is { } diagnostics) diagnostics.CoverQueries++;
         fraction = float.PositiveInfinity;
         carrierId = 0;
         blockIndex = -1;
