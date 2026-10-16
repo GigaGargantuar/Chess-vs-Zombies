@@ -424,8 +424,7 @@ public static class SaveStore
                 var jumpEquipped = saved.Upgrades.Contains(UpgradeKind.Jump);
                 var jumpRank = economy.GetProgress(UpgradeKind.Jump).Rank;
                 var range = jumpEquipped ? checked(jumpRank + 1) : 2;
-                var budget = jumpEquipped ? checked(8 + 4 * (jumpRank - 1)) : 8;
-                ValidateJumpPattern(saved.JumpPattern, range, budget);
+                ValidateJumpPattern(saved.JumpPattern, range);
             }
             else
             {
@@ -441,8 +440,7 @@ public static class SaveStore
                 if (saved.Hp > economy.GetMaxHp(turret))
                     throw new InvalidDataException("A saved piece has more HP than its upgraded maximum.");
                 _ = economy.GetAttack(turret);
-                ValidateJumpPattern(saved.JumpPattern, economy.HasJump(turret) ? economy.GetRange(turret, UpgradeKind.Jump) : 2,
-                    economy.HasJump(turret) ? economy.GetJumpBudget(turret) : 8);
+                ValidateJumpPattern(saved.JumpPattern, economy.HasJump(turret) ? economy.GetRange(turret, UpgradeKind.Jump) : 2);
             }
         }
 
@@ -604,8 +602,7 @@ public static class SaveStore
             saved.UpgradePoints = new Dictionary<UpgradeKind, int>(turret.UpgradePoints);
             saved.Upgrades = null;
             var jumpRange = economy.HasJump(turret) ? economy.GetRange(turret, UpgradeKind.Jump) : 2;
-            var jumpBudget = economy.HasJump(turret) ? economy.GetJumpBudget(turret) : 8;
-            var pattern = saved.JumpPattern.Where(offset => JumpDistance(offset) <= jumpRange).Take(jumpBudget).ToList();
+            var pattern = saved.JumpPattern.Where(offset => JumpDistance(offset) <= jumpRange).ToList();
             if (pattern.Count == 0) pattern = new Turret().JumpPattern.ToList();
             if (!saved.JumpPattern.SequenceEqual(pattern)) adjustedPatterns++;
             saved.JumpPattern = pattern;
@@ -743,10 +740,10 @@ public static class SaveStore
         File.Copy(path, backup);
     }
 
-    private static void ValidateJumpPattern(List<Cell> pattern, int range, int budget)
+    private static void ValidateJumpPattern(List<Cell> pattern, int range)
     {
-        if (pattern.Count < 1 || pattern.Count > budget || pattern.Distinct().Count() != pattern.Count)
-            throw new InvalidDataException("A saved jump pattern is empty, duplicated, or over its construction budget.");
+        if (pattern.Count < 1 || pattern.Distinct().Count() != pattern.Count)
+            throw new InvalidDataException("A saved jump pattern is empty or contains duplicate destinations.");
         foreach (var offset in pattern)
         {
             long distance = JumpDistance(offset);

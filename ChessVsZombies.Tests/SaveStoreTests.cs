@@ -29,8 +29,8 @@ public class SaveStoreTests
             var knight = Assert.Single(original.Turrets);
             foreach (var kind in new[] { UpgradeKind.HP, UpgradeKind.Jump })
             {
-                original.Economy.GetProgress(kind).PullCount = 11;
-                original.Economy.GetProgress(kind).Available = 2;
+                original.Economy.GetProgress(kind).PullCount = kind == UpgradeKind.Jump ? 21 : 11;
+                original.Economy.GetProgress(kind).Available = kind == UpgradeKind.Jump ? 3 : 2;
                 Assert.True(original.Economy.Apply(knight, kind));
             }
             Assert.True(original.Economy.TrySetJumpPattern(knight, [new Cell(3, 1, 0), new Cell(-2, 0, 1)], out _));

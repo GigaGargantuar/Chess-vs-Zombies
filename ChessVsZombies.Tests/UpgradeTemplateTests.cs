@@ -116,7 +116,6 @@ public class UpgradeTemplateTests
         Seed(economy, UpgradeKind.Jump, 11, 2);
         Assert.True(economy.TryApplyTemplate(turret, Template((UpgradeKind.Jump, points)), out _));
         Assert.Equal(range, economy.GetRange(turret, UpgradeKind.Jump));
-        Assert.Equal((kind == PieceKind.Knight ? 24 : 8) + 4 * (range - 2), economy.GetJumpBudget(turret));
     }
 
     [Fact]
@@ -124,6 +123,7 @@ public class UpgradeTemplateTests
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
+        Seed(economy, UpgradeKind.Jump, 11, 2);
         var before = knight.JumpPattern.ToArray();
         var template = new UpgradeTemplate { UseJumpPattern = true };
         template.JumpPattern.Clear();
@@ -208,6 +208,7 @@ public class UpgradeTemplateTests
         Assert.Contains("Jump: 2 skipped (inventory)", economy.LastMessage);
         Assert.Contains("Jump pattern skipped", economy.LastMessage);
 
+        Seed(economy, UpgradeKind.Jump, 21, 2);
         template.Points.Clear();
         template.JumpPattern = [new Cell(3, 0, 0)];
         Assert.True(economy.TryApplyTemplate(turret, template, out error), error);
