@@ -1,0 +1,47 @@
+name: Publish Demo v1.1
+
+on:
+  push:
+    branches:
+      - release/demo-2026-10-16
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: f0d24179ae00fe9e3fdf3e25c85c2cae98fc9b40
+          path: source
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.426
+      - name: Test release source
+        run: dotnet test source/ChessVsZombies.sln --configuration Release --verbosity minimal
+      - name: Publish Windows x64 build
+        run: >-
+          dotnet publish source/ChessVsZombies/ChessVsZombies.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          --output publish -p:PublishSingleFile=false -p:PublishTrimmed=false
+          -p:DebugType=None -p:DebugSymbols=false --verbosity minimal
+      - name: Package with player instructions and notices
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p prior/extracted
+          gh release download Demo --repo GigaGargantuar/Chess-vs-Zombies --pattern ChessVsZombies-Playtest-2026-10-14-win-x64.zip --dir prior
+          python3 -m zipfile -e prior/ChessVsZombies-Playtest-2026-10-14-win-x64.zip prior/extracted
+          python3 .github/release_package.py
+      - name: Publish new release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release create Demo-v1.1 out/ChessVsZombies-Playtest-2026-10-16-win-x64.zip
+          --repo GigaGargantuar/Chess-vs-Zombies
+          --target f0d24179ae00fe9e3fdf3e25c85c2cae98fc9b40
+          --title "Demo v1.1"
+          --notes-file .github/release-assets/RELEASE-NOTES.txt

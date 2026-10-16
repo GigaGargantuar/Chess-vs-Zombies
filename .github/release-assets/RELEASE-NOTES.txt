@@ -1,0 +1,9 @@
+Windows x64 playable demo (self-contained .NET 8; no SDK needed). Extract the ZIP and run ChessVsZombies.exe. Keep Assets and Levels beside the executable. A working OpenGL driver is required.
+
+New in this build:
+- Apply typed turret upgrades across the aimed turret or all turrets. Spend now buys the affordable requested points once. Queue full waits for every matching point type, then gives three unpaused game seconds to cancel before buying the whole batch.
+- Edit jump formations in a full-screen 3D view. Orbit with middle-drag, zoom with the wheel, change height with Y controls or Page Up/Page Down, and click to add or remove destinations. Formation cost follows the farthest destination radius; previously allocated Jump points count toward it.
+
+Read START-HERE.txt in the extracted folder for controls, saves, and feedback instructions. Existing releases remain available.
+
+Source: f0d24179ae00fe9e3fdf3e25c85c2cae98fc9b40. The solution passed 1,330 tests and built with zero warnings in the Linux development environment. The editor was launched and checked with software OpenGL on Linux. The Windows executable was packaged and checked but has not been launched here.
