@@ -80,7 +80,7 @@ public sealed partial class GameSession
                         hpAfter = remainingBlocks.FirstOrDefault(block => block.BlockIndex == blockIndex)?.Hp ?? 0;
                     ProjectileDiagnostics?.Contact(projectile, startAge + sampleStart + (sampleEnd - sampleStart) * coverFraction,
                         "cover", carrierId, blockIndex, null, null, hpBefore, hpAfter);
-                    var carrier = Zombies.FirstOrDefault(candidate => candidate.Id == carrierId && candidate.Hp > 0);
+                    var carrier = Zombies.FirstOrDefault(candidate => candidate.Id == carrierId && candidate.BodyHp > 0);
                     if (carrier != null && projectile.Damage > 0 && float.IsFinite(projectile.Damage))
                     {
                         var previousAge = startAge + dt * (sample - 1) / steps;

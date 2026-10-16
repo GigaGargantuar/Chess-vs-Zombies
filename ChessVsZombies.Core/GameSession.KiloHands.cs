@@ -13,7 +13,7 @@ public sealed partial class GameSession
         float nearest = float.PositiveInfinity;
         foreach (var kilo in Zombies)
         {
-            if (kilo.Hp <= 0 || kilo.Size != ZombieSize.Kilo || IsKiloUsingBuckets(kilo) ||
+            if (kilo.BodyHp <= 0 || kilo.Size != ZombieSize.Kilo || IsKiloUsingBuckets(kilo) ||
                 !_kiloBlocks.TryGetValue(kilo.Id, out var blocks) || blocks.Count == 0) continue;
             // Clumped carriers share guard work, but each hand must still meet
             // the real ray inside its owner's reserved body volume. Distant
