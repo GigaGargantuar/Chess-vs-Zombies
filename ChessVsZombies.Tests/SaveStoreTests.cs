@@ -701,7 +701,7 @@ public class SaveStoreTests
     }
 
     [Fact]
-    public void AttachedHangingFortificationsRemainAtTheirSavedCells()
+    public void UnsupportedFortificationClustersSettleTogetherAndKeepTheirSavedCells()
     {
         WithSavePath(path =>
         {
@@ -710,12 +710,12 @@ public class SaveStoreTests
             Assert.True(game.BuildBarrier(new Cell(12, 16, 12)));
             Assert.True(game.BuildBarrier(new Cell(12, 17, 12)));
             Assert.True(game.Dig(new Cell(12, 15, 12)));
-            Assert.Equal(new[] { 16, 17 }, game.World.Barriers.Select(barrier => barrier.Cell.Y).Order());
+            Assert.Equal(new[] { 15, 16 }, game.World.Barriers.Select(barrier => barrier.Cell.Y).Order());
 
             SaveStore.Save(game, path);
             Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
             Assert.NotNull(restored);
-            Assert.Equal(new[] { 16, 17 }, restored.World.Barriers.Select(barrier => barrier.Cell.Y).Order());
+            Assert.Equal(new[] { 15, 16 }, restored.World.Barriers.Select(barrier => barrier.Cell.Y).Order());
             Assert.Equal(Material.Air, restored.World.GetNaturalMaterial(new Cell(12, 15, 12)));
         });
     }

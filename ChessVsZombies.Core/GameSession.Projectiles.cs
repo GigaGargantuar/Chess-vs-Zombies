@@ -150,9 +150,24 @@ public sealed partial class GameSession
                         crustFace = null;
                     }
                 }
+        var segmentMin = Vector3.Min(from, to);
+        var segmentMax = Vector3.Max(from, to);
         foreach (var candidate in Zombies)
         {
-            if (candidate.Hp <= 0) continue;
+            if (candidate.BodyHp <= 0) continue;
+            // Most shots only pass a few nearby bodies. Reject separated
+            // bounds before solving exact contacts, without changing list/tie
+            // order. Small bodies retain their half-block projectile sphere;
+            // their narrower movement bounds would miss valid hits here.
+            var halfExtents = candidate.IsGiant ? candidate.BodyHalfExtents : new Vector3(.5f * candidate.BodyScale);
+            // Keep tangencies conservative despite float rounding in the exact
+            // sphere discriminant and endpoint calculations on the 32-cube board.
+            var padding = new Vector3(.01f);
+            var bodyMin = candidate.Position - halfExtents - padding;
+            var bodyMax = candidate.Position + halfExtents + padding;
+            if (segmentMax.X < bodyMin.X || segmentMin.X > bodyMax.X ||
+                segmentMax.Y < bodyMin.Y || segmentMin.Y > bodyMax.Y ||
+                segmentMax.Z < bodyMin.Z || segmentMin.Z > bodyMax.Z) continue;
             bool intersects = candidate.IsGiant
                 ? ProjectileBoxIntersection(from, delta, candidate.Position - candidate.BodyHalfExtents, candidate.Position + candidate.BodyHalfExtents, out var hit)
                 : ProjectileBodyIntersection(from, delta, candidate.Position, out hit, candidate.BodyScale);

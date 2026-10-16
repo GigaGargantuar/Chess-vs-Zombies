@@ -126,6 +126,7 @@ public sealed partial class GameSession
             current = next;
         }
 
+        if (CanEscapePillar(zombie)) return true;
         if (zombie.CarriedBlocks + GetKiloConstructionBlocks(zombie) == 0) return false;
         visited.Clear();
         current = zombie.Cell;

@@ -31,6 +31,25 @@ public sealed class Economy
 
     public int GetAllocated(Turret turret, UpgradeKind kind) => turret.UpgradePoints.GetValueOrDefault(kind);
 
+    /// <summary>Limits explicit Jump purchases to the enabled formation's unpaid cost.</summary>
+    public int GetTemplatePointRequest(Turret turret, UpgradeTemplate template, UpgradeKind kind)
+    {
+        int requested = template.Points.GetValueOrDefault(kind);
+        if (kind == UpgradeKind.Jump && template.UseJumpPattern &&
+            GetJumpPatternPointCost(turret, template.JumpPattern) is { } cost)
+            return Math.Min(requested, cost);
+        return requested;
+    }
+
+    /// <summary>Already allocated points pay toward the whole pattern; unchanged patterns need no purchase.</summary>
+    public int? GetJumpPatternPointCost(Turret turret, IReadOnlyList<Cell>? pattern)
+    {
+        if (pattern is null || pattern.Count == 0 || pattern.Distinct().Count() != pattern.Count ||
+            pattern.Any(offset => !IsWithinJumpRange(offset, int.MaxValue))) return null;
+        if (HasJump(turret) && turret.JumpPattern.Count == pattern.Count && turret.JumpPattern.ToHashSet().SetEquals(pattern)) return 0;
+        return (int)Math.Max(0, JumpRules.FormationRadius(pattern) - Math.Max(0, GetAllocated(turret, UpgradeKind.Jump)));
+    }
+
     public int GetUpgradeCapacity(Turret turret, UpgradeKind kind)
     {
         if (!Enum.IsDefined(kind) || !Enum.IsDefined(turret.Kind) || IsInnatelyInfinite(turret.Kind, kind)) return 0;
@@ -175,7 +194,7 @@ public sealed class Economy
         long spent = 0;
         foreach (var kind in UpgradeKinds)
         {
-            int requested = template.Points.GetValueOrDefault(kind);
+            int requested = GetTemplatePointRequest(turret, template, kind);
             int existing = GetAllocated(turret, kind);
             if (existing > 0) projected.UpgradePoints[kind] = existing;
             if (requested == 0) continue;
@@ -216,7 +235,7 @@ public sealed class Economy
             else
             {
                 long radius = JumpRules.FormationRadius(template.JumpPattern);
-                bool unchanged = turret.JumpPattern.Count == template.JumpPattern.Count &&
+                bool unchanged = HasJump(turret) && turret.JumpPattern.Count == template.JumpPattern.Count &&
                     turret.JumpPattern.ToHashSet().SetEquals(template.JumpPattern);
                 int allocated = GetAllocated(projected, UpgradeKind.Jump);
                 // Allocated Jump points already pay toward the radius. A smaller edited
@@ -329,23 +348,30 @@ public sealed class Economy
     /// piece as a lob. A destination may belong to both a ray and a configured jump.
     /// </summary>
     public bool IsJumpOffset(Turret turret, Cell offset) =>
-        IsWithinJumpRange(offset, GetRange(turret, UpgradeKind.Jump)) && turret.JumpPattern.Contains(offset);
+        IsJumpOffsetAtRange(turret, offset, GetRange(turret, UpgradeKind.Jump));
 
-    public bool IsDirectionalOffset(Turret turret, Cell offset)
+    internal bool IsJumpOffsetAtRange(Turret turret, Cell offset, int range) =>
+        IsWithinJumpRange(offset, range) && turret.JumpPattern.Contains(offset);
+
+    public bool IsDirectionalOffset(Turret turret, Cell offset) =>
+        TryGetDirectionalOffset(offset, out var kind, out long distance) && distance <= GetRange(turret, kind);
+
+    internal bool TryGetDirectionalOffset(Cell offset, out UpgradeKind kind, out long distance)
     {
+        kind = UpgradeKind.Orthogonal;
         // Use long here so arbitrary editor or future save-file values cannot overflow Abs.
         long x = Math.Abs((long)offset.X), y = Math.Abs((long)offset.Y), z = Math.Abs((long)offset.Z);
-        long distance = Math.Max(x, Math.Max(y, z));
+        distance = Math.Max(x, Math.Max(y, z));
         if (distance == 0 || (x != 0 && x != distance) || (y != 0 && y != distance) ||
             (z != 0 && z != distance)) return false;
         int axes = (x == 0 ? 0 : 1) + (y == 0 ? 0 : 1) + (z == 0 ? 0 : 1);
-        var kind = axes switch
+        kind = axes switch
         {
             1 => UpgradeKind.Orthogonal,
             2 => UpgradeKind.PlaneDiagonal,
             _ => UpgradeKind.SpaceDiagonal
         };
-        return distance <= GetRange(turret, kind);
+        return true;
     }
 
     /// <summary>

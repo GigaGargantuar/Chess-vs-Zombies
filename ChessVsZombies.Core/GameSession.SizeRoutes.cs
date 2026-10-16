@@ -53,17 +53,24 @@ public sealed partial class GameSession
         // partial obsidian in them; there is no need to allocate collision
         // iterators and test the same slab geometry for every incoming edge.
         var occupied = shape.IsGiant || size == ZombieSize.Milli ? workspace.Occupied : null;
+        var occupiedZRows = occupied != null ? workspace.OccupiedZRows : null;
         if (occupied != null)
             for (int x = 0; x < WorldGrid.Size; x++)
                 for (int y = 0; y < WorldGrid.Size; y++)
+                {
+                    uint row = 0;
                     for (int z = 0; z < WorldGrid.Size; z++)
                     {
                         var cell = new Cell(x, y, z);
                         var material = World.GetMaterial(cell);
-                        occupied[Index(cell)] = material == Material.Core ? (byte)2 :
+                        byte solid = material == Material.Core ? (byte)2 :
                             size == ZombieSize.Milli && material == Material.Obsidian ? (byte)3 :
                             material != Material.Air || HasLiveIndexedTurret(cell) ? (byte)1 : (byte)0;
+                        occupied[Index(cell)] = solid;
+                        if (solid != 0) row |= 1u << z;
                     }
+                    occupiedZRows![x * WorldGrid.Size + y] = row;
+                }
         bool Segment(Vector3 from, Vector3 to, HashSet<Cell>? breaches) => shape.IsGiant && occupied != null
             ? TryGiantGridSegmentBreaches(from, to, shape.GridFootprint, breaches, occupied)
             : TrySizedSegmentBreaches(from, to, shape, breaches);
@@ -75,10 +82,10 @@ public sealed partial class GameSession
                 byte solid = occupied[Index(cell)];
                 return solid == 0 || solid == 3 && IsBodyClear(shape.StandAt(cell), shape);
             }
+            uint zMask = GridZRangeMask(cell.Z, cell.Z + shape.GridFootprint);
             for (int x = cell.X; x < cell.X + shape.GridFootprint; x++)
                 for (int y = cell.Y; y < cell.Y + shape.GridFootprint; y++)
-                    for (int z = cell.Z; z < cell.Z + shape.GridFootprint; z++)
-                        if (occupied[Index(new Cell(x, y, z))] != 0) return false;
+                    if ((occupiedZRows![x * WorldGrid.Size + y] & zMask) != 0) return false;
             return true;
         }
         for (int x = 0; x < WorldGrid.Size; x++)
@@ -154,7 +161,7 @@ public sealed partial class GameSession
                     if (occupied != null)
                     {
                         bool valid = shape.IsGiant
-                            ? TryGiantGridStepCost(from, destination, shape.GridFootprint, occupied, gridCosts!, referenceAttack, out float cost)
+                            ? TryGiantGridStepCostWithRows(from, destination, shape.GridFootprint, occupied, occupiedZRows, gridCosts!, referenceAttack, out float cost)
                             : TryMilliGridStepCost(from, destination, occupied, gridCosts!, referenceAttack, out cost);
                         if (valid) edges[slot] = cost;
                     }
@@ -417,6 +424,10 @@ public sealed partial class GameSession
         => TryGiantGridStepCost(from, to, 2, occupied, costs, attack, out cost);
 
     private bool TryGiantGridStepCost(Cell from, Cell to, int footprint, byte[] occupied, float[] costs, int attack, out float cost)
+        => TryGiantGridStepCostWithRows(from, to, footprint, occupied, null, costs, attack, out cost);
+
+    private bool TryGiantGridStepCostWithRows(Cell from, Cell to, int footprint, byte[] occupied,
+        uint[]? occupiedZRows, float[] costs, int attack, out float cost)
     {
         // Scan the two boxes in their original x/y/z order, skipping only the
         // overlap already inspected by the first sweep. The ordinary grid
@@ -428,8 +439,8 @@ public sealed partial class GameSession
         var firstMin = new Cell(Math.Min(from.X, waypoint.X), Math.Min(from.Y, waypoint.Y), Math.Min(from.Z, waypoint.Z));
         var firstMax = new Cell(Math.Max(from.X, waypoint.X) + footprint,
             Math.Max(from.Y, waypoint.Y) + footprint, Math.Max(from.Z, waypoint.Z) + footprint);
-        if (!AppendGiantStepSweep(from, waypoint, footprint, occupied, breached, ref count, firstMin, firstMin) ||
-            waypoint != to && !AppendGiantStepSweep(waypoint, to, footprint, occupied, breached, ref count, firstMin, firstMax))
+        if (!AppendGiantStepSweepWithRows(from, waypoint, footprint, occupied, occupiedZRows, breached, ref count, firstMin, firstMin) ||
+            waypoint != to && !AppendGiantStepSweepWithRows(waypoint, to, footprint, occupied, occupiedZRows, breached, ref count, firstMin, firstMax))
         {
             cost = 0;
             return false;
@@ -444,6 +455,39 @@ public sealed partial class GameSession
             total += cached;
         }
         cost = (from.Y == to.Y ? 1 : 2) + (float)total;
+        return true;
+    }
+
+    private static uint GridZRangeMask(int min, int max) => min >= max ? 0 :
+        (uint.MaxValue << min) & (uint.MaxValue >> (WorldGrid.Size - max));
+
+    private static bool AppendGiantStepSweepWithRows(Cell from, Cell to, int footprint, byte[] occupied,
+        uint[]? occupiedZRows, Span<int> breached, ref int count, Cell excludedMin, Cell excludedMax)
+    {
+        if (occupiedZRows is null)
+            return AppendGiantStepSweep(from, to, footprint, occupied, breached, ref count, excludedMin, excludedMax);
+        int minX = Math.Min(from.X, to.X), minY = Math.Min(from.Y, to.Y), minZ = Math.Min(from.Z, to.Z);
+        int maxX = Math.Max(from.X, to.X) + footprint, maxY = Math.Max(from.Y, to.Y) + footprint,
+            maxZ = Math.Max(from.Z, to.Z) + footprint;
+        uint zMask = GridZRangeMask(minZ, maxZ);
+        uint excludedZMask = GridZRangeMask(excludedMin.Z, excludedMax.Z);
+        for (int x = minX; x < maxX; x++)
+            for (int y = minY; y < maxY; y++)
+            {
+                int row = x * WorldGrid.Size + y;
+                uint solids = occupiedZRows[row] & zMask;
+                if (x >= excludedMin.X && x < excludedMax.X && y >= excludedMin.Y && y < excludedMax.Y)
+                    solids &= ~excludedZMask;
+                // Clearing the lowest bit retains the original ascending z order,
+                // including both core rejection and first-seen breach summation.
+                while (solids != 0)
+                {
+                    int index = row * WorldGrid.Size + BitOperations.TrailingZeroCount(solids);
+                    if (occupied[index] == 2) return false;
+                    breached[count++] = index;
+                    solids &= solids - 1;
+                }
+            }
         return true;
     }
 

@@ -8,7 +8,7 @@ public class ArmorHitTests
 {
     [Theory]
     [InlineData(ShotKind.Pellet, DamageKind.Pierce, ArmorSlot.Helmet)]
-    [InlineData(ShotKind.Lob, DamageKind.Blunt, ArmorSlot.Chestplate)]
+    [InlineData(ShotKind.Lob, DamageKind.Blunt, ArmorSlot.Helmet)]
     public void FrontHitUsesShieldThenMatchingArmorAndBypassesTheOtherPiece(ShotKind shot, DamageKind kind, ArmorSlot survivor)
     {
         var zombie = Armored();
@@ -23,7 +23,7 @@ public class ArmorHitTests
 
     [Theory]
     [InlineData(ShotKind.Pellet, DamageKind.Pierce, ArmorSlot.Chestplate)]
-    [InlineData(ShotKind.Lob, DamageKind.Blunt, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Lob, DamageKind.Blunt, ArmorSlot.Chestplate)]
     public void RearHitUsesOnlyTheMatchingArmorAndThenBody(ShotKind shot, DamageKind kind, ArmorSlot removed)
     {
         var zombie = Armored();

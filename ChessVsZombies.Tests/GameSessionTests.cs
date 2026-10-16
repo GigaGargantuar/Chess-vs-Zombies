@@ -238,7 +238,7 @@ public class GameSessionTests
     }
 
     [Fact]
-    public void AttachedBlocksKeepAnOverheadTowerSupportedAfterTheBottomBlockIsDestroyed()
+    public void AnUnsupportedBlockClusterAndItsOverheadTowerFallAfterTheBottomBlockIsDestroyed()
     {
         var game = NewSession(new WaveDefinition
         {
@@ -258,8 +258,9 @@ public class GameSessionTests
 
         game.Update(.1f);
 
-        Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(14, 16, 15)));
-        Assert.Equal(new Cell(14, 20, 15), Assert.Single(game.Turrets).Cell);
+        Assert.Equal(Material.Barrier, game.World.GetMaterial(new Cell(14, 16, 15)));
+        Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(14, 19, 15)));
+        Assert.Equal(new Cell(14, 19, 15), Assert.Single(game.Turrets).Cell);
         Assert.Equal(currency, game.Economy.Currency);
         game.DamageZombie(zombie, 1000);
         game.Update(.01f);

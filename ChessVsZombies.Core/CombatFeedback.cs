@@ -19,12 +19,25 @@ public sealed class CombatFeedback
 
     public IReadOnlyList<DamageHit> Hits { get; }
 
+    private bool enabled = true;
+    public bool Enabled
+    {
+        get => enabled;
+        set
+        {
+            if (enabled == value) return;
+            enabled = value;
+            Reset();
+        }
+    }
+
     /// <summary>White-flash intensity, refreshed by each impact or new continuous-damage bucket.</summary>
     public float GetFlash(int zombieId) => _flashes.TryGetValue(zombieId, out var remaining)
         ? Math.Clamp(remaining / FlashDuration, 0, 1) : 0;
 
     internal void Record(int zombieId, Vector3 position, float amount, DamageKind kind)
     {
+        if (!enabled) return;
         if (!float.IsFinite(amount) || amount <= 0 || !Enum.IsDefined(kind) ||
             !float.IsFinite(position.X) || !float.IsFinite(position.Y) || !float.IsFinite(position.Z)) return;
         // Only damage-over-time families aggregate. Distinct physical impacts retain

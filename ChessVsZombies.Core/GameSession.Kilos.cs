@@ -295,6 +295,7 @@ public sealed partial class GameSession
         fraction = float.PositiveInfinity;
         carrierId = 0;
         blockIndex = -1;
+        if (_kiloBlocks.Count == 0) return false;
         // Projectile sampling is a hot path: use the actual held blocks directly,
         // without allocating the renderer's public cover snapshots for every ray.
         foreach (var zombie in Zombies)

@@ -66,11 +66,12 @@ public class StructuralSupportTests
     }
 
     [Fact]
-    public void SideConnectedBlocksKeepAHoleAndAnIsolatedSurvivorFalls()
+    public void BlocksAttachedToAGroundedSideColumnKeepAHoleUntilThatConnectionIsSevered()
     {
         var game = Blocks();
         Assert.True(game.BuildBarrier(new Cell(12, 16, 12)));
         Assert.True(game.BuildBarrier(new Cell(12, 17, 12)));
+        Assert.True(game.BuildBarrier(new Cell(13, 16, 12)));
         Assert.True(game.BuildBarrier(new Cell(13, 17, 12)));
         game.World.GetBarrier(new Cell(12, 17, 12))!.Hp = 37;
         Assert.True(game.Remove(new Cell(12, 16, 12)));
@@ -78,21 +79,28 @@ public class StructuralSupportTests
         Assert.NotNull(game.World.GetBarrier(new Cell(12, 17, 12)));
         Assert.NotNull(game.World.GetBarrier(new Cell(13, 17, 12)));
         Assert.True(game.Remove(new Cell(13, 17, 12)));
-        var survivor = Assert.Single(game.World.Barriers);
+        Assert.Equal(2, game.World.Barriers.Count());
+        var survivor = game.World.GetBarrier(new Cell(12, 16, 12));
+        Assert.NotNull(survivor);
         Assert.Equal(new Cell(12, 16, 12), survivor.Cell);
         Assert.Equal(37, survivor.Hp);
     }
 
     [Fact]
-    public void ABlockAttachedOnlyAboveRemainsSuspendedUntilThatNeighborIsRemoved()
+    public void ABlockHangingFromAGroundedCeilingFallsWhenThatConnectionIsSevered()
     {
         var game = Blocks();
         for (int y = 16; y <= 18; y++) Assert.True(game.BuildBarrier(new Cell(12, y, 12)));
-        Assert.True(game.Remove(new Cell(12, 16, 12)));
-        Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(12, 16, 12)));
-        Assert.NotNull(game.World.GetBarrier(new Cell(12, 17, 12)));
-        Assert.True(game.Remove(new Cell(12, 18, 12)));
-        Assert.Equal(new Cell(12, 16, 12), Assert.Single(game.World.Barriers).Cell);
+        Assert.True(game.BuildBarrier(new Cell(13, 18, 12)));
+        Assert.True(game.BuildBarrier(new Cell(14, 18, 12)));
+        Assert.True(game.BuildBarrier(new Cell(14, 17, 12)));
+        game.World.GetBarrier(new Cell(14, 17, 12))!.Hp = 37;
+        Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(14, 16, 12)));
+        Assert.NotNull(game.World.GetBarrier(new Cell(14, 17, 12)));
+        Assert.True(game.Remove(new Cell(14, 18, 12)));
+        Assert.Null(game.World.GetBarrier(new Cell(14, 17, 12)));
+        Assert.Equal(37, game.World.GetBarrier(new Cell(14, 16, 12))!.Hp);
+        Assert.NotNull(game.World.GetBarrier(new Cell(13, 18, 12)));
     }
 
     [Fact]

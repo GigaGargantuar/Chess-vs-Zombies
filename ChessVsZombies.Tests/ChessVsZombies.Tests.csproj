@@ -14,5 +14,6 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <ProjectReference Include="../ChessVsZombies.Core/ChessVsZombies.Core.csproj" />
+    <Compile Include="../ChessVsZombies/Rendering/TurretVisualCache.cs" Link="Rendering/TurretVisualCache.cs" />
   </ItemGroup>
 </Project>

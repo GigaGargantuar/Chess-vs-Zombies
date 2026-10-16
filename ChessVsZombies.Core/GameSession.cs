@@ -18,6 +18,8 @@ public sealed partial class GameSession
     private int _settledTopologyRevision = -1;
     private readonly Dictionary<Cell, Cell>[] _routes = [[], [], [], []];
     private readonly Dictionary<Cell, Turret> _turretsByCell = [];
+    private readonly Dictionary<Cell, Turret> _simulationTurretsByCell = [];
+    private bool _simulationTurretLookupActive;
     private readonly Dictionary<int, Cell> _stepOrigins = [];
     private readonly Dictionary<int, float> _jumpHeights = [];
     private readonly Dictionary<int, float> _fallStartHeights = [];
@@ -39,6 +41,7 @@ public sealed partial class GameSession
     public BlockInventory Inventory { get; } = new();
     public FallAnimations Falls { get; } = new();
     public CombatFeedback Feedback { get; } = new();
+    public SimulationProfile? Profile { get; set; }
     public UpgradeTemplate UpgradeTemplate { get; private set; } = new();
     public List<Turret> Turrets { get; } = [];
     public List<Zombie> Zombies { get; } = [];
@@ -72,25 +75,27 @@ public sealed partial class GameSession
         _random = new Random(seed);
         _levels = levels ?? new LevelCatalog(Path.Combine(AppContext.BaseDirectory, "Levels"));
         Economy = new Economy(seed);
-        Liquids = new LiquidSystem(World);
+        Liquids = new LiquidSystem(World) { IsTurretCell = cell => TrySelectTurret(cell) != null };
         Level = _levels.Get(1);
     }
 
     public void Reset()
     {
         World = new WorldGrid();
-        Liquids = new LiquidSystem(World);
+        Liquids = new LiquidSystem(World) { IsTurretCell = cell => TrySelectTurret(cell) != null };
         foreach (var kind in Enum.GetValues<LiquidKind>()) _liquidInventory[kind] = 0;
         Economy.Reset();
         Inventory.Reset();
         Feedback.Reset();
         UpgradeTemplate = new UpgradeTemplate();
         QueuedUpgradeBatch = null;
+        RestoreFormationTemplate(null);
         Turrets.Clear();
         Zombies.Clear();
         Projectiles.Clear();
         Waves.Clear();
         _turretsByCell.Clear();
+        _simulationTurretsByCell.Clear();
         _stepOrigins.Clear();
         _jumpHeights.Clear();
         _fallStartHeights.Clear();
@@ -128,11 +133,33 @@ public sealed partial class GameSession
 
     public Turret? TrySelectTurret(Cell cell)
     {
+        if (_simulationTurretLookupActive)
+        {
+            if (!_simulationTurretsByCell.TryGetValue(cell, out var indexed)) return null;
+            if (indexed.Hp > 0 && indexed.Cell == cell) return indexed;
+            // A hit can retire the indexed first piece before settlement. Keep
+            // the original first-living-match behavior even for duplicate cells.
+            foreach (var turret in Turrets)
+                if (turret.Cell == cell && turret.Hp > 0)
+                {
+                    _simulationTurretsByCell[cell] = turret;
+                    return turret;
+                }
+            _simulationTurretsByCell.Remove(cell);
+            return null;
+        }
         // Keep list order and public-state changes visible without allocating a
         // captured predicate for every support, collision, and liquid query.
         foreach (var turret in Turrets)
             if (turret.Cell == cell && turret.Hp > 0) return turret;
         return null;
+    }
+
+    private void RefreshSimulationTurretLookup()
+    {
+        _simulationTurretsByCell.Clear();
+        foreach (var turret in Turrets)
+            if (turret.Hp > 0) _simulationTurretsByCell.TryAdd(turret.Cell, turret);
     }
     public bool HasTowerSupport(Cell cell) => WorldGrid.IsInside(cell) && cell.Y > 0 &&
         (World.GetMaterial(cell + new Cell(0, -1, 0)) != Material.Air || TrySelectTurret(cell + new Cell(0, -1, 0)) != null);
@@ -141,7 +168,7 @@ public sealed partial class GameSession
     {
         var min = new Vector3(cell.X, cell.Y, cell.Z);
         var max = min + Vector3.One;
-        return Zombies.Any(zombie => zombie.Hp > 0 &&
+        return Zombies.Any(zombie => zombie.BodyHp > 0 &&
             BoundsOverlap(min, max, zombie.Position - zombie.BodyHalfExtents, zombie.Position + zombie.BodyHalfExtents));
     }
 
@@ -177,6 +204,7 @@ public sealed partial class GameSession
             Economy = Economy.ExportState(),
             UpgradeTemplate = SavedUpgradeTemplate.FromTemplate(UpgradeTemplate),
             QueuedUpgradeBatch = CopyUpgradeBatch(QueuedUpgradeBatch),
+            SavedFormation = SavedFormation == null ? null : SavedFormationTemplate.FromTemplate(SavedFormation),
             Inventory = Inventory.ExportState(),
             PendingBlockDrops = _pendingBlockDrops.ToList(),
             ReturningZombies = _returningZombies.Count == 0 ? null : _returningZombies.Select(zombie => zombie.Copy()).ToList(),
@@ -208,6 +236,7 @@ public sealed partial class GameSession
         Economy.ImportState(state.Economy);
         UpgradeTemplate = state.UpgradeTemplate!.ToTemplate();
         QueuedUpgradeBatch = CopyUpgradeBatch(state.QueuedUpgradeBatch);
+        RestoreFormationTemplate(state.SavedFormation == null ? null : FormationTemplate.FromSaved(state.SavedFormation));
         var inventory = state.Inventory!;
         Inventory.Restore(inventory);
         _pendingBlockDrops.AddRange(state.PendingBlockDrops!);
@@ -228,9 +257,6 @@ public sealed partial class GameSession
         foreach (var placement in state.TerrainPlacements!) World.RestoreTerrainPlacement(placement.Cell, placement.Material);
         foreach (var damage in state.DamagedTerrain!) World.RestoreTerrainHp(damage.Cell, damage.Hp);
         foreach (var barrier in state.Barriers) World.AddBarrier(barrier.Cell, barrier.Content!.Value, barrier.Hp);
-        Liquids.RestoreState(state.Liquids!);
-        Buckets.RestoreState(state.Buckets ?? new BucketSystemState());
-        RestoreMegaWeaponFlights(state.MegaWeaponFlights ?? []);
         foreach (var kind in Enum.GetValues<LiquidKind>()) _liquidInventory[kind] = state.LiquidInventory![kind];
         foreach (var saved in state.Turrets)
         {
@@ -241,22 +267,22 @@ public sealed partial class GameSession
             Turrets.Add(turret);
             _nextId = Math.Max(_nextId, saved.Id + 1);
         }
+        Liquids.RestoreState(state.Liquids!);
+        Buckets.RestoreState(state.Buckets ?? new BucketSystemState());
+        RestoreMegaWeaponFlights(state.MegaWeaponFlights ?? []);
         _topologyRevision++;
         Message = $"Restored checkpoint. Prepare level {LevelNumber}.";
     }
 
     public bool Deploy(PieceKind kind, Cell cell)
     {
-        if (!CanUseTowers()) return false;
-        if (!Enum.IsDefined(kind)) return Reject("Choose a valid piece.");
-        if (!WorldGrid.IsTurretZone(cell)) return Reject("Pieces belong inside the 30-cube zone, outside the entire 8-cube block enclosure.");
-        if (!IsEmpty(cell)) return Reject("That cell is occupied.");
-        if (IsOccupiedByZombie(cell)) return Reject("A zombie is occupying that cell.");
-        if (!HasTowerSupport(cell)) return Reject("Pieces need a solid block or another living tower directly below them.");
-        if (Phase == GamePhase.Combat && !CanHoldSurvivorReward((long)Economy.Currency - Balance.PieceCost(kind),
-            Turrets.Count(turret => turret.Hp > 0) + 1, SurvivorRewardPerTower))
-            return Reject("The wallet cannot hold this tower's eventual survivor reward.");
+        if (DeployPlacementError(kind, cell) is { } error) return Reject(error);
         if (!Economy.TrySpend(Balance.PieceCost(kind))) return Reject(Economy.LastMessage);
+        if (!Liquids.TryDisplaceLiquid(cell, LiquidSystem.TurretCapacityUnits))
+        {
+            Economy.Credit(Balance.PieceCost(kind));
+            return Reject("There is no room for the displaced liquid.");
+        }
         Turrets.Add(new Turret { Id = _nextId++, Kind = kind, Cell = cell });
         _topologyRevision++;
         Message = $"Deployed {kind} at {cell}.";
@@ -299,15 +325,15 @@ public sealed partial class GameSession
 
     public bool CanPourLiquid(Cell cell, LiquidKind kind, int units = Balance.LiquidPurchaseUnits) =>
         Phase == GamePhase.Building && Enum.IsDefined(kind) && units > 0 && WorldGrid.IsInside(cell) &&
-        !WorldGrid.IsCore(cell) && TrySelectTurret(cell) == null && _liquidInventory.GetValueOrDefault(kind) >= units &&
+        !WorldGrid.IsCore(cell) && _liquidInventory.GetValueOrDefault(kind) >= units &&
         Liquids.CanAdd(cell, kind, units);
 
     public bool PourLiquid(Cell cell, LiquidKind kind, int units = Balance.LiquidPurchaseUnits)
     {
         if (!CanBuild()) return false;
         if (!Enum.IsDefined(kind) || units <= 0) return Reject("Choose a liquid and a positive quantity to pour.");
-        if (!WorldGrid.IsInside(cell) || WorldGrid.IsCore(cell) || TrySelectTurret(cell) != null)
-            return Reject("Pour into an unoccupied battlefield cell.");
+        if (!WorldGrid.IsInside(cell) || WorldGrid.IsCore(cell))
+            return Reject("Pour into a battlefield cell outside the core.");
         if (_liquidInventory[kind] < units) return Reject($"Not enough {kind.ToString().ToLowerInvariant()} in inventory.");
         if (!Liquids.TryAdd(cell, kind, units)) return Reject("The cell cannot hold the complete liquid quantity.");
         _liquidInventory[kind] -= units;
@@ -317,12 +343,13 @@ public sealed partial class GameSession
 
     public bool BuildBarrier(Cell cell, Material material = Material.Dirt)
     {
-        if (!CanBuild()) return false;
-        if (!Balance.IsTerrainMaterial(material)) return Reject("Choose a terrain material from inventory.");
-        if (!WorldGrid.IsFortificationZone(cell)) return Reject("Blocks can be built in the core enclosure and turret area, outside the core and spawn shell.");
-        if (!IsEmpty(cell)) return Reject("That cell is occupied.");
-        if (!World.HasOrthogonalBlockSupport(cell)) return Reject("Blocks need a supporting block on one of their six faces.");
+        if (BarrierPlacementError(cell, material) is { } error) return Reject(error);
         if (!Inventory.TrySpend(material)) return Reject($"No {material.ToString().ToLowerInvariant()} blocks available. Excavate some first.");
+        if (!Liquids.TryDisplaceLiquid(cell))
+        {
+            Inventory.Add(material);
+            return Reject("There is no room for the displaced liquid.");
+        }
         if (!World.AddBarrier(cell, material))
         {
             Inventory.Add(material);
@@ -434,19 +461,40 @@ public sealed partial class GameSession
     public void Update(float deltaSeconds)
     {
         if (!float.IsFinite(deltaSeconds) || deltaSeconds <= 0) return;
+        // Public lists, HP, and cells may change between calls. Capture their
+        // current order once, then share exact cell lookups across this update.
+        bool previousLookup = _simulationTurretLookupActive;
+        try
+        {
+            RefreshSimulationTurretLookup();
+            _simulationTurretLookupActive = true;
+            UpdateCore(deltaSeconds);
+            // Run once per rendered update so a delayed frame cannot construct
+            // the entire queue before its individual towers can be seen.
+            UpdateFormationRestore(deltaSeconds);
+        }
+        finally
+        {
+            _simulationTurretLookupActive = previousLookup;
+            if (previousLookup) RefreshSimulationTurretLookup();
+        }
+    }
+
+    private void UpdateCore(float deltaSeconds)
+    {
         if (Phase == GamePhase.Defeat) { Feedback.Update(deltaSeconds); Falls.Update(deltaSeconds, World, Turrets); return; }
         // Substeps preserve collision and wave boundaries after a slow rendered frame.
         while (deltaSeconds > 0 && Phase != GamePhase.Defeat)
         {
             var step = Math.Min(deltaSeconds, .05f);
-            Feedback.Update(step);
-            Falls.Update(step, World, Turrets);
-            SettleDefenses();
-            ResolveBlockDrops();
-            Liquids.Update(step, cell => TrySelectTurret(cell) != null);
-            Buckets.Update(step, cell => TrySelectTurret(cell) != null);
-            SettleDefenses();
-            UpdateUpgradeBatch(step);
+            using (Profile?.Measure("Feedback")) Feedback.Update(step);
+            using (Profile?.Measure("Falls")) Falls.Update(step, World, Turrets);
+            using (Profile?.Measure("Settlement")) SettleDefenses();
+            using (Profile?.Measure("Drops")) ResolveBlockDrops();
+            using (Profile?.Measure("Liquids")) Liquids.Update(step);
+            using (Profile?.Measure("Buckets")) Buckets.Update(step);
+            using (Profile?.Measure("Settlement")) SettleDefenses();
+            using (Profile?.Measure("UpgradeBatch")) UpdateUpgradeBatch(step);
             if (Phase == GamePhase.Combat) Step(step);
             else UpdateProjectiles(step);
             deltaSeconds -= step;
@@ -462,7 +510,7 @@ public sealed partial class GameSession
     public void DamageZombie(Zombie zombie, float damage, DamageKind kind = DamageKind.Blunt,
         ShotKind? shot = null, Vector3? incomingDirection = null)
     {
-        if (damage <= 0 || !float.IsFinite(damage) || !Enum.IsDefined(kind) || shot.HasValue && !Enum.IsDefined(shot.Value) || zombie.Hp <= 0) return;
+        if (damage <= 0 || !float.IsFinite(damage) || !Enum.IsDefined(kind) || shot.HasValue && !Enum.IsDefined(shot.Value) || zombie.BodyHp <= 0) return;
         if (kind == DamageKind.Thermal)
             damage = zombie.ConsumeHeatProtection(damage / Balance.LavaDamagePerSecond) * Balance.LavaDamagePerSecond;
         ApplyZombieDamage(zombie, damage, kind, shot, incomingDirection);
@@ -471,7 +519,7 @@ public sealed partial class GameSession
     private void ApplyZombieDamage(Zombie zombie, float damage, DamageKind kind,
         ShotKind? shot = null, Vector3? incomingDirection = null)
     {
-        if (damage <= 0 || zombie.Hp <= 0) return;
+        if (damage <= 0 || zombie.BodyHp <= 0) return;
         var before = zombie.Hp;
         var bodyBefore = zombie.BodyHp;
         var armorBefore = zombie.ArmorPieces.Sum(piece => piece.Hp);
@@ -486,11 +534,11 @@ public sealed partial class GameSession
             if (shot is ShotKind.Pellet or ShotKind.Lob && incomingDirection is { } incoming)
                 FaceKiloTowardShot(zombie, incoming);
         }
-        if (zombie.Hp > 0 && (sankInLava != zombie.SinksIn(LiquidKind.Lava) || sankInMercury != zombie.SinksIn(LiquidKind.Mercury)))
+        if (zombie.BodyHp > 0 && (sankInLava != zombie.SinksIn(LiquidKind.Lava) || sankInMercury != zombie.SinksIn(LiquidKind.Mercury)))
             ClearZombieMovement(zombie);
         // Body death discards any remaining armor from the wave's live HP pool.
         var actual = before - zombie.Hp;
-        if (zombie.Hp <= 0) { QueueDeathBlock(zombie); SpillZombieBucket(zombie); HandleKiloDeath(zombie); }
+        if (zombie.BodyHp <= 0) { QueueDeathBlock(zombie); SpillZombieBucket(zombie); HandleKiloDeath(zombie); }
         if (zombie.WaveIndex >= 0 && zombie.WaveIndex < Waves.Count)
         {
             var wave = Waves[zombie.WaveIndex];
@@ -498,7 +546,7 @@ public sealed partial class GameSession
         }
         zombie.DamageSinceLaneSwitch += actual;
         var threshold = zombie.MaxHp * Balance.LaneThreshold(GetSourceLevelNumber(zombie.WaveIndex));
-        if (zombie.Hp > 0 && zombie.DamageSinceLaneSwitch >= threshold)
+        if (zombie.BodyHp > 0 && zombie.DamageSinceLaneSwitch >= threshold)
         {
             zombie.Lane = (zombie.Lane + 1 + _random.Next(3)) % 4;
             zombie.DamageSinceLaneSwitch = 0;
@@ -510,7 +558,7 @@ public sealed partial class GameSession
     {
         for (var i = 1; i < Waves.Count; i++)
             if (!Waves[i].Started && Waves[i - 1].Started && (Waves[i - 1].DamageTaken >= Waves[i - 1].TotalHp * .5f ||
-                Waves[i - 1].Spawned >= Waves[i - 1].TotalCount && !Zombies.Any(zombie => zombie.Hp > 0 && zombie.WaveIndex == i - 1)))
+                Waves[i - 1].Spawned >= Waves[i - 1].TotalCount && !Zombies.Any(zombie => zombie.BodyHp > 0 && zombie.WaveIndex == i - 1)))
             {
                 Waves[i].Started = true;
                 Message = $"Wave {i + 1}/{Waves.Count} is spawning: half of the previous wave's HP pool is gone.";
@@ -528,32 +576,35 @@ public sealed partial class GameSession
         }
 
         if (_navigationRevision != _topologyRevision || _navigationWorldRevision != World.Revision) RebuildNavigation();
-        UpdateTurrets(dt);
-        UpdateProjectiles(dt);
-        UpdateRetreatBehavior(dt);
-        UpdateCoverGroups(dt);
+        using (Profile?.Measure("Turrets")) UpdateTurrets(dt);
+        using (Profile?.Measure("Projectiles")) UpdateProjectiles(dt);
+        using (Profile?.Measure("Retreat")) UpdateRetreatBehavior(dt);
+        using (Profile?.Measure("CoverGroups")) UpdateCoverGroups(dt);
         // Resolve exposure before batched Kilo actions so a dead carrier cannot
         // grab material or launch an ally earlier in this same simulation slice.
+        using (Profile?.Measure("LiquidExposure"))
+            foreach (var zombie in Zombies)
+                if (zombie.BodyHp > 0) UpdateLiquidExposure(zombie, dt);
+        using (Profile?.Measure("Kilos")) UpdateKilos(dt);
+        using (Profile?.Measure("Megas")) UpdateMegas(dt);
+        using (Profile?.Measure("ZombieMovement"))
+            foreach (var zombie in Zombies.ToArray())
+                if (zombie.BodyHp > 0) UpdateZombie(zombie, dt);
         foreach (var zombie in Zombies)
-            if (zombie.Hp > 0) UpdateLiquidExposure(zombie, dt);
-        UpdateKilos(dt);
-        UpdateMegas(dt);
-        foreach (var zombie in Zombies.ToArray())
-            if (zombie.Hp > 0) UpdateZombie(zombie, dt);
-        foreach (var zombie in Zombies)
-            if (zombie.Hp <= 0)
+            if (zombie.BodyHp <= 0)
             {
                 QueueDeathBlock(zombie);
                 SpillZombieBucket(zombie);
                 HandleKiloDeath(zombie);
                 Falls.CancelZombie(zombie);
                 _fallStartHeights.Remove(zombie.Id);
+                _pillarDepartures.Remove(zombie.Id);
                 _stepOrigins.Remove(zombie.Id);
                 _jumpHeights.Remove(zombie.Id);
                 _liquidDestinations.Remove(zombie.Id);
                 _liquidOrigins.Remove(zombie.Id);
             }
-        Zombies.RemoveAll(zombie => zombie.Hp <= 0);
+        Zombies.RemoveAll(zombie => zombie.BodyHp <= 0);
         ResolveBlockDrops();
 
         if (CoreHp <= 0)
@@ -635,34 +686,36 @@ public sealed partial class GameSession
             if (turret.Hp <= 0) continue;
             turret.Cooldown = Math.Max(0, turret.Cooldown - dt);
             if (turret.Cooldown > 0) continue;
-            var target = SelectTurretTarget(turret, out var shot, out var nearest);
-            if (target == null) continue;
-            var aim = GetTurretAimPoint(turret, target, shot);
-            turret.Cooldown = shot == ShotKind.Lob ? 1f : .7f;
-            if (shot == ShotKind.Melee)
+            if (World.GetObsidian(turret.Cell) != null)
             {
-                DamageZombie(target, Economy.GetAttack(turret), DamageKind.Blunt, ShotKind.Melee, aim - turret.Cell.Center);
-                // A brief strike segment is also visible to the renderer.
+                // Encased pieces spend their normal attack cadence clearing the
+                // shell, even when there is no enemy in their firing pattern.
+                turret.Cooldown = turret.Kind == PieceKind.Knight ? 1f : .7f;
+                if (World.DamageObsidian(turret.Cell, Economy.GetAttack(turret))) SettleDefenses();
+                continue;
+            }
+            var volley = SelectTurretVolley(turret);
+            if (volley.Count == 0) continue;
+            turret.Cooldown = volley.Any(attack => attack.Kind == ShotKind.Lob) ? 1f : .7f;
+            int damage = Economy.GetAttack(turret);
+            foreach (var attack in volley)
+            {
+                if (attack.Kind == ShotKind.Melee)
+                {
+                    DamageZombie(attack.Target, damage, DamageKind.Blunt, ShotKind.Melee, attack.Aim - turret.Cell.Center);
+                    // A brief strike segment is also visible to the renderer.
+                }
                 Projectiles.Add(new Projectile
                 {
                     Origin = turret.Cell.Center,
-                    Target = aim,
-                    TargetId = target.Id,
-                    Damage = 0,
-                    Kind = ShotKind.Melee,
-                    Duration = .13f
+                    Target = attack.Aim,
+                    TargetId = attack.Target.Id,
+                    Damage = attack.Kind == ShotKind.Melee ? 0 : damage,
+                    Kind = attack.Kind,
+                    Duration = attack.Kind == ShotKind.Melee ? .13f :
+                        Math.Max(.12f, MathF.Sqrt(attack.DistanceSquared) / (attack.Kind == ShotKind.Lob ? 5f : 16f))
                 });
             }
-            else
-                Projectiles.Add(new Projectile
-                {
-                    Origin = turret.Cell.Center,
-                    Target = aim,
-                    TargetId = target.Id,
-                    Damage = Economy.GetAttack(turret),
-                    Kind = shot,
-                    Duration = Math.Max(.12f, MathF.Sqrt(nearest) / (shot == ShotKind.Lob ? 5f : 16f))
-                });
         }
     }
 
@@ -689,8 +742,10 @@ public sealed partial class GameSession
         {
             Falls.CancelZombie(zombie);
             _fallStartHeights.Remove(zombie.Id);
+            _pillarDepartures.Remove(zombie.Id);
             return;
         }
+        if (TryUpdatePillarDeparture(zombie, dt)) return;
         if (IsZombieRetreating(zombie) && TryCompleteRetreat(zombie, dt)) return;
         if (zombie.NextCell is { } movingTo)
         {
@@ -787,7 +842,7 @@ public sealed partial class GameSession
         }
         Falls.CancelZombie(zombie);
         CompleteZombieFall(zombie, floorHeight);
-        if (zombie.Hp <= 0) return;
+        if (zombie.BodyHp <= 0) return;
         if (zombie.Position.Y < floorHeight - .0001f)
         {
             // A new block can fit below the collision body while its normal
@@ -823,10 +878,11 @@ public sealed partial class GameSession
             return;
         }
         if (!retreating && !yieldingToBuilder && ShouldWaitInCover(zombie)) return;
-        if (!retreatStep && !yieldingToBuilder && !TryGetBucketRoute(zombie, current, out next) && !TryGetCoverJoinStep(zombie, current, out next) &&
-            !TryGetSizedRoute(zombie, current, out next, includeFallback: false) &&
-            !(zombie.Size == ZombieSize.Standard && _routes[zombie.Lane % 4].TryGetValue(current, out next)) &&
-            !(AvailableConstructionBlocks(zombie) > 0 && TryGetBridgeStep(current, out next) && CanUseSizedBridgeStep(zombie, current, next)) &&
+        bool foundRoute = retreatStep || yieldingToBuilder || TryGetBucketRoute(zombie, current, out next) || TryGetCoverJoinStep(zombie, current, out next) ||
+            TryGetSizedRoute(zombie, current, out next, includeFallback: false) ||
+            zombie.Size == ZombieSize.Standard && _routes[zombie.Lane % 4].TryGetValue(current, out next);
+        if (!foundRoute && TryEscapePillar(zombie)) return;
+        if (!foundRoute && !(AvailableConstructionBlocks(zombie) > 0 && TryGetBridgeStep(current, out next) && CanUseSizedBridgeStep(zombie, current, next)) &&
             !TryGetSizedRoute(zombie, current, out next) &&
             !_spentRoutes.TryGetValue(current, out next))
         {
@@ -838,7 +894,11 @@ public sealed partial class GameSession
         }
         // A spent builder waits at the best real reachable position until the
         // terrain changes; it cannot execute a route requiring another block.
-        if (next == current) return;
+        if (next == current)
+        {
+            if (!yieldingToBuilder) TryEscapePillar(zombie);
+            return;
+        }
         if (!HasZombieSupport(next, zombie: zombie))
         {
             TryBuildBridge(zombie, current, next);
@@ -864,6 +924,10 @@ public sealed partial class GameSession
         if (TryFindBodyObstacle(zombie.Position, waypoint, out var bodyBlocker, zombie: zombie) ||
             TryFindBodyObstacle(waypoint, zombie.StandAt(next), out bodyBlocker, zombie: zombie))
         {
+            // A wide body can have a nominal stair route through the pillar's
+            // top layer. Prefer a clear departure to mining that same footing.
+            if (next.Y < current.Y && bodyBlocker.Y + 1 <= zombie.Position.Y - zombie.StandingHeight + .011f &&
+                TryEscapePillar(zombie)) return;
             AttackObstacle(zombie, bodyBlocker);
             return;
         }
@@ -882,9 +946,8 @@ public sealed partial class GameSession
     private void CompleteZombieFall(Zombie zombie, float landingHeight)
     {
         if (!_fallStartHeights.Remove(zombie.Id, out var startHeight)) return;
-        var fallenBlocks = MathF.Floor(startHeight - landingHeight + .0001f);
-        if (fallenBlocks >= Balance.FallDamageMinimumBlocks)
-            DamageZombie(zombie, (fallenBlocks - Balance.FallDamageMinimumBlocks + 1) * Balance.FallDamagePerBlock, DamageKind.Blunt);
+        var damage = ZombieFallDamage(startHeight, landingHeight);
+        if (damage > 0) DamageZombie(zombie, damage, DamageKind.Blunt);
     }
 
     private void UpdateLiquidExposure(Zombie zombie, float dt)
@@ -919,7 +982,7 @@ public sealed partial class GameSession
         if (chemical > 0) ApplyZombieDamage(zombie, chemical * dt, DamageKind.Chemical);
         // Multiple simultaneous heat sources consume one second of protection per
         // second exposed, while their damage rates add after protection expires.
-        if (thermal > 0 && zombie.Hp > 0)
+        if (thermal > 0 && zombie.BodyHp > 0)
             ApplyZombieDamage(zombie, thermal * zombie.ConsumeHeatProtection(dt), DamageKind.Thermal);
     }
 
@@ -1071,6 +1134,7 @@ public sealed partial class GameSession
         _jumpHeights.Remove(zombie.Id);
         _liquidDestinations.Remove(zombie.Id);
         _liquidOrigins.Remove(zombie.Id);
+        _pillarDepartures.Remove(zombie.Id);
     }
 
     private static bool FaceNearbyCore(Zombie zombie)
@@ -1175,7 +1239,10 @@ public sealed partial class GameSession
     private bool HasSolidFooting(Vector3 position, Zombie? zombie = null) => TrySolidFloor(position, out var height, zombie) &&
         Math.Abs(position.Y - height) <= .011f;
 
-    private bool TrySolidFloor(Vector3 position, out float height, Zombie? zombie = null)
+    private bool TrySolidFloor(Vector3 position, out float height, Zombie? zombie = null) =>
+        TrySolidFloorIgnoringCell(position, out height, zombie, null);
+
+    private bool TrySolidFloorIgnoringCell(Vector3 position, out float height, Zombie? zombie, Cell? ignoredCell)
     {
         // A body can land on a bank while its center is over the hole. Inspect
         // the whole footprint so the descent target agrees with body collision.
@@ -1187,6 +1254,7 @@ public sealed partial class GameSession
                 for (var y = Math.Min((int)MathF.Floor(position.Y), WorldGrid.Size - 1); y >= 0; y--)
                 {
                     var cell = new Cell(x, y, z);
+                    if (cell == ignoredCell) continue;
                     float? top = null;
                     if (World.GetObsidian(cell) is { } crust)
                     {
@@ -1402,6 +1470,16 @@ public sealed partial class GameSession
                 SettleDefenses();
             }
         }
+        else if (turret != null && World.GetObsidian(cell) is { } shell)
+        {
+            var face = shell.Parts.MinBy(part => Vector3.DistanceSquared(contactPosition ?? zombie.Position,
+                Vector3.Clamp(contactPosition ?? zombie.Position, part.Min, part.Max)))!.Face;
+            if (World.DamageObsidianPart(cell, face, zombie.Attack))
+            {
+                ShatterObsidian(cell);
+                SettleDefenses();
+            }
+        }
         else if (turret != null)
         {
             turret.Hp -= zombie.Attack;
@@ -1448,34 +1526,42 @@ public sealed partial class GameSession
 
     private void SettleDefenses()
     {
+        // Settlement moves and removes pieces while querying the same cells.
+        // Use the live list during that operation, then publish its final order.
+        bool previousLookup = _simulationTurretLookupActive;
+        _simulationTurretLookupActive = false;
+        try
+        {
+            ResetStructuralFalls();
+            SettleDefensesCore();
+        }
+        finally
+        {
+            ResetStructuralFalls();
+            if (previousLookup) RefreshSimulationTurretLookup();
+            _simulationTurretLookupActive = previousLookup;
+        }
+    }
+
+    private void SettleDefensesCore()
+    {
         // Health is public state and can be changed outside AttackObstacle. Retire
         // every dead piece before trusting the topology/settlement revision cache.
         if (Turrets.RemoveAll(turret => turret.Hp <= 0) > 0) _topologyRevision++;
         Falls.Prune(World, Turrets);
         if (_settledWorldRevision == World.Revision && _settledTopologyRevision == _topologyRevision) return;
-        // Blocks retain holes, overhangs, and ceilings whenever any orthogonal block
-        // occupies a neighboring cell. Towers rely only on vertical support and settle bottom first.
+        // Only a connection to grounded structure can hold up a block cluster.
+        // Once detached, side contacts do not interrupt its complete descent.
         var movedSolids = new HashSet<Cell>();
         var movedCrusts = new List<ObsidianCell>();
         bool moved;
         do
         {
-            moved = SettleUnsupportedObsidianStacks(movedSolids, movedCrusts);
-            foreach (var origin in World.MovableBlocks().ToArray())
-            {
-                if (World.GetObsidian(origin) is { Units: < LiquidSystem.UnitsPerBlock }) continue;
-                var cell = origin;
-                while (cell.Y > 0 && !World.HasOrthogonalBlockSupport(cell))
-                {
-                    var below = cell + new Cell(0, -1, 0);
-                    if (TrySelectTurret(below) != null || !World.MoveBlock(cell, below)) break;
-                    Liquids.SwapDisplacedLiquid(cell, below);
-                    cell = below;
-                    moved = true;
-                }
-                Falls.RecordBlockDrop(origin, cell, World);
-                if (origin != cell) movedSolids.Add(cell);
-            }
+            RefreshGroundedStructure();
+            moved = SettleUnsupportedMixedClusters(movedSolids, movedCrusts);
+            if (moved) RefreshGroundedStructure();
+            moved |= SettleUnsupportedObsidianStacks(movedSolids, movedCrusts);
+            moved |= SettleUnsupportedBlockClusters(movedSolids);
             foreach (var turret in Turrets.Where(t => t.Hp > 0).OrderBy(t => t.Cell.Y).ThenBy(t => t.Id).ToArray())
             {
                 var origin = turret.Cell;
@@ -1483,6 +1569,8 @@ public sealed partial class GameSession
                 {
                     var below = turret.Cell + new Cell(0, -1, 0);
                     if (World.GetMaterial(below) != Material.Air || TrySelectTurret(below) != null) break;
+                    // A shell remains around its piece when support is removed.
+                    if (World.GetObsidian(turret.Cell) != null && !World.MoveBlock(turret.Cell, below)) break;
                     Liquids.SwapDisplacedLiquid(turret.Cell, below);
                     turret.Cell = below;
                     _topologyRevision++;
@@ -1498,7 +1586,7 @@ public sealed partial class GameSession
         // Preserve crushing by solids that actually fell. A stationary crust
         // growing around a unit is an obstruction it can attack, not an instant kill.
         foreach (var zombie in Zombies)
-            if (zombie.Hp > 0 &&
+            if (zombie.BodyHp > 0 &&
                 (movedSolids.Count > 0 && TryFindBodyObstacle(zombie.Position, zombie.Position, out _, movedSolids, zombie) ||
                  movedCrusts.Any(part => World.GetObsidian(part.Cell)?.Parts.Any(live => live.Face == part.Face) == true &&
                      BoundsOverlap(part.Min, part.Max, zombie.Position - zombie.BodyHalfExtents, zombie.Position + zombie.BodyHalfExtents))))
@@ -1509,6 +1597,7 @@ public sealed partial class GameSession
 
     private void RebuildNavigation()
     {
+        using var profile = Profile?.Measure("NavigationRebuild");
         _turretsByCell.Clear();
         foreach (var turret in Turrets)
             if (turret.Hp > 0) _turretsByCell[turret.Cell] = turret;

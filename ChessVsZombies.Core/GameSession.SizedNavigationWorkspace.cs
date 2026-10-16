@@ -12,6 +12,7 @@ public sealed partial class GameSession
         private const int Count = WorldGrid.Size * WorldGrid.Size * WorldGrid.Size;
         public int[] Rows { get; } = new int[Count];
         public byte[] Occupied { get; } = new byte[Count];
+        public uint[] OccupiedZRows { get; } = new uint[WorldGrid.Size * WorldGrid.Size];
         public byte[] ClearNodes { get; } = new byte[Count];
         public float[] Edges { get; } = new float[Count * 16];
         public float[] GridCosts { get; } = new float[Count];

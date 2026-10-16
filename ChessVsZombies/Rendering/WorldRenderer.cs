@@ -1,8 +1,14 @@
 using ChessVsZombies.Core;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 
 namespace ChessVsZombies.Rendering;
+
+public readonly record struct WorldRenderProfile(double TotalMs, double TerrainRebuildMs, double TurretMeshMs,
+    double ZombieMeshMs, double OtherGeometryMs, double DynamicCopyMs, double DynamicSubmitMs, double LiquidMs,
+    int TerrainVertices, int TurretVertices, int ZombieVertices, int DynamicVertices, int LaserVertices);
 
 public sealed class WorldRenderer : IDisposable
 {
@@ -13,19 +19,49 @@ public sealed class WorldRenderer : IDisposable
     private int fallRevision = -1;
     private WorldGrid? previousWorld;
     private readonly MeshBuilder dynamic = new();
+    private readonly MeshBuilder turretMesh = new();
+    private readonly MeshBuilder turretVerificationMesh = new();
+    private readonly TurretVisualCache turretVisualCache = new();
+    private readonly MeshBuilder formationMesh = new();
+    private readonly List<FormationHighlightState> formationStates = [];
+    private readonly List<FormationHighlightDraw> formationDraws = [];
+    private VertexPositionColor[] formationVertices = new VertexPositionColor[1024];
+    private VertexPositionColor[] formationSortedVertices = new VertexPositionColor[1024];
+    private readonly Comparison<FormationHighlightDraw> compareFormationHighlights;
+    private Vector3 formationCamera;
+    private readonly record struct FormationHighlightState(Cell Cell, PieceKind Kind, bool Upgraded);
+    private readonly record struct FormationHighlightDraw(int Start, int Count, Vector3 Center);
+    private VertexBuffer? turretBuffer;
+    private int turretVertexCount;
+    private VertexPositionColor[] turretUploadVertices = new VertexPositionColor[1024];
+    private VertexPositionColor[] dynamicVertices = new VertexPositionColor[1024];
+    private VertexPositionColor[] bulletLasers = new VertexPositionColor[128];
+    private const float BulletLaserSeconds = .1f;
     private readonly Dictionary<int, Dictionary<ArmorSlot, GearTier>> armorSeen = [];
+    private readonly HashSet<int> currentZombieIds = [];
+    private readonly List<int> staleZombieIds = [];
     private readonly List<FallenArmor> fallenArmor = [];
     private const float ZombieHeightScale = .78f;
     private readonly record struct FallenArmor(Vector3 Origin, Vector3 Drift, float Floor, Vector3 HalfSize,
         Matrix Orientation, Vector3 Spin, GearTier Tier, double Started);
     private static readonly Color Teal = new(97, 225, 193);
+    public bool ProfileEnabled { get; set; }
+    public bool UseTurretCache { get; set; } = true;
+    public bool VerifyGeometry { get; set; }
+    public long VerifiedGeometryChecks { get; private set; }
+    public WorldRenderProfile LastProfile { get; private set; }
     public WorldRenderer(GraphicsDevice device)
     {
         this.device = device;
+        compareFormationHighlights = CompareFormationHighlights;
         effect = new BasicEffect(device) { VertexColorEnabled = true, LightingEnabled = false, FogEnabled = true, FogColor = new Vector3(.043f, .067f, .10f), FogStart = 48, FogEnd = 100 };
     }
-    public void Draw(GameSession session, Matrix view, Matrix projection, Cell? hover, Cell? placement, bool placementValid, Turret? selected, bool showZones, double time)
+    public void Draw(GameSession session, Matrix view, Matrix projection, Cell? hover, Cell? placement, bool placementValid, Turret? selected, bool showZones, double time,
+        TowerBatchSelection? batchSelection = null, Cell? batchCornerPreview = null, bool batchSelectionActive = false, bool reducedDetail = false)
     {
+        bool profile = ProfileEnabled;
+        long profileStart = profile ? Stopwatch.GetTimestamp() : 0;
+        double terrainRebuildMs = 0;
         if (previousWorld != session.World) { armorSeen.Clear(); fallenArmor.Clear(); }
         var fallingBlocks = session.Falls.Blocks.ToArray();
         var fallingCells = fallingBlocks.Select(block => block.Destination).ToHashSet();
@@ -33,7 +69,9 @@ public sealed class WorldRenderer : IDisposable
             .SelectMany(block => block.Crust!.Parts.Select(part => (block.Destination, part.Face))).ToHashSet();
         if (revision != session.World.Revision || previousWorld != session.World || fallRevision != session.Falls.Revision)
         {
+            long rebuildStart = profile ? Stopwatch.GetTimestamp() : 0;
             RebuildTerrain(session.World, fallingCells);
+            if (profile) terrainRebuildMs = Stopwatch.GetElapsedTime(rebuildStart).TotalMilliseconds;
             fallRevision = session.Falls.Revision;
         }
         device.DepthStencilState = DepthStencilState.Default;
@@ -46,6 +84,7 @@ public sealed class WorldRenderer : IDisposable
             if (terrain is not null) { device.SetVertexBuffer(terrain); device.DrawPrimitives(PrimitiveType.TriangleList, 0, terrain.VertexCount / 3); }
         }
         dynamic.Vertices.Clear();
+        long geometryStart = profile ? Stopwatch.GetTimestamp() : 0;
         foreach (var crust in session.World.ObsidianCells)
         {
             foreach (var part in crust.Parts)
@@ -77,13 +116,34 @@ public sealed class WorldRenderer : IDisposable
         dynamic.Cylinder(new Vector3(16, 17.13f, 16), .4f, .15f, .72f, Teal, 8);
         dynamic.Box(new Vector3(15.87f, 17.76f, 15.87f), new Vector3(16.13f, 18.17f, 16.13f), new Color(229, 255, 239));
         dynamic.Box(new Vector3(15.7f, 17.90f, 15.88f), new Vector3(16.3f, 18.02f, 16.12f), new Color(229, 255, 239));
-        foreach (var turret in session.Turrets) DrawTurret(turret, turret == selected, ToXna(session.Falls.GetTurretPosition(turret)));
+        long turretStart = profile ? Stopwatch.GetTimestamp() : 0;
+        int turretVertexStart = dynamic.Vertices.Count;
+        if (UseTurretCache) CacheTurrets(session, selected);
+        else foreach (var turret in session.Turrets) DrawTurret(dynamic, turret, turret == selected, ToXna(session.Falls.GetTurretPosition(turret)));
+        if (UseTurretCache && VerifyGeometry)
+        {
+            turretVerificationMesh.Vertices.Clear();
+            foreach (var turret in session.Turrets)
+                DrawTurret(turretVerificationMesh, turret, turret == selected, ToXna(session.Falls.GetTurretPosition(turret)));
+            if (!MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(turretMesh.Vertices)).SequenceEqual(
+                    MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(turretVerificationMesh.Vertices))))
+                throw new InvalidOperationException("Cached turret geometry differs from the uncached geometry.");
+            VerifiedGeometryChecks++;
+        }
+        int turretVertices = UseTurretCache ? turretVertexCount : dynamic.Vertices.Count - turretVertexStart;
+        long zombieStart = profile ? Stopwatch.GetTimestamp() : 0;
+        int zombieVertexStart = dynamic.Vertices.Count;
+        currentZombieIds.Clear();
         foreach (var zombie in session.Zombies)
         {
-            var current = zombie.ArmorPieces.ToDictionary(piece => piece.Slot, piece => piece.Tier);
+            currentZombieIds.Add(zombie.Id);
             if (armorSeen.TryGetValue(zombie.Id, out var old))
-                foreach (var piece in old.Where(piece => !current.ContainsKey(piece.Key)))
+                foreach (var piece in old)
                 {
+                    bool present = false;
+                    foreach (var armor in zombie.ArmorPieces)
+                        if (armor.Slot == piece.Key) { present = true; break; }
+                    if (present) continue;
                     var (min, max) = ZombieArmorBounds(zombie, piece.Key);
                     var scale = ZombieMeshScale(zombie);
                     var orientation = ZombieRotation(zombie);
@@ -97,10 +157,17 @@ public sealed class WorldRenderer : IDisposable
                     fallenArmor.Add(new FallenArmor(origin, drift, floor, (max - min) * .5f * scale,
                         orientation, spin, piece.Value, time));
                 }
-            armorSeen[zombie.Id] = current;
+            else armorSeen[zombie.Id] = old = [];
+            old.Clear();
+            foreach (var piece in zombie.ArmorPieces) old.Add(piece.Slot, piece.Tier);
             DrawZombie(zombie, time, session.Feedback.GetFlash(zombie.Id), session.IsKiloUsingBuckets(zombie));
         }
-        foreach (var id in armorSeen.Keys.Where(id => !session.Zombies.Any(zombie => zombie.Id == id)).ToArray()) armorSeen.Remove(id);
+        staleZombieIds.Clear();
+        foreach (int id in armorSeen.Keys)
+            if (!currentZombieIds.Contains(id)) staleZombieIds.Add(id);
+        foreach (int id in staleZombieIds) armorSeen.Remove(id);
+        int zombieVertices = dynamic.Vertices.Count - zombieVertexStart;
+        long otherStart = profile ? Stopwatch.GetTimestamp() : 0;
         foreach (var cover in session.KiloCovers)
         {
             if (!cover.IsActive)
@@ -127,8 +194,23 @@ public sealed class WorldRenderer : IDisposable
             dynamic.Box(-piece.HalfSize, piece.HalfSize, ArmorColor(piece.Tier));
             TransformVertices(firstVertex, rotation * Matrix.CreateTranslation(position));
         }
+        int laserVertices = 0;
         foreach (var projectile in session.Projectiles)
         {
+            if (reducedDetail && projectile.Kind == ShotKind.Pellet)
+            {
+                // Fixed launch/aim endpoints: no moving bullet mesh or trail.
+                // Flash once at launch rather than drawing every in-flight pellet.
+                if (projectile.Age < BulletLaserSeconds)
+                {
+                    if (laserVertices + 2 > bulletLasers.Length)
+                        Array.Resize(ref bulletLasers, bulletLasers.Length * 2);
+                    var laserColor = new Color(163, 239, 255);
+                    bulletLasers[laserVertices++] = new(ToXna(projectile.Origin), laserColor);
+                    bulletLasers[laserVertices++] = new(ToXna(projectile.Target), laserColor);
+                }
+                continue;
+            }
             var position = ToXna(projectile.Position);
             Color color = projectile.Kind == ShotKind.Lob ? new(239, 190, 102) : new(163, 239, 255);
             float radius = projectile.Kind == ShotKind.Melee ? .09f : .065f;
@@ -190,18 +272,224 @@ public sealed class WorldRenderer : IDisposable
                 dynamic.Outline(min, new Vector3(cell.X + .88f, cell.Y + .045f, cell.Z + .88f), new Color(152, 138, 77), .014f);
             }
         }
+        DrawBatchSelection(session, batchSelection, batchCornerPreview, batchSelectionActive);
         if (hover is { } target) dynamic.Outline(new Vector3(target.X, target.Y, target.Z) - new Vector3(.01f), new Vector3(target.X + 1, target.Y + 1, target.Z + 1) + new Vector3(.01f), new Color(196, 210, 214), .012f);
         if (placement is { } p)
         {
             var color = placementValid ? Teal : new Color(237, 106, 97);
             dynamic.Outline(new Vector3(p.X + .04f, p.Y + .025f, p.Z + .04f), new Vector3(p.X + .96f, p.Y + .8f, p.Z + .96f), color, .022f);
         }
+        long copyStart = profile ? Stopwatch.GetTimestamp() : 0;
+        long submitStart = copyStart;
         if (dynamic.Vertices.Count > 0)
         {
-            var vertices = dynamic.Vertices.ToArray();
-            foreach (var pass in effect.CurrentTechnique.Passes) { pass.Apply(); device.DrawUserPrimitives(PrimitiveType.TriangleList, vertices, 0, vertices.Length / 3); }
+            if (dynamicVertices.Length < dynamic.Vertices.Count)
+                Array.Resize(ref dynamicVertices, Math.Max(dynamic.Vertices.Count, dynamicVertices.Length * 2));
+            dynamic.Vertices.CopyTo(dynamicVertices);
+            if (profile) submitStart = Stopwatch.GetTimestamp();
+            foreach (var pass in effect.CurrentTechnique.Passes)
+            {
+                pass.Apply();
+                if (UseTurretCache)
+                {
+                    // Keep the original opaque draw order around the cached turret geometry.
+                    if (turretVertexStart > 0)
+                        device.DrawUserPrimitives(PrimitiveType.TriangleList, dynamicVertices, 0, turretVertexStart / 3);
+                    if (turretVertexCount > 0)
+                    {
+                        device.SetVertexBuffer(turretBuffer);
+                        device.DrawPrimitives(PrimitiveType.TriangleList, 0, turretVertexCount / 3);
+                    }
+                    if (dynamic.Vertices.Count > turretVertexStart)
+                        device.DrawUserPrimitives(PrimitiveType.TriangleList, dynamicVertices, turretVertexStart,
+                            (dynamic.Vertices.Count - turretVertexStart) / 3);
+                }
+                else device.DrawUserPrimitives(PrimitiveType.TriangleList, dynamicVertices, 0, dynamic.Vertices.Count / 3);
+            }
         }
-        DrawLiquids(session, Matrix.Invert(view).Translation, time);
+        if (laserVertices > 0)
+        {
+            // Two vertices per laser in a reusable buffer, with ordinary world
+            // depth testing so opaque terrain and cover still occlude the beam.
+            foreach (var pass in effect.CurrentTechnique.Passes)
+            {
+                pass.Apply();
+                device.DrawUserPrimitives(PrimitiveType.LineList, bulletLasers, 0, laserVertices / 2);
+            }
+        }
+        long liquidsStart = profile ? Stopwatch.GetTimestamp() : 0;
+        var camera = Matrix.Invert(view).Translation;
+        DrawLiquids(session, camera, time);
+        DrawFormationHighlights(session, camera);
+        if (profile)
+        {
+            long profileEnd = Stopwatch.GetTimestamp();
+            static double Ms(long start, long end) => Stopwatch.GetElapsedTime(start, end).TotalMilliseconds;
+            LastProfile = new WorldRenderProfile(Ms(profileStart, profileEnd), terrainRebuildMs,
+                Ms(turretStart, zombieStart), Ms(zombieStart, otherStart),
+                Ms(geometryStart, turretStart) + Ms(otherStart, copyStart), Ms(copyStart, submitStart),
+                Ms(submitStart, liquidsStart), Ms(liquidsStart, profileEnd), terrain?.VertexCount ?? 0,
+                turretVertices, zombieVertices, dynamic.Vertices.Count, laserVertices);
+        }
+    }
+
+    private void DrawBatchSelection(GameSession session, TowerBatchSelection? selection, Cell? preview, bool active)
+    {
+        var selectedColor = new Color(83, 228, 255);
+        if (selection is not null)
+        {
+            foreach (var turret in session.Turrets)
+            {
+                if (!selection.SelectedIds.Contains(turret.Id)) continue;
+                var center = ToXna(session.Falls.GetTurretPosition(turret));
+                // Follow the animated piece rather than its eventual grid cell.
+                // The upper edge also encloses the tallest knight decoration.
+                dynamic.Outline(center - new Vector3(.46f, .49f, .46f),
+                    center + new Vector3(.46f, .73f, .46f), selectedColor, .018f);
+            }
+        }
+        if (!active) return;
+
+        var firstColor = new Color(255, 202, 101);
+        var first = selection?.FirstCorner;
+        var second = selection?.SecondCorner;
+        if (first is { } a && (second ?? preview) is { } b)
+        {
+            // Corners identify whole cells, including their complete height.
+            var min = new Vector3(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Min(a.Z, b.Z));
+            var max = new Vector3(Math.Max(a.X, b.X) + 1, Math.Max(a.Y, b.Y) + 1, Math.Max(a.Z, b.Z) + 1);
+            dynamic.Outline(min - new Vector3(.018f), max + new Vector3(.018f), new Color(116, 174, 222), .014f);
+        }
+        if (first is { } firstCell) DrawBatchCorner(firstCell, firstColor);
+        if (second is { } secondCell) DrawBatchCorner(secondCell, selectedColor);
+        if (preview is { } cursor)
+        {
+            var color = first is not null && second is null ? selectedColor : firstColor;
+            DrawBatchCorner(cursor, color);
+        }
+    }
+
+    private void DrawBatchCorner(Cell cell, Color color)
+    {
+        var min = new Vector3(cell.X, cell.Y, cell.Z);
+        dynamic.Outline(min + new Vector3(.025f), min + new Vector3(.975f), color, .024f);
+        var center = min + new Vector3(.5f);
+        dynamic.Line(center - Vector3.Right * .16f, center + Vector3.Right * .16f, .018f, color);
+        dynamic.Line(center - Vector3.Up * .16f, center + Vector3.Up * .16f, .018f, color);
+        dynamic.Line(center - Vector3.Backward * .16f, center + Vector3.Backward * .16f, .018f, color);
+    }
+
+    private void CacheTurrets(GameSession session, Turret? selected)
+    {
+        if (!turretVisualCache.Refresh(session.Turrets, session.Falls, selected, session.World)) return;
+        turretMesh.Vertices.Clear();
+        foreach (var turret in session.Turrets)
+            DrawTurret(turretMesh, turret, turret == selected, ToXna(session.Falls.GetTurretPosition(turret)));
+        turretVertexCount = turretMesh.Vertices.Count;
+        if (turretVertexCount == 0) return;
+        if (turretBuffer is null || turretBuffer.VertexCount < turretVertexCount)
+        {
+            turretBuffer?.Dispose();
+            turretBuffer = new VertexBuffer(device, typeof(VertexPositionColor), turretVertexCount, BufferUsage.WriteOnly);
+        }
+        if (turretUploadVertices.Length < turretVertexCount)
+            Array.Resize(ref turretUploadVertices, Math.Max(turretVertexCount, turretUploadVertices.Length * 2));
+        turretMesh.Vertices.CopyTo(turretUploadVertices);
+        turretBuffer.SetData(turretUploadVertices, 0, turretVertexCount);
+    }
+
+    private void DrawFormationHighlights(GameSession session, Vector3 camera)
+    {
+        // Compare visible inputs each frame so direct occupancy/template changes
+        // cannot leave a stale ghost; reuse geometry while a formation is stable.
+        var missing = session.MissingFormationTurrets;
+        bool changed = formationStates.Count != missing.Count;
+        for (int i = 0; i < missing.Count; i++)
+        {
+            var tower = missing[i];
+            bool upgraded = false;
+            foreach (int points in tower.UpgradePoints.Values)
+                if (points > 0) { upgraded = true; break; }
+            var state = new FormationHighlightState(tower.Cell, tower.Kind, upgraded);
+            if (i == formationStates.Count) formationStates.Add(state);
+            else
+            {
+                if (formationStates[i] != state) changed = true;
+                formationStates[i] = state;
+            }
+        }
+        if (formationStates.Count > missing.Count)
+            formationStates.RemoveRange(missing.Count, formationStates.Count - missing.Count);
+        if (changed)
+        {
+            formationMesh.Vertices.Clear();
+            formationDraws.Clear();
+            foreach (var state in formationStates)
+            {
+                int start = formationMesh.Vertices.Count;
+                var center = ToXna(state.Cell.Center);
+                DrawTurret(formationMesh, state.Kind, false, center, state.Upgraded);
+                var tint = state.Kind switch
+                {
+                    PieceKind.Rook => new Color(241, 192, 111),
+                    PieceKind.Bishop => new Color(124, 186, 246),
+                    PieceKind.Knight => new Color(194, 151, 242),
+                    _ => Teal
+                };
+                var vertices = CollectionsMarshal.AsSpan(formationMesh.Vertices)[start..];
+                foreach (ref var vertex in vertices)
+                {
+                    float shade = .55f + .45f * Math.Max(vertex.Color.R, Math.Max(vertex.Color.G, vertex.Color.B)) / 255f;
+                    vertex.Color = new Color((byte)(tint.R * shade), (byte)(tint.G * shade), (byte)(tint.B * shade), (byte)56);
+                }
+                // The cell outline remains legible for stacked templates and
+                // makes the exact construction destination visible.
+                var min = new Vector3(state.Cell.X + .04f, state.Cell.Y + .025f, state.Cell.Z + .04f);
+                var max = new Vector3(state.Cell.X + .96f, state.Cell.Y + .96f, state.Cell.Z + .96f);
+                formationMesh.Outline(min, max, new Color(tint.R, tint.G, tint.B, (byte)145), .012f);
+                formationDraws.Add(new FormationHighlightDraw(start, formationMesh.Vertices.Count - start, center));
+            }
+            if (formationVertices.Length < formationMesh.Vertices.Count)
+                Array.Resize(ref formationVertices, Math.Max(formationMesh.Vertices.Count, formationVertices.Length * 2));
+            formationMesh.Vertices.CopyTo(formationVertices);
+        }
+        if (formationDraws.Count == 0) return;
+        if (changed || formationCamera != camera)
+        {
+            formationCamera = camera;
+            formationDraws.Sort(compareFormationHighlights);
+            if (formationSortedVertices.Length < formationMesh.Vertices.Count)
+                Array.Resize(ref formationSortedVertices, Math.Max(formationMesh.Vertices.Count, formationSortedVertices.Length * 2));
+            int offset = 0;
+            foreach (var draw in formationDraws)
+            {
+                Array.Copy(formationVertices, draw.Start, formationSortedVertices, offset, draw.Count);
+                offset += draw.Count;
+            }
+        }
+        var oldBlend = device.BlendState;
+        var oldDepth = device.DepthStencilState;
+        device.BlendState = BlendState.NonPremultiplied;
+        device.DepthStencilState = DepthStencilState.DepthRead;
+        try
+        {
+            foreach (var pass in effect.CurrentTechnique.Passes)
+            {
+                pass.Apply();
+                device.DrawUserPrimitives(PrimitiveType.TriangleList, formationSortedVertices, 0, formationMesh.Vertices.Count / 3);
+            }
+        }
+        finally
+        {
+            device.DepthStencilState = oldDepth;
+            device.BlendState = oldBlend;
+        }
+    }
+
+    private int CompareFormationHighlights(FormationHighlightDraw left, FormationHighlightDraw right)
+    {
+        int distance = Vector3.DistanceSquared(formationCamera, right.Center).CompareTo(Vector3.DistanceSquared(formationCamera, left.Center));
+        return distance != 0 ? distance : left.Start.CompareTo(right.Start);
     }
 
     private void DrawLiquids(GameSession session, Vector3 camera, double time)
@@ -293,34 +581,37 @@ public sealed class WorldRenderer : IDisposable
         }
         return color;
     }
-    private void DrawTurret(Turret turret, bool selected, Vector3 center)
+    private static void DrawTurret(MeshBuilder mesh, Turret turret, bool selected, Vector3 center)
+        => DrawTurret(mesh, turret.Kind, selected, center, turret.UpgradePoints.Values.Any(points => points > 0));
+
+    private static void DrawTurret(MeshBuilder mesh, PieceKind kind, bool selected, Vector3 center, bool upgraded)
     {
         var p = center - new Vector3(0, .48f, 0);
         var ivory = selected ? new Color(197, 255, 229) : new Color(226, 224, 205);
         var accent = new Color(99, 185, 164);
-        dynamic.Cylinder(p, .42f, .42f, .12f, new Color(39, 54, 61));
-        dynamic.Cylinder(p + Vector3.Up * .12f, .36f, .3f, .14f, ivory);
-        dynamic.Cylinder(p + Vector3.Up * .26f, .3f, .17f, .24f, ivory);
-        switch (turret.Kind)
+        mesh.Cylinder(p, .42f, .42f, .12f, new Color(39, 54, 61));
+        mesh.Cylinder(p + Vector3.Up * .12f, .36f, .3f, .14f, ivory);
+        mesh.Cylinder(p + Vector3.Up * .26f, .3f, .17f, .24f, ivory);
+        switch (kind)
         {
             case PieceKind.Pawn:
-                dynamic.Cylinder(p + Vector3.Up * .5f, .17f, .22f, .13f, ivory);
-                dynamic.Cylinder(p + Vector3.Up * .63f, .22f, .1f, .22f, ivory); break;
+                mesh.Cylinder(p + Vector3.Up * .5f, .17f, .22f, .13f, ivory);
+                mesh.Cylinder(p + Vector3.Up * .63f, .22f, .1f, .22f, ivory); break;
             case PieceKind.Rook:
-                dynamic.Cylinder(p + Vector3.Up * .46f, .21f, .24f, .35f, ivory, 8);
-                dynamic.Cylinder(p + Vector3.Up * .8f, .32f, .32f, .12f, accent, 8);
-                foreach (int x in new[] { -1, 1 }) foreach (int z in new[] { -1, 1 }) dynamic.Box(p + new Vector3(x * .20f - .075f, .9f, z * .20f - .075f), p + new Vector3(x * .20f + .075f, 1.06f, z * .20f + .075f), ivory); break;
+                mesh.Cylinder(p + Vector3.Up * .46f, .21f, .24f, .35f, ivory, 8);
+                mesh.Cylinder(p + Vector3.Up * .8f, .32f, .32f, .12f, accent, 8);
+                foreach (int x in new[] { -1, 1 }) foreach (int z in new[] { -1, 1 }) mesh.Box(p + new Vector3(x * .20f - .075f, .9f, z * .20f - .075f), p + new Vector3(x * .20f + .075f, 1.06f, z * .20f + .075f), ivory); break;
             case PieceKind.Bishop:
-                dynamic.Cylinder(p + Vector3.Up * .5f, .17f, .28f, .25f, ivory, 8);
-                dynamic.Cylinder(p + Vector3.Up * .75f, .28f, .035f, .36f, ivory, 8);
-                dynamic.Box(p + new Vector3(-.025f, .86f, -.285f), p + new Vector3(.025f, 1.025f, -.05f), accent); break;
+                mesh.Cylinder(p + Vector3.Up * .5f, .17f, .28f, .25f, ivory, 8);
+                mesh.Cylinder(p + Vector3.Up * .75f, .28f, .035f, .36f, ivory, 8);
+                mesh.Box(p + new Vector3(-.025f, .86f, -.285f), p + new Vector3(.025f, 1.025f, -.05f), accent); break;
             case PieceKind.Knight:
-                dynamic.Box(p + new Vector3(-.16f, .48f, -.11f), p + new Vector3(.16f, .94f, .15f), ivory);
-                dynamic.Box(p + new Vector3(-.18f, .77f, -.37f), p + new Vector3(.18f, 1.02f, .12f), ivory);
-                dynamic.Box(p + new Vector3(-.13f, 1.02f, .005f), p + new Vector3(.13f, 1.18f, .105f), accent);
-                dynamic.Box(p + new Vector3(-.19f, .9f, -.26f), p + new Vector3(.19f, .95f, -.20f), new Color(22, 45, 48)); break;
+                mesh.Box(p + new Vector3(-.16f, .48f, -.11f), p + new Vector3(.16f, .94f, .15f), ivory);
+                mesh.Box(p + new Vector3(-.18f, .77f, -.37f), p + new Vector3(.18f, 1.02f, .12f), ivory);
+                mesh.Box(p + new Vector3(-.13f, 1.02f, .005f), p + new Vector3(.13f, 1.18f, .105f), accent);
+                mesh.Box(p + new Vector3(-.19f, .9f, -.26f), p + new Vector3(.19f, .95f, -.20f), new Color(22, 45, 48)); break;
         }
-        if (turret.UpgradePoints.Values.Any(points => points > 0)) dynamic.Cylinder(p + Vector3.Up * .27f, .305f, .305f, .04f, new Color(235, 189, 105));
+        if (upgraded) mesh.Cylinder(p + Vector3.Up * .27f, .305f, .305f, .04f, new Color(235, 189, 105));
     }
     private void DrawZombie(Zombie zombie, double time, float flash, bool kiloUsingBuckets)
     {
@@ -394,17 +685,10 @@ public sealed class WorldRenderer : IDisposable
             dynamic.Box(p + new Vector3(-.19f, .61f, -.501f), p + new Vector3(.19f, .66f, -.19f), strap);
             dynamic.Box(p + new Vector3(-.025f, .43f, -.502f), p + new Vector3(.025f, .91f, -.19f), strap);
         }
-        if (flash > 0)
-            for (int i = firstVertex; i < dynamic.Vertices.Count; i++)
-            {
-                var vertex = dynamic.Vertices[i];
-                vertex.Color = Color.Lerp(vertex.Color, Color.White, Math.Clamp(flash, 0, 1));
-                dynamic.Vertices[i] = vertex;
-            }
         // Local +Z is the face and shield front. One transform keeps every body part,
         // equipped item aligned at the actor's size, anchored to its actual feet.
         TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(ZombieMeshScale(zombie)) *
-            ZombieRotation(zombie) * Matrix.CreateTranslation(p));
+            ZombieRotation(zombie) * Matrix.CreateTranslation(p), flash);
     }
 
     private void DrawStowedKiloCover(Zombie zombie, KiloCover cover)
@@ -463,14 +747,31 @@ public sealed class WorldRenderer : IDisposable
         ArmorSlot.Boots => (new Vector3(-.235f, .03f, -.18f), new Vector3(.235f, .30f, .18f)),
         _ => throw new ArgumentOutOfRangeException(nameof(slot))
     };
-    private void TransformVertices(int firstVertex, Matrix transform)
+    private void TransformVertices(int firstVertex, Matrix transform, float flash = 0)
     {
-        for (int i = firstVertex; i < dynamic.Vertices.Count; i++)
+        // Geometry is complete before this span is borrowed; no list additions occur here.
+        var vertices = CollectionsMarshal.AsSpan(dynamic.Vertices)[firstVertex..];
+        float amount = Math.Clamp(flash, 0, 1);
+        VertexPositionColor[]? reference = null;
+        if (VerifyGeometry)
         {
-            var vertex = dynamic.Vertices[i];
-            vertex.Position = Vector3.Transform(vertex.Position, transform);
-            dynamic.Vertices[i] = vertex;
+            reference = vertices.ToArray();
+            // Reproduce the previous separate color and position loops for exact verification.
+            if (flash > 0)
+                for (int i = 0; i < reference.Length; i++)
+                    reference[i].Color = Color.Lerp(reference[i].Color, Color.White, amount);
+            for (int i = 0; i < reference.Length; i++)
+                reference[i].Position = Vector3.Transform(reference[i].Position, transform);
         }
+        foreach (ref var vertex in vertices)
+        {
+            if (flash > 0) vertex.Color = Color.Lerp(vertex.Color, Color.White, amount);
+            vertex.Position = Vector3.Transform(vertex.Position, transform);
+        }
+        if (reference is null) return;
+        if (!MemoryMarshal.AsBytes(vertices).SequenceEqual(MemoryMarshal.AsBytes(reference.AsSpan())))
+            throw new InvalidOperationException("Combined vertex color/position updates differ from the separate loops.");
+        VerifiedGeometryChecks++;
     }
     private static Color ArmorColor(GearTier tier) => tier switch
     {
@@ -484,5 +785,5 @@ public sealed class WorldRenderer : IDisposable
         _ => new Color(248, 102, 32)
     };
     public static Vector3 ToXna(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
-    public void Dispose() { terrain?.Dispose(); effect.Dispose(); }
+    public void Dispose() { terrain?.Dispose(); turretBuffer?.Dispose(); effect.Dispose(); }
 }

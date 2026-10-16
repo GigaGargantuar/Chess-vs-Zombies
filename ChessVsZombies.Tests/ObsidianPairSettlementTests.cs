@@ -127,7 +127,10 @@ public sealed class ObsidianPairSettlementTests
     {
         var source = Ground + new Cell(0, 3, 0);
         var game = WithCrusts(new ObsidianCell(source, 5, anchoredFace, 18, OppositeUnits: 3, OppositeHp: 11));
-        PlaceTerrain(game, source + new Cell(dx, 0, dz), Material.Stone);
+        // The retained slab has an actual path to the ground. A lone floating
+        // neighboring block would itself belong to the detached structure.
+        for (int y = Ground.Y; y <= source.Y; y++)
+            PlaceTerrain(game, new Cell(source.X + dx, y, source.Z + dz), Material.Stone);
 
         game.Update(.01f);
 
@@ -178,6 +181,75 @@ public sealed class ObsidianPairSettlementTests
         Assert.Equal(revision, game.World.Revision);
         Assert.Equal(190, witness.Hp);
         Assert.Single(game.Feedback.Hits);
+    }
+
+    [Fact]
+    public void ADetachedSlabFallsPastANewSideWallWithoutAttachingToIt()
+    {
+        var source = Ground + new Cell(0, 4, 0);
+        var falling = new ObsidianCell(source, 2, CrustFace.West, 9);
+        var game = WithCrusts(falling);
+        var wall = AddLowerSideWall(game, source);
+
+        game.Update(.01f);
+
+        Assert.Equal(falling with { Cell = Ground }, Assert.Single(game.World.ObsidianCells));
+        Assert.All(wall, cell => Assert.Equal(Material.Stone, game.World.GetMaterial(cell)));
+        var animation = Assert.Single(game.Falls.Blocks);
+        Assert.Equal(Ground, animation.Destination);
+        Assert.Equal(source.Center, animation.Position);
+        Assert.Equal(CrustFace.West, animation.Crust!.Face);
+        Assert.Empty(game.Feedback.Hits);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADetachedLoadedSlabPassesSideWallsAndShattersOnlyAtItsGroundImpact(bool paired)
+    {
+        var source = Ground + new Cell(0, 4, 0);
+        var game = WithCrusts(new ObsidianCell(source, paired ? 5 : 2, CrustFace.West, paired ? 18 : 9,
+            OppositeUnits: paired ? 3 : 0, OppositeHp: paired ? 11 : 0));
+        var wall = AddLowerSideWall(game, source);
+        AddBarrier(game, source + new Cell(0, 1, 0), Material.Iron, 1337);
+        var witness = new Zombie
+        {
+            Id = 99, WaveIndex = -1, Kind = ZombieKind.Armored, Tier = GearTier.Iron,
+            Position = Ground.Center + Vector3.UnitZ
+        };
+        game.Zombies.Add(witness);
+
+        game.Update(.01f);
+
+        Assert.Empty(game.World.ObsidianCells);
+        var load = Assert.Single(game.World.Barriers);
+        Assert.Equal(Ground, load.Cell);
+        Assert.Equal(Material.Iron, load.Content);
+        Assert.Equal(1337, load.Hp);
+        Assert.All(wall, cell => Assert.Equal(Material.Stone, game.World.GetMaterial(cell)));
+        Assert.Equal(190, witness.Hp);
+        var hit = Assert.Single(game.Feedback.Hits);
+        Assert.Equal(20, hit.Amount);
+        Assert.Equal(DamageKind.Pierce, hit.Kind);
+        var revision = game.World.Revision;
+
+        game.Update(.01f);
+
+        Assert.Equal(revision, game.World.Revision);
+        Assert.Equal(190, witness.Hp);
+        Assert.Single(game.Feedback.Hits);
+    }
+
+    private static Cell[] AddLowerSideWall(GameSession game, Cell source)
+    {
+        var cells = new List<Cell>();
+        for (int y = Ground.Y; y < source.Y - 1; y++)
+        {
+            var cell = new Cell(source.X - 1, y, source.Z);
+            PlaceTerrain(game, cell, Material.Stone);
+            cells.Add(cell);
+        }
+        return cells.ToArray();
     }
 
     private static GameSession WithCrusts(params ObsidianCell[] crusts)

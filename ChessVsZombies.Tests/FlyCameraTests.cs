@@ -27,6 +27,8 @@ public class FlyCameraTests
     [Theory]
     [InlineData(1.2f)]
     [InlineData(-1.2f)]
+    [InlineData(1.5707964f)]
+    [InlineData(-1.5707964f)]
     public void ForwardMovementStaysHorizontalWhenLookingUpOrDown(float pitch)
     {
         var camera = new FlyCamera(new Vector3(10, 10, 10), MathF.PI / 2, pitch);
@@ -97,18 +99,118 @@ public class FlyCameraTests
     }
 
     [Fact]
-    public void MousePanningChangesTheViewDirectionAndPitchStopsBeforeVertical()
+    public void MousePanningRetainsItsSensitivityAndReachesExactVertical()
     {
         var camera = new FlyCamera(yaw: 0, pitch: 0);
 
         camera.Look(100, 100);
-        Assert.True(camera.Forward.X < 0);
-        Assert.True(camera.Forward.Y < 0);
+        Assert.Equal(-.25f, camera.Yaw);
+        Assert.Equal(-.25f, camera.Pitch);
+        AssertNear(new Vector3(MathF.Sin(-.25f) * MathF.Cos(-.25f), MathF.Sin(-.25f), MathF.Cos(-.25f) * MathF.Cos(-.25f)), camera.Forward);
         Assert.InRange(camera.Forward.Length(), .9999f, 1.0001f);
         camera.Look(0, -100000);
-        Assert.InRange(camera.Pitch, 0, MathF.PI / 2 - .01f);
+        Assert.Equal(MathF.PI / 2, camera.Pitch);
+        Assert.Equal(Vector3.UnitY, camera.Forward);
         camera.Look(0, 100000);
-        Assert.InRange(camera.Pitch, -MathF.PI / 2 + .01f, 0);
+        Assert.Equal(-MathF.PI / 2, camera.Pitch);
+        Assert.Equal(-Vector3.UnitY, camera.Forward);
+    }
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(.8f, 1)]
+    [InlineData(-2.7f, 1)]
+    [InlineData(0, -1)]
+    [InlineData(.8f, -1)]
+    [InlineData(-2.7f, -1)]
+    public void QuaternionBasisRemainsOrthonormalAndProducesAnInvertibleViewAtBothPoles(float yaw, int sign)
+    {
+        var camera = new FlyCamera(new Vector3(10, 25, 10), yaw, sign * MathF.PI / 2);
+
+        Assert.Equal(sign * Vector3.UnitY, camera.Forward);
+        Assert.InRange(camera.Orientation.Length(), .999999f, 1.000001f);
+        Assert.InRange(camera.Up.Length(), .999999f, 1.000001f);
+        Assert.InRange(MathF.Abs(Vector3.Dot(camera.Forward, camera.Up)), 0, .000001f);
+        AssertNear(camera.Forward, Vector3.Transform(Vector3.UnitZ, camera.Orientation));
+        AssertNear(camera.Up, Vector3.Transform(Vector3.UnitY, camera.Orientation));
+        var view = Matrix4x4.CreateLookAt(camera.Position, camera.Position + camera.Forward, camera.Up);
+        Assert.True(Matrix4x4.Invert(view, out var inverse));
+        Assert.True(float.IsFinite(view.GetDeterminant()));
+        AssertNear(camera.Position, inverse.Translation);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(-1)]
+    public void HorizontalPanningAtAPolePreservesHeadingAndLeavingItUsesTheSamePitchControl(int sign)
+    {
+        var camera = new FlyCamera(yaw: 0, pitch: sign * MathF.PI / 2);
+        var previousUp = camera.Up;
+
+        camera.Look(100, 0);
+
+        Assert.Equal(sign * Vector3.UnitY, camera.Forward);
+        Assert.Equal(-.25f, camera.Yaw);
+        Assert.True(Vector3.Distance(previousUp, camera.Up) > .1f);
+        camera.Look(0, sign * 100);
+        var expectedPitch = sign * (MathF.PI / 2 - .25f);
+        Assert.Equal(expectedPitch, camera.Pitch);
+        AssertNear(new Vector3(MathF.Sin(-.25f) * MathF.Cos(expectedPitch), MathF.Sin(expectedPitch), MathF.Cos(-.25f) * MathF.Cos(expectedPitch)), camera.Forward);
+    }
+
+    [Fact]
+    public void CombinedPanningDoesNotAccumulateRollAndEquivalentAnglesKeepTheSameOrientation()
+    {
+        var camera = new FlyCamera(yaw: .8f, pitch: .3f);
+        for (int i = 0; i < 100; i++) { camera.Look(10, -2); camera.Look(-8, 3); }
+
+        var expectedRight = new Vector3(-MathF.Cos(camera.Yaw), 0, MathF.Sin(camera.Yaw));
+        AssertNear(expectedRight, Vector3.Normalize(Vector3.Cross(camera.Forward, camera.Up)));
+        var equivalent = new FlyCamera(yaw: camera.Yaw + MathF.Tau, pitch: camera.Pitch);
+        Assert.InRange(MathF.Abs(Quaternion.Dot(camera.Orientation, equivalent.Orientation)), .999999f, 1.000001f);
+        AssertNear(camera.Forward, equivalent.Forward);
+        AssertNear(camera.Up, equivalent.Up);
+    }
+
+    [Fact]
+    public void VerticalViewMovementKeepsThePannedHorizontalHeadingAndCollision()
+    {
+        var camera = new FlyCamera(new Vector3(10.5f, 10.5f, 10.5f), yaw: 0, pitch: MathF.PI / 2);
+        camera.Look(-MathF.PI / 2 / .0025f, 0);
+
+        camera.Move(Vector3.UnitZ, 20, cell => cell.X == 12);
+
+        Assert.Equal(Vector3.UnitY, camera.Forward);
+        Assert.InRange(camera.Position.X, 11.5f, 12 - FlyCamera.Radius);
+        Assert.InRange(camera.Position.Y, 10.4999f, 10.5001f);
+        Assert.InRange(camera.Position.Z, 10.4999f, 10.5001f);
+        Assert.False(camera.Intersects(new Cell(12, 10, 10)));
+    }
+
+    [Fact]
+    public void NonfiniteMouseDeltasLeaveTheViewUnchangedAndExtremeFiniteDeltasStayValid()
+    {
+        var camera = new FlyCamera();
+        var orientation = camera.Orientation;
+        camera.Look(float.NaN, 0);
+        camera.Look(0, float.PositiveInfinity);
+        Assert.Equal(orientation, camera.Orientation);
+
+        for (int i = 0; i < 4; i++) camera.Look(float.MaxValue, -float.MaxValue);
+        Assert.Equal(Vector3.UnitY, camera.Forward);
+        Assert.InRange(camera.Orientation.Length(), .999999f, 1.000001f);
+        Assert.InRange(camera.Up.Length(), .999999f, 1.000001f);
+        Assert.InRange(MathF.Abs(Vector3.Dot(camera.Forward, camera.Up)), 0, .000001f);
+    }
+
+    [Theory]
+    [InlineData(float.NaN, 0)]
+    [InlineData(float.PositiveInfinity, 0)]
+    [InlineData(0, float.NaN)]
+    [InlineData(0, float.NegativeInfinity)]
+    public void ConstructorRejectsNonfiniteAngles(float yaw, float pitch)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new FlyCamera(yaw: yaw, pitch: pitch));
     }
 
     private static void AssertNear(Vector3 expected, Vector3 actual)

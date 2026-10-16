@@ -129,7 +129,7 @@ public class ObsidianShatterTests
         Position(victim, Source.Center + Vector3.UnitX);
         Position(attacker, Source.Center);
         game.DamageZombie(victim, 50, DamageKind.Pierce, ShotKind.Pellet, -victim.Facing);
-        game.DamageZombie(victim, 50, DamageKind.Blunt, ShotKind.Lob, Vector3.UnitY);
+        game.DamageZombie(victim, 50, DamageKind.Blunt, ShotKind.Lob, -Vector3.UnitY);
         game.DamageZombie(victim, 50, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
         game.DamageZombie(victim, 30, DamageKind.Pierce, ShotKind.Pellet, victim.Facing);
         Assert.Equal(20, Assert.Single(victim.ArmorPieces).Hp);

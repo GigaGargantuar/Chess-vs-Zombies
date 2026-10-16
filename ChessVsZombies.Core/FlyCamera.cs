@@ -8,17 +8,36 @@ public sealed class FlyCamera
     public Vector3 Position { get; private set; }
     public float Yaw { get; private set; }
     public float Pitch { get; private set; }
+    public Quaternion Orientation { get; private set; }
     public const float Radius = .2f;
+    private const float MaximumPitch = MathF.PI / 2;
+    private const float LookSensitivity = .0025f;
     public FlyCamera(Vector3? position = null, float yaw = -2.66f, float pitch = -.41f)
     {
+        if (!float.IsFinite(yaw)) throw new ArgumentOutOfRangeException(nameof(yaw));
+        if (!float.IsFinite(pitch)) throw new ArgumentOutOfRangeException(nameof(pitch));
         Position = position ?? new Vector3(27, 25, 37);
-        Yaw = yaw; Pitch = pitch;
+        Yaw = NormalizeYaw(yaw); Pitch = Math.Clamp(pitch, -MaximumPitch, MaximumPitch);
+        UpdateOrientation();
     }
-    public Vector3 Forward => new(MathF.Sin(Yaw) * MathF.Cos(Pitch), MathF.Sin(Pitch), MathF.Cos(Yaw) * MathF.Cos(Pitch));
+    // Quaternion rotation can leave tiny horizontal rounding errors at a pole.
+    // Preserve an exact vertical ray while retaining the quaternion's stable up direction.
+    public Vector3 Forward => Pitch == MaximumPitch ? Vector3.UnitY : Pitch == -MaximumPitch ? -Vector3.UnitY
+        : Vector3.Normalize(Vector3.Transform(Vector3.UnitZ, Orientation));
+    public Vector3 Up => Vector3.Normalize(Vector3.Transform(Vector3.UnitY, Orientation));
     public void Look(float horizontalPixels, float verticalPixels)
     {
-        Yaw -= horizontalPixels * .0025f;
-        Pitch = Math.Clamp(Pitch - verticalPixels * .0025f, -1.48f, 1.48f);
+        if (!float.IsFinite(horizontalPixels) || !float.IsFinite(verticalPixels)) return;
+        Yaw = NormalizeYaw((double)Yaw - (double)horizontalPixels * LookSensitivity);
+        Pitch = (float)Math.Clamp((double)Pitch - (double)verticalPixels * LookSensitivity, -MaximumPitch, MaximumPitch);
+        UpdateOrientation();
+    }
+    private static float NormalizeYaw(double yaw) => (float)Math.IEEERemainder(yaw, Math.Tau);
+    private void UpdateOrientation()
+    {
+        // Keep traditional world-up yaw and local-right pitch input. The quaternion
+        // represents that final view without introducing roll from mouse panning.
+        Orientation = Quaternion.Normalize(Quaternion.CreateFromYawPitchRoll(Yaw, -Pitch, 0));
     }
     public void Move(Vector3 localInput, float distance, Func<Cell, bool> solid)
         => MovePrecise(localInput, distance, point => solid(new Cell((int)MathF.Floor(point.X), (int)MathF.Floor(point.Y), (int)MathF.Floor(point.Z))));

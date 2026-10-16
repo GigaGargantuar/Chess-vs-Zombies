@@ -44,9 +44,10 @@ public sealed partial class GameSession
         foreach (int id in turretIds.Distinct())
         {
             if (!byId.TryGetValue(id, out var turret)) continue;
-            foreach (var (kind, requested) in template.Points)
-                if (Enum.IsDefined(kind) && requested > 0)
+            foreach (var kind in template.Points.Keys)
+                if (Enum.IsDefined(kind))
                 {
+                    int requested = Economy.GetTemplatePointRequest(turret, template, kind);
                     int added = Math.Min(requested, Economy.GetUpgradeCapacity(turret, kind));
                     if (added > 0) costs[kind] = costs.GetValueOrDefault(kind) + added;
                 }
@@ -107,7 +108,7 @@ public sealed partial class GameSession
             foreach (var kind in Enum.GetValues<UpgradeKind>())
             {
                 target.Expected[kind] = Economy.GetAllocated(turret, kind);
-                int requested = template.Points.GetValueOrDefault(kind);
+                int requested = Economy.GetTemplatePointRequest(turret, template, kind);
                 int capacity = Economy.GetUpgradeCapacity(turret, kind);
                 int affordable = spendNow ? (int)Math.Min(int.MaxValue, remaining[kind]) : int.MaxValue;
                 int added = Math.Min(requested, Math.Min(capacity, affordable));

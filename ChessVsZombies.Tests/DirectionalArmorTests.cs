@@ -8,14 +8,18 @@ namespace ChessVsZombies.Tests;
 public sealed class DirectionalArmorTests
 {
     [Theory]
-    [InlineData(-1, ArmorSlot.Helmet)]
-    [InlineData(0, ArmorSlot.Chestplate)]
-    [InlineData(1, ArmorSlot.Boots)]
-    public void PelletTravelSelectsOneArmorPieceBeforeOverflowingIntoTheBody(float vertical, ArmorSlot expected)
+    [InlineData(ShotKind.Pellet, -1, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Pellet, 0, ArmorSlot.Chestplate)]
+    [InlineData(ShotKind.Pellet, 1, ArmorSlot.Boots)]
+    [InlineData(ShotKind.Lob, -1, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Lob, 0, ArmorSlot.Chestplate)]
+    [InlineData(ShotKind.Lob, 1, ArmorSlot.Boots)]
+    public void ProjectileTravelSelectsOneArmorPieceBeforeOverflowingIntoTheBody(ShotKind shot, float vertical, ArmorSlot expected)
     {
         var zombie = Armored();
 
-        new GameSession().DamageZombie(zombie, 13, DamageKind.Pierce, ShotKind.Pellet, new Vector3(1, vertical, 0));
+        new GameSession().DamageZombie(zombie, 13, shot == ShotKind.Pellet ? DamageKind.Pierce : DamageKind.Blunt,
+            shot, new Vector3(1, vertical, 0));
 
         Assert.Equal(7, zombie.BodyHp);
         Assert.DoesNotContain(zombie.ArmorPieces, piece => piece.Slot == expected);
@@ -24,17 +28,27 @@ public sealed class DirectionalArmorTests
     }
 
     [Theory]
-    [InlineData(-1)]
-    [InlineData(0)]
-    [InlineData(1)]
-    public void LobStillUsesTheHelmetEvenOnTheRisingPartOfItsArc(float vertical)
+    [InlineData(.1f, .2f, ArmorSlot.Boots)]
+    [InlineData(.6f, .8f, ArmorSlot.Helmet)]
+    public void ARealLobUsesItsTravelDirectionWhereItHitsAnotherBody(float startAge, float contactAge, ArmorSlot expected)
     {
+        var game = new GameSession();
         var zombie = Armored();
+        var projectile = new Projectile
+        {
+            Origin = new Vector3(10.5f, 20.5f, 10.5f), Target = new Vector3(18.5f, 20.5f, 10.5f),
+            Kind = ShotKind.Lob, Damage = 3, Duration = 1, Age = startAge, TargetId = 123
+        };
+        zombie.Position = projectile.GetPositionAt(contactAge);
+        game.Zombies.Add(zombie);
+        game.Projectiles.Add(projectile);
 
-        new GameSession().DamageZombie(zombie, 3, DamageKind.Blunt, ShotKind.Lob, new Vector3(1, vertical, 0));
+        typeof(GameSession).GetMethod("UpdateProjectiles", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(game, [contactAge - startAge]);
 
+        Assert.Empty(game.Projectiles);
         Assert.Equal(10, zombie.BodyHp);
-        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(piece.Slot == ArmorSlot.Helmet ? 7 : 10, piece.Hp));
+        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(piece.Slot == expected ? 7 : 10, piece.Hp));
     }
 
     [Theory]
@@ -61,15 +75,19 @@ public sealed class DirectionalArmorTests
     }
 
     [Theory]
-    [InlineData(.000001f)]
-    [InlineData(1f)]
-    [InlineData(1000000f)]
-    [InlineData(float.MaxValue)]
-    public void PelletArmorClassificationIsIndependentOfDirectionMagnitude(float magnitude)
+    [InlineData(ShotKind.Pellet, .000001f)]
+    [InlineData(ShotKind.Pellet, 1f)]
+    [InlineData(ShotKind.Pellet, 1000000f)]
+    [InlineData(ShotKind.Pellet, float.MaxValue)]
+    [InlineData(ShotKind.Lob, .000001f)]
+    [InlineData(ShotKind.Lob, 1f)]
+    [InlineData(ShotKind.Lob, 1000000f)]
+    [InlineData(ShotKind.Lob, float.MaxValue)]
+    public void ProjectileArmorClassificationIsIndependentOfDirectionMagnitude(ShotKind shot, float magnitude)
     {
         var zombie = Armored();
 
-        new GameSession().DamageZombie(zombie, 3, DamageKind.Pierce, ShotKind.Pellet,
+        new GameSession().DamageZombie(zombie, 3, shot == ShotKind.Pellet ? DamageKind.Pierce : DamageKind.Blunt, shot,
             new Vector3(magnitude, -magnitude, 0));
 
         Assert.Equal(7, zombie.ArmorPieces.Single(piece => piece.Slot == ArmorSlot.Helmet).Hp);
@@ -78,41 +96,52 @@ public sealed class DirectionalArmorTests
     }
 
     [Theory]
-    [InlineData(-.005f, ArmorSlot.Helmet)]
-    [InlineData(.005f, ArmorSlot.Boots)]
-    [InlineData(-float.Epsilon, ArmorSlot.Helmet)]
-    [InlineData(float.Epsilon, ArmorSlot.Boots)]
-    public void NearlyLevelPelletsStillRespectWhetherTheyCameFromAboveOrBelow(float vertical, ArmorSlot expected)
+    [InlineData(ShotKind.Pellet, -.005f, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Pellet, .005f, ArmorSlot.Boots)]
+    [InlineData(ShotKind.Pellet, -float.Epsilon, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Pellet, float.Epsilon, ArmorSlot.Boots)]
+    [InlineData(ShotKind.Lob, -.005f, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Lob, .005f, ArmorSlot.Boots)]
+    [InlineData(ShotKind.Lob, -float.Epsilon, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Lob, float.Epsilon, ArmorSlot.Boots)]
+    public void NearlyLevelProjectilesStillRespectWhetherTheyCameFromAboveOrBelow(ShotKind shot, float vertical, ArmorSlot expected)
     {
         var zombie = Armored();
 
-        new GameSession().DamageZombie(zombie, 3, DamageKind.Pierce, ShotKind.Pellet, new Vector3(1, vertical, 0));
+        new GameSession().DamageZombie(zombie, 3, shot == ShotKind.Pellet ? DamageKind.Pierce : DamageKind.Blunt,
+            shot, new Vector3(1, vertical, 0));
 
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(piece.Slot == expected ? 7 : 10, piece.Hp));
     }
 
     [Theory]
-    [InlineData(-.2f, ArmorSlot.Helmet)]
-    [InlineData(.2f, ArmorSlot.Boots)]
-    public void FrontalShieldStillAbsorbsBeforeDirectionallyMatchingArmor(float vertical, ArmorSlot expected)
+    [InlineData(ShotKind.Pellet, -.2f, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Pellet, .2f, ArmorSlot.Boots)]
+    [InlineData(ShotKind.Lob, -.2f, ArmorSlot.Helmet)]
+    [InlineData(ShotKind.Lob, .2f, ArmorSlot.Boots)]
+    public void FrontalShieldStillAbsorbsBeforeDirectionallyMatchingArmor(ShotKind shot, float vertical, ArmorSlot expected)
     {
         var zombie = Armored();
 
-        new GameSession().DamageZombie(zombie, 13, DamageKind.Pierce, ShotKind.Pellet, new Vector3(0, vertical, -1));
+        new GameSession().DamageZombie(zombie, 13, shot == ShotKind.Pellet ? DamageKind.Pierce : DamageKind.Blunt,
+            shot, new Vector3(0, vertical, -1));
 
         Assert.DoesNotContain(zombie.ArmorPieces, piece => piece.Slot == ArmorSlot.Shield);
         Assert.Equal(10, zombie.BodyHp);
         Assert.All(zombie.ArmorPieces, piece => Assert.Equal(piece.Slot == expected ? 7 : 10, piece.Hp));
     }
 
-    [Fact]
-    public void MissingBootsDoNotRedirectAnUnderneathPelletIntoAChestplate()
+    [Theory]
+    [InlineData(ShotKind.Pellet)]
+    [InlineData(ShotKind.Lob)]
+    public void MissingBootsDoNotRedirectAnUnderneathProjectileIntoAChestplate(ShotKind shot)
     {
         var zombie = Armored();
         var game = new GameSession();
-        game.DamageZombie(zombie, 10, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
+        var kind = shot == ShotKind.Pellet ? DamageKind.Pierce : DamageKind.Blunt;
+        game.DamageZombie(zombie, 10, kind, shot, Vector3.UnitY);
 
-        game.DamageZombie(zombie, 3, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
+        game.DamageZombie(zombie, 3, kind, shot, Vector3.UnitY);
 
         Assert.Equal(7, zombie.BodyHp);
         Assert.Equal(10, zombie.ArmorPieces.Single(piece => piece.Slot == ArmorSlot.Chestplate).Hp);

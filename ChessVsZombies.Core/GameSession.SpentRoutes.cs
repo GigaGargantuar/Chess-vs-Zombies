@@ -11,6 +11,7 @@ public sealed partial class GameSession
     {
         _spentRoutes.Clear();
         _builderYields.Clear();
+        _pillarDepartures.Clear();
     }
 
     private void BuildSpentRoutes(List<Cell> nodes, int[] nodeRows, float[] edgeCosts, int[] edgeOffsets, int edgesPerNode)

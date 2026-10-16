@@ -31,7 +31,7 @@ public sealed partial class GameSession
     }
 
     /// <summary>Whether a grounded zombie is currently waiting for allies behind cover.</summary>
-    public bool IsZombieHiding(Zombie zombie) => zombie.Hp > 0 && CanGatherBehindCover(zombie) && !zombie.NextCell.HasValue &&
+    public bool IsZombieHiding(Zombie zombie) => zombie.BodyHp > 0 && CanGatherBehindCover(zombie) && !zombie.NextCell.HasValue &&
         HasSolidFooting(zombie.Position, zombie) && _coverWaiting.ContainsKey(zombie.Id);
 
     private bool CanGatherBehindCover(Zombie zombie) => !IsZombieRetreating(zombie) &&
@@ -46,30 +46,38 @@ public sealed partial class GameSession
     }
 
     private Zombie? SelectTurretTarget(Turret turret, out ShotKind shot, out float nearest)
+        => SelectTurretTargetWithAim(turret, out shot, out nearest, out _);
+
+    private Zombie? SelectTurretTargetWithAim(Turret turret, out ShotKind shot, out float nearest, out Vector3 selectedAim)
     {
         Zombie? target = null;
         shot = ShotKind.Melee;
         nearest = float.PositiveInfinity;
+        selectedAim = default;
         foreach (var zombie in Zombies)
         {
-            if (zombie.Hp <= 0 || !TryGetTurretShot(turret, zombie, out var kind)) continue;
+            if (zombie.BodyHp <= 0 || !TryGetTurretShotAndAim(turret, zombie, out var kind, out var aim)) continue;
             // A strike requires physical reach. Ranged shots instead hit the first
             // actual solid on their ordinary projectile trajectory, wearing down cover.
-            var aim = GetTurretAimPoint(turret, zombie, kind);
             if (kind == ShotKind.Melee && !HasLineOfSight(turret.Cell.Center, aim)) continue;
             float distance = Vector3.DistanceSquared(turret.Cell.Center, aim);
             if (distance >= nearest) continue;
             target = zombie;
             shot = kind;
             nearest = distance;
+            selectedAim = aim;
         }
         return target;
     }
 
     private bool TryGetTurretShot(Turret turret, Zombie zombie, out ShotKind kind)
+        => TryGetTurretShotAndAim(turret, zombie, out kind, out _);
+
+    private bool TryGetTurretShotAndAim(Turret turret, Zombie zombie, out ShotKind kind, out Vector3 aim)
     {
         if (zombie.IsGiant)
-            return TryGetKiloTurretAim(turret, zombie, null, out kind, out _);
+            return TryGetKiloTurretAim(turret, zombie, null, out kind, out aim);
+        aim = zombie.Position;
         var offset = zombie.Cell - turret.Cell;
         bool jump = Economy.IsJumpOffset(turret, offset);
         kind = jump ? ShotKind.Lob : turret.Kind == PieceKind.Pawn && offset.Chebyshev == 1
@@ -87,10 +95,44 @@ public sealed partial class GameSession
     {
         selectedShot = ShotKind.Melee;
         selectedAim = zombie.Position;
+        float nearest = float.PositiveInfinity;
+        foreach (var candidate in EnumerateKiloTurretAims(turret, zombie, requiredShot))
+        {
+            float distance = Vector3.DistanceSquared(turret.Cell.Center, candidate.Aim);
+            if (distance >= nearest) continue;
+            nearest = distance;
+            selectedShot = candidate.Kind;
+            selectedAim = candidate.Aim;
+        }
+        return float.IsFinite(nearest);
+    }
+
+    private IEnumerable<TurretShotAim> EnumerateKiloTurretAims(Turret turret, Zombie zombie, ShotKind? requiredShot = null)
+    {
         var min = zombie.Position - zombie.BodyHalfExtents;
         var max = zombie.Position + zombie.BodyHalfExtents;
         var origin = turret.Cell.Center;
-        float nearest = float.PositiveInfinity;
+        int? jumpRange = null, orthogonalRange = null, planeRange = null, spaceRange = null;
+        int Range(UpgradeKind kind)
+        {
+            // Resolve each family only where its original predicate would first
+            // read it. Unused or overflowing allocations retain their lazy behavior.
+            switch (kind)
+            {
+                case UpgradeKind.Jump:
+                    if (!jumpRange.HasValue) jumpRange = Economy.GetRange(turret, kind);
+                    return jumpRange.GetValueOrDefault();
+                case UpgradeKind.Orthogonal:
+                    if (!orthogonalRange.HasValue) orthogonalRange = Economy.GetRange(turret, kind);
+                    return orthogonalRange.GetValueOrDefault();
+                case UpgradeKind.PlaneDiagonal:
+                    if (!planeRange.HasValue) planeRange = Economy.GetRange(turret, kind);
+                    return planeRange.GetValueOrDefault();
+                default:
+                    if (!spaceRange.HasValue) spaceRange = Economy.GetRange(turret, kind);
+                    return spaceRange.GetValueOrDefault();
+            }
+        }
         // Only cells with actual body volume count. A grazing grid face must
         // not grant a whole extra firing lane while a Kilo crosses a boundary.
         const float epsilon = .00001f;
@@ -100,8 +142,8 @@ public sealed partial class GameSession
                 {
                     var cell = new Cell(x, y, z);
                     var offset = cell - turret.Cell;
-                    bool jump = Economy.IsJumpOffset(turret, offset);
-                    if (!jump && !Economy.IsDirectionalOffset(turret, offset)) continue;
+                    bool jump = Economy.IsJumpOffsetAtRange(turret, offset, Range(UpgradeKind.Jump));
+                    if (!jump && !(Economy.TryGetDirectionalOffset(offset, out var family, out long reach) && reach <= Range(family))) continue;
                     var kind = jump ? ShotKind.Lob : turret.Kind == PieceKind.Pawn && offset.Chebyshev == 1
                         ? ShotKind.Melee : ShotKind.Pellet;
                     if (requiredShot.HasValue && kind != requiredShot.Value) continue;
@@ -112,13 +154,9 @@ public sealed partial class GameSession
                     var ray = Vector3.Normalize(direction) * (WorldGrid.Size * 2);
                     if (!ProjectileBoxIntersection(origin, ray, min, max, out float hit)) continue;
                     var aim = origin + ray * hit;
-                    float distance = Vector3.DistanceSquared(origin, aim);
-                    if (distance >= nearest || TurretShotCrossesCore(origin, aim, kind)) continue;
-                    nearest = distance;
-                    selectedShot = kind;
-                    selectedAim = aim;
+                    if (TurretShotCrossesCore(origin, aim, kind)) continue;
+                    yield return new TurretShotAim(cell, kind, aim);
                 }
-        return float.IsFinite(nearest);
     }
 
     private static bool TurretShotCrossesCore(Vector3 origin, Vector3 aim, ShotKind shot)
@@ -149,7 +187,7 @@ public sealed partial class GameSession
         _coverWaiting.Remove(zombie.Id);
         // Armor impacts count as damage too. Keep advancing out of this hiding
         // spot rather than restarting its wait during the next simulation slice.
-        if (zombie.Hp > 0) _coverAdvanceOrigins[zombie.Id] = zombie.Position;
+        if (zombie.BodyHp > 0) _coverAdvanceOrigins[zombie.Id] = zombie.Position;
         else _coverAdvanceOrigins.Remove(zombie.Id);
     }
 
@@ -168,7 +206,7 @@ public sealed partial class GameSession
         int remaining = Math.Max(0, wave.TotalCount - wave.Spawned);
         if (remaining >= CoverAttackGroupSize) return false;
         foreach (var ally in Zombies)
-            if (ally.Hp > 0 && ally.WaveIndex == zombie.WaveIndex && ++remaining >= CoverAttackGroupSize) return false;
+            if (ally.BodyHp > 0 && ally.WaveIndex == zombie.WaveIndex && ++remaining >= CoverAttackGroupSize) return false;
         return true;
     }
 
@@ -182,7 +220,7 @@ public sealed partial class GameSession
         }
     }
 
-    private bool IsActiveCoverGroup(CoverGroup group) => group.Leader.Hp > 0 && CanGatherBehindCover(group.Leader) && group.Threat.Hp > 0 &&
+    private bool IsActiveCoverGroup(CoverGroup group) => group.Leader.BodyHp > 0 && CanGatherBehindCover(group.Leader) && group.Threat.Hp > 0 &&
         !group.Leader.NextCell.HasValue &&
         Vector3.DistanceSquared(group.Leader.Position, group.Anchor) < .0001f && HasSolidFooting(group.Anchor, group.Leader) &&
         !IsAdvancingFromCover(group.Leader) && TryFindCloseCover(group.Anchor, group.Threat.Cell.Center, out _);
@@ -196,15 +234,15 @@ public sealed partial class GameSession
     }
 
     private bool IsAssembledCoverMember(Zombie ally, CoverGroup group) =>
-        ally.Hp > 0 && CanGatherBehindCover(ally) && !IsAdvancingFromCover(ally) &&
+        ally.BodyHp > 0 && CanGatherBehindCover(ally) && !IsAdvancingFromCover(ally) &&
         Vector3.DistanceSquared(ally.Position, group.Anchor) <= CoverGatheringRadius * CoverGatheringRadius &&
         HasSolidFooting(ally.Position, ally) && TryFindCloseCover(ally.Position, group.Threat.Cell.Center, out _);
 
     private void UpdateCoverGroups(float dt)
     {
         foreach (var zombie in Zombies)
-            if (zombie.Hp > 0 && CanGatherBehindCover(zombie) && IsFinalWaveGroup(zombie))
-                ReleaseCoverGroup(Zombies.Where(ally => ally.Hp > 0 && CanGatherBehindCover(ally) && ally.WaveIndex == zombie.WaveIndex));
+            if (zombie.BodyHp > 0 && CanGatherBehindCover(zombie) && IsFinalWaveGroup(zombie))
+                ReleaseCoverGroup(Zombies.Where(ally => ally.BodyHp > 0 && CanGatherBehindCover(ally) && ally.WaveIndex == zombie.WaveIndex));
 
         List<int>? inactive = null;
         foreach (var entry in _coverGroups)
@@ -238,7 +276,7 @@ public sealed partial class GameSession
         }
         if (IsFinalWaveGroup(zombie))
         {
-            ReleaseCoverGroup(Zombies.Where(ally => ally.Hp > 0 && CanGatherBehindCover(ally) && ally.WaveIndex == zombie.WaveIndex));
+            ReleaseCoverGroup(Zombies.Where(ally => ally.BodyHp > 0 && CanGatherBehindCover(ally) && ally.WaveIndex == zombie.WaveIndex));
             return false;
         }
 
@@ -261,7 +299,7 @@ public sealed partial class GameSession
 
     private bool RegisterCoverGroup(Zombie zombie)
     {
-        if (zombie.Hp <= 0 || !CanGatherBehindCover(zombie) || zombie.NextCell.HasValue || !HasSolidFooting(zombie.Position, zombie) ||
+        if (zombie.BodyHp <= 0 || !CanGatherBehindCover(zombie) || zombie.NextCell.HasValue || !HasSolidFooting(zombie.Position, zombie) ||
             IsAdvancingFromCover(zombie) || IsFinalWaveGroup(zombie)) return false;
         if (_coverGroups.TryGetValue(zombie.Id, out var own) && IsActiveCoverGroup(own)) return false;
         foreach (var group in _coverGroups.Values)

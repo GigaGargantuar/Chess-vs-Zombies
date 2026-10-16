@@ -146,6 +146,9 @@ public sealed class CampaignState
     public SavedUpgradeTemplate? UpgradeTemplate { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public UpgradeBatchState? QueuedUpgradeBatch { get; set; }
+    // Optional additive v8 data: old checkpoints have no saved formation.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SavedFormationTemplate? SavedFormation { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<BlockDrop>? PendingBlockDrops { get; set; }
     // Optional additive v8 data: campaigns saved before returning enemies have no queue.
@@ -238,6 +241,31 @@ public static class SaveStore
         catch (Exception exception) when (IsSaveException(exception))
         {
             error = $"Could not save upgrade template: {exception.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>Saves a formation without replacing the prepared battlefield or economy during combat.</summary>
+    public static bool TrySaveFormationTemplate(FormationTemplate template, string path, out string error)
+    {
+        try
+        {
+            ArgumentNullException.ThrowIfNull(template);
+            var saved = SavedFormationTemplate.FromTemplate(template);
+            var copy = FormationTemplate.FromSaved(saved);
+            if (!TryLoad(path, out var prepared, out error))
+            {
+                if (string.IsNullOrEmpty(error)) error = "No preparation checkpoint is available to save this formation.";
+                return false;
+            }
+            prepared!.RestoreFormationTemplate(copy);
+            Save(prepared, path);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception) when (IsSaveException(exception))
+        {
+            error = $"Could not save turret formation: {exception.Message}";
             return false;
         }
     }
@@ -342,6 +370,11 @@ public static class SaveStore
         if (state.Version < 7 ? state.UpgradeTemplate != null : state.UpgradeTemplate == null)
             throw new InvalidDataException("The upgrade template does not match the checkpoint version.");
         if (state.UpgradeTemplate != null) ValidateUpgradeTemplate(state.UpgradeTemplate);
+        if (state.SavedFormation != null)
+        {
+            if (state.Version < 8) throw new InvalidDataException("Saved formations require checkpoint version 8.");
+            _ = FormationTemplate.FromSaved(state.SavedFormation);
+        }
         if (state.LiquidInventory != null && (state.LiquidInventory.Count != Enum.GetValues<LiquidKind>().Length ||
             state.LiquidInventory.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value < 0) ||
             Enum.GetValues<LiquidKind>().Any(kind => !state.LiquidInventory.ContainsKey(kind))))
@@ -397,7 +430,8 @@ public static class SaveStore
 
         // Use the simulation's own restore validation so capacity, crust geometry,
         // reaction clouds, and future fluid rules cannot diverge from checkpoint checks.
-        var liquids = new LiquidSystem(world);
+        var turretCells = state.Turrets.Where(saved => saved is { Hp: > 0 }).Select(saved => saved.Cell).ToHashSet();
+        var liquids = new LiquidSystem(world) { IsTurretCell = turretCells.Contains };
         if (state.Liquids != null) liquids.RestoreState(state.Version is 5 or 6
             ? ConvertLegacyObsidianDurability(state.Liquids) : state.Liquids);
         if (state.Buckets != null) new LiquidBucketSystem(world, liquids).RestoreState(state.Buckets);
@@ -410,7 +444,8 @@ public static class SaveStore
         {
             if (saved is null || saved.Id <= 0 || saved.Id == int.MaxValue || !ids.Add(saved.Id) ||
                 !Enum.IsDefined(saved.Kind) || !IsValidTurretCell(saved.Cell, state.Version) || WorldGrid.IsCore(saved.Cell) ||
-                !cells.Add(saved.Cell) || world.GetMaterial(saved.Cell) != Material.Air || liquids.GetTotalUnits(saved.Cell) != 0 ||
+                !cells.Add(saved.Cell) || world.GetMaterial(saved.Cell) is not (Material.Air or Material.Obsidian) ||
+                liquids.GetTotalUnits(saved.Cell) + (world.GetObsidian(saved.Cell)?.Units ?? 0) > LiquidSystem.TurretCapacityUnits ||
                 saved.JumpPattern is null || !float.IsFinite(saved.Hp) || saved.Hp <= 0)
                 throw new InvalidDataException("A saved piece has invalid identity, placement, HP, or component data.");
             var turret = new Turret { Id = saved.Id, Kind = saved.Kind, Cell = saved.Cell, Hp = saved.Hp };

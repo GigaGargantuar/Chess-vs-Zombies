@@ -227,8 +227,18 @@ public sealed partial class GameSession
                         if (contact.Tower.Hp <= 0 || !flight.Blocks.Contains(contact.Block) ||
                             !flight.DamagedTowerIds.Add(contact.Tower.Id)) continue;
                         float towerHp = contact.Tower.Hp;
-                        contact.Tower.Hp -= MegaBlockImpactDamage(flight, contact.Block);
-                        contact.Block.Hp -= towerHp;
+                        float damage = MegaBlockImpactDamage(flight, contact.Block);
+                        float shellAbsorbed = 0;
+                        if (World.GetObsidian(contact.Tower.Cell) is { } shell)
+                        {
+                            shellAbsorbed = Math.Min(damage, shell.Hp);
+                            World.DamageObsidian(contact.Tower.Cell, damage);
+                            damage -= shellAbsorbed;
+                        }
+                        contact.Tower.Hp -= damage;
+                        // A shell pays for the contact before the tower does.
+                        // Bare-tower contacts retain their full pre-hit HP cost.
+                        contact.Block.Hp -= shellAbsorbed + (damage > 0 ? towerHp : 0);
                         if (contact.Block.Hp <= 0) flight.Blocks.Remove(contact.Block);
                         stopped |= contact.Tower.Hp > 0;
                     }
@@ -296,7 +306,8 @@ public sealed partial class GameSession
                     for (int z = Math.Max(0, (int)MathF.Floor(min.Z)); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(max.Z)); z++)
                     {
                         var cell = new Cell(x, y, z);
-                        if (World.GetMaterial(cell) == Material.Air) continue;
+                        var material = World.GetMaterial(cell);
+                        if (material == Material.Air || material == Material.Obsidian && TrySelectTurret(cell) != null) continue;
                         foreach (var bounds in SolidCollisionBounds(cell))
                             if (MegaBallisticBoxIntersection(start, velocity, duration, bounds.Min - half, bounds.Max + half, out var hit))
                             {

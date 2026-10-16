@@ -8,7 +8,7 @@ public class LiquidCombatTests
 {
     [Theory]
     [InlineData(ShotKind.Pellet, ArmorSlot.Chestplate, ArmorSlot.Helmet)]
-    [InlineData(ShotKind.Lob, ArmorSlot.Helmet, ArmorSlot.Chestplate)]
+    [InlineData(ShotKind.Lob, ArmorSlot.Chestplate, ArmorSlot.Helmet)]
     public void PhysicalDamageStripsShieldThenMatchingArmorAndSpillsToBody(ShotKind shot, ArmorSlot matching, ArmorSlot bypassed)
     {
         var game = new GameSession();
@@ -76,7 +76,7 @@ public class LiquidCombatTests
         var zombie = new Zombie { Kind = ZombieKind.Armored, Tier = tier, WaveIndex = -1 };
         Assert.Equal(sinks, zombie.SinksIn(liquid));
         game.DamageZombie(zombie, 2 * Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
-        game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Blunt, ShotKind.Lob, Vector3.UnitY);
+        game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Blunt, ShotKind.Lob, -Vector3.UnitY);
         game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
         Assert.Equal(10, zombie.BodyHp);
         Assert.Empty(zombie.ArmorPieces);
@@ -103,7 +103,7 @@ public class LiquidCombatTests
         zombie.NextCell = new Cell(8, 13, 8);
         zombie.MoveProgress = .5f;
 
-        game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Blunt, ShotKind.Lob, Vector3.UnitY);
+        game.DamageZombie(zombie, Balance.GearHp(tier), DamageKind.Blunt, ShotKind.Lob, -Vector3.UnitY);
 
         Assert.Equal(10, zombie.BodyHp);
         Assert.Empty(zombie.ArmorPieces);
@@ -210,7 +210,7 @@ public class LiquidCombatTests
     }
 
     [Fact]
-    public void PouringIsAtomicAndRejectsSolidsPiecesInvalidAmountsAndOverfilledCells()
+    public void PouringIsAtomicAndRejectsSolidsInvalidAmountsAndOverfilledCellsWhileSharingTurrets()
     {
         var game = new GameSession();
         Assert.True(game.BuyLiquid(LiquidKind.Water));
@@ -224,15 +224,16 @@ public class LiquidCombatTests
         Assert.False(game.PourLiquid(destination, LiquidKind.Water, 0));
         Assert.False(game.PourLiquid(destination, LiquidKind.Water, -1));
         Assert.True(game.Deploy(PieceKind.Pawn, new Cell(9, 16, 8)));
-        Assert.False(game.PourLiquid(new Cell(9, 16, 8), LiquidKind.Water, 1));
-        Assert.False(game.Deploy(PieceKind.Pawn, destination));
-        Assert.Equal(13, game.LiquidInventory[LiquidKind.Water]);
-        Assert.Equal(7, game.Liquids.GetTotalUnits(destination));
-        Assert.Equal(799, game.Economy.Currency);
+        Assert.True(game.PourLiquid(new Cell(9, 16, 8), LiquidKind.Water, 1));
+        Assert.True(game.Deploy(PieceKind.Pawn, destination));
+        Assert.Equal(12, game.LiquidInventory[LiquidKind.Water]);
+        Assert.Equal(5, game.Liquids.GetTotalUnits(destination));
+        Assert.Equal(8, game.Liquids.Cells.Sum(cell => cell.Water));
+        Assert.Equal(798, game.Economy.Currency);
         Assert.True(game.StartLevel());
         Assert.False(game.BuyLiquid(LiquidKind.Water));
         Assert.False(game.PourLiquid(destination, LiquidKind.Water, 1));
-        Assert.Equal(13, game.LiquidInventory[LiquidKind.Water]);
+        Assert.Equal(12, game.LiquidInventory[LiquidKind.Water]);
     }
 
     [Fact]

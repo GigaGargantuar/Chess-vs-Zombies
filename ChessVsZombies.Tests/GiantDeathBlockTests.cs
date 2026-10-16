@@ -72,7 +72,7 @@ public sealed class GiantDeathBlockTests
     }
 
     [Fact]
-    public void ReleasedBlockMayStillAttachToAnExistingSupportedWall()
+    public void ReleasedBlocksFallPastAnExistingSupportedWall()
     {
         var game = new GameSession();
         for (int y = 16; y <= 21; y++)
@@ -83,9 +83,11 @@ public sealed class GiantDeathBlockTests
         Invoke(game, "ResolveBlockDrops");
 
         Assert.Empty(game.PendingBlockDrops);
-        Assert.Equal(321, game.World.GetBarrier(new Cell(6, 21, 5))!.Hp);
-        Assert.Equal(777, game.World.GetTerrainHp(new Cell(5, 21, 5)));
-        Assert.Empty(game.Falls.Blocks);
+        Assert.Equal(321, game.World.GetBarrier(new Cell(6, 16, 5))!.Hp);
+        Assert.Equal(777, game.World.GetTerrainHp(new Cell(5, 16, 5)));
+        Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(6, 21, 5)));
+        Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(5, 21, 5)));
+        Assert.Equal(2, game.Falls.Blocks.Count);
     }
 
     [Fact]

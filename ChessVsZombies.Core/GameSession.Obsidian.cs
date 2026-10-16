@@ -13,7 +13,13 @@ public sealed partial class GameSession
         var selected = PlacementPart(existing, face);
         var actualFace = selected?.Face ?? face;
         var offset = selected?.OffsetUnits ?? 0;
+        var proposed = PlacementCrust(cell, face);
         if (!Inventory.TrySpend(Material.Obsidian)) return Reject("No recovered obsidian layers remain.");
+        if (!Liquids.TryDisplaceLiquid(cell, LiquidSystem.UnitsPerBlock - proposed.Units, proposed))
+        {
+            Inventory.Add(Material.Obsidian);
+            return Reject("There is no room for the displaced liquid.");
+        }
         if (!World.AddObsidian(cell, 1, actualFace, offset))
         {
             Inventory.Add(Material.Obsidian);
@@ -32,10 +38,12 @@ public sealed partial class GameSession
         var existing = World.GetObsidian(cell);
         if (World.GetMaterial(cell) is not (Material.Air or Material.Obsidian) || TrySelectTurret(cell) != null)
             return "That cell is occupied by a block or tower.";
-        if (Liquids.GetTotalUnits(cell) != 0) return "Drain the cell before placing an obsidian layer.";
         var selected = PlacementPart(existing, face);
         if (!World.CanAddObsidian(cell, 1, selected?.Face ?? face, selected?.OffsetUnits ?? 0))
             return "This obsidian crust has no room for another layer.";
+        var cellCrust = PlacementCrust(cell, face);
+        if (!Liquids.CanDisplaceLiquid(cell, LiquidSystem.UnitsPerBlock - cellCrust.Units, cellCrust))
+            return "There is no room for the displaced liquid.";
         var proposed = selected is null
             ? new ObsidianCell(cell, 1, face, LiquidSystem.ObsidianHpPerUnit)
             : selected with { Units = selected.Units + 1, Hp = selected.Hp + LiquidSystem.ObsidianHpPerUnit };
@@ -50,6 +58,21 @@ public sealed partial class GameSession
     private static ObsidianCell? PlacementPart(ObsidianCell? crust, CrustFace face) =>
         crust?.Parts.FirstOrDefault(part => part.Face == face) ?? crust?.Parts.First();
 
+    private ObsidianCell PlacementCrust(Cell cell, CrustFace face)
+    {
+        var existing = World.GetObsidian(cell);
+        if (existing is null) return new ObsidianCell(cell, 1, face, LiquidSystem.ObsidianHpPerUnit);
+        var selected = PlacementPart(existing, face)!;
+        bool opposite = selected.Face != existing.Face;
+        return existing with
+        {
+            Units = existing.Units + 1,
+            Hp = existing.Hp + LiquidSystem.ObsidianHpPerUnit,
+            OppositeUnits = existing.OppositeUnits + (opposite ? 1 : 0),
+            OppositeHp = existing.OppositeHp + (opposite ? LiquidSystem.ObsidianHpPerUnit : 0)
+        };
+    }
+
     /// <summary>Settle slabs by actual contact, including disjoint slabs sharing one cell.</summary>
     internal bool SettleUnsupportedObsidianStacks(HashSet<Cell> movedSolids, List<ObsidianCell> movedCrusts)
     {
@@ -58,7 +81,8 @@ public sealed partial class GameSession
                      .SelectMany(crust => crust.Parts).OrderBy(crust => crust.Cell.Y).ToArray())
         {
             var origin = originalCrust.Cell;
-            if (World.GetObsidian(origin) is not { } originalCell || originalCell.Units == LiquidSystem.UnitsPerBlock ||
+            if (IsMixedClusterPartHandled(originalCrust) || TrySelectTurret(origin) != null ||
+                World.GetObsidian(origin) is not { } originalCell || originalCell.Units == LiquidSystem.UnitsPerBlock ||
                 !originalCell.Parts.Contains(originalCrust)) continue;
             var load = new List<Cell>();
             var next = origin + new Cell(0, 1, 0);
@@ -70,12 +94,20 @@ public sealed partial class GameSession
             if (HasStackAnchor(originalCrust, load.Count) || HasCrustFooting(originalCrust)) continue;
 
             var current = origin;
+            int movingLoadCount = load.Count;
             int fallenCells = 0;
             int loadDrop = 0;
             bool shattered = false;
+            bool loadRegistered = false;
+            void RegisterMovingLoad()
+            {
+                if (loadRegistered || movingLoadCount == 0) return;
+                RegisterFallingBlockCluster(load);
+                loadRegistered = true;
+            }
             while (World.GetObsidian(current)?.Parts.FirstOrDefault(part => part.Face == originalCrust.Face) is { } crust)
             {
-                if (World.GetObsidian(current)!.Units == LiquidSystem.UnitsPerBlock || HasStackAnchor(crust, load.Count)) break;
+                if (World.GetObsidian(current)!.Units == LiquidSystem.UnitsPerBlock) break;
                 var below = current + new Cell(0, -1, 0);
                 if (!WorldGrid.IsInside(below)) break;
                 // Only boxes with overlapping footprints can halt this fall.
@@ -85,7 +117,7 @@ public sealed partial class GameSession
                     // A top/internal crust may already have a real fractional gap
                     // beneath it. A bottom crust resting on ground was excluded above.
                     bool fell = fallenCells > 0 || crust.Min.Y > current.Y + .00001f;
-                    if (load.Count > 0 && fell)
+                    if (movingLoadCount > 0 && fell)
                     {
                         World.DamageObsidianPart(current, crust.Face, crust.Hp);
                         ShatterObsidian(current);
@@ -93,7 +125,8 @@ public sealed partial class GameSession
                         // support, and must not be overwritten by the falling block.
                         if (World.GetMaterial(current) == Material.Air)
                         {
-                            ShiftLoadDown(current, load.Count);
+                            RegisterMovingLoad();
+                            ShiftLoadDown(current, movingLoadCount);
                             loadDrop++;
                         }
                         shattered = true;
@@ -101,16 +134,25 @@ public sealed partial class GameSession
                     }
                     break;
                 }
-                // A full block cannot move into a cell still containing the other
-                // half of a paired crust. Such a load remains on that real support.
-                if (load.Count > 0 && World.GetObsidian(current)!.OppositeUnits > 0) break;
-                if (!World.MoveObsidianPart(crust, below)) break;
+                // A grounded partner can take over the load while this disjoint
+                // slab keeps falling. Keep the load at that real contact instead
+                // of dragging it through the stationary partner's occupied cell.
+                if (movingLoadCount > 0 && World.GetObsidian(current)!.OppositeUnits > 0)
+                {
+                    bool partnerSupportsLoad = World.GetObsidian(current)!.Parts.Any(part =>
+                        part.Face != crust.Face && IsGroundedObsidianPart(part) &&
+                        Math.Abs(part.Max.Y - (current.Y + 1)) <= .00001f);
+                    if (!partnerSupportsLoad) break;
+                    movingLoadCount = 0;
+                }
+                RegisterMovingLoad();
+                if (!MoveFallingObsidianPart(crust, below)) break;
                 if (crust.Face is CrustFace.Bottom or CrustFace.Top) Liquids.SwapDisplacedLiquid(current, below);
                 else Liquids.DisplaceForObsidianMove(current, below);
-                ShiftLoadDown(current, load.Count);
+                ShiftLoadDown(current, movingLoadCount);
                 current = below;
                 fallenCells++;
-                loadDrop++;
+                if (movingLoadCount > 0) loadDrop++;
                 changed = true;
             }
 
@@ -137,15 +179,23 @@ public sealed partial class GameSession
         foreach (var original in World.ObsidianCells.Where(crust => crust.OppositeUnits > 0 &&
                      crust.Units < LiquidSystem.UnitsPerBlock).OrderBy(crust => crust.Cell.Y).ToArray())
         {
-            if (World.GetObsidian(original.Cell) != original) continue;
+            if (original.Parts.Any(IsMixedClusterPartHandled) || TrySelectTurret(original.Cell) != null ||
+                World.GetObsidian(original.Cell) != original) continue;
             int loadCount = 0;
             while (IsFullMovableBlock(original.Cell + new Cell(0, loadCount + 1, 0))) loadCount++;
             if (loadCount == 0 || original.Parts.Any(part => HasCrustFooting(part) || HasStackAnchor(part, loadCount))) continue;
             var current = original.Cell;
             int drop = 0;
+            bool loadRegistered = false;
+            void RegisterMovingLoad()
+            {
+                if (loadRegistered) return;
+                RegisterFallingBlockCluster(Enumerable.Range(1, loadCount)
+                    .Select(height => original.Cell + new Cell(0, height, 0)));
+                loadRegistered = true;
+            }
             while (World.GetObsidian(current) is { } crust)
             {
-                if (crust.Parts.Any(part => HasStackAnchor(part, loadCount))) break;
                 var below = current - new Cell(0, 1, 0);
                 if (!WorldGrid.IsInside(below)) break;
                 if (World.GetMaterial(below) != Material.Air || TrySelectTurret(below) != null)
@@ -157,6 +207,7 @@ public sealed partial class GameSession
                         ShatterObsidian(current);
                         if (World.GetMaterial(current) == Material.Air)
                         {
+                            RegisterMovingLoad();
                             ShiftLoadDown(current, loadCount);
                             drop++;
                         }
@@ -164,7 +215,8 @@ public sealed partial class GameSession
                     }
                     break;
                 }
-                if (!World.MoveBlock(current, below)) break;
+                RegisterMovingLoad();
+                if (!MoveFallingBlock(current, below)) break;
                 Liquids.DisplaceForObsidianMove(current, below);
                 ShiftLoadDown(current, loadCount);
                 current = below;
@@ -197,7 +249,7 @@ public sealed partial class GameSession
             var to = from - new Cell(0, 1, 0);
             // The preceding lower object has already vacated this cell. The
             // synchronous column move cannot acquire new occupancy between steps.
-            if (!World.MoveBlock(from, to)) throw new InvalidOperationException("An obsidian load lost its contiguous block geometry.");
+            if (!MoveFallingBlock(from, to)) throw new InvalidOperationException("An obsidian load lost its contiguous block geometry.");
             Liquids.SwapDisplacedLiquid(from, to);
         }
     }
@@ -205,21 +257,9 @@ public sealed partial class GameSession
     private bool IsFullMovableBlock(Cell cell) => Balance.IsTerrainMaterial(World.GetMaterial(cell)) ||
         World.GetMaterial(cell) == Material.Barrier || World.GetObsidian(cell)?.Units == LiquidSystem.UnitsPerBlock;
 
-    private bool HasStackAnchor(ObsidianCell crust, int loadCount)
-    {
-        for (int height = 0; height <= loadCount; height++)
-        {
-            var cell = crust.Cell + new Cell(0, height, 0);
-            var min = height == 0 ? crust.Min : new Vector3(cell.X, cell.Y, cell.Z);
-            var max = height == 0 ? crust.Max : min + Vector3.One;
-            foreach (var direction in Horizontal)
-                if (TouchesNeighborBlock(min, max, cell + direction)) return true;
-            // An immutable core or another partial crust above the load is an
-            // external ceiling, not a movable member of the full-block column.
-            if (height == loadCount && TouchesNeighborBlock(min, max, cell + new Cell(0, 1, 0))) return true;
-        }
-        return false;
-    }
+    // Decide attachment before a fall begins. A detached slab or loaded pair
+    // cannot acquire a new side/ceiling anchor while passing it on the way down.
+    private bool HasStackAnchor(ObsidianCell crust, int loadCount) => IsGroundedObsidianPart(crust);
 
     private bool HasCrustFooting(ObsidianCell crust) =>
         TouchesNeighborBlock(crust.Min, crust.Max, crust.Cell - new Cell(0, 1, 0));

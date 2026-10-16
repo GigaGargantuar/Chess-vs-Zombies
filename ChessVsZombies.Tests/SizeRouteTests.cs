@@ -52,6 +52,10 @@ public class SizeRouteTests
         // The whole row blocks a Kilo's head while its intended foot cells are
         // empty. One remaining HP makes the actual breach observable promptly.
         for (int z = 0; z < WorldGrid.Size; z++) Assert.True(add(new Cell(13, 17, z), Material.Dirt, 1));
+        // Ground both ends so breaching the middle does not drop either half
+        // of the head-height cover into the walking path.
+        Assert.True(add(new Cell(13, 16, 0), Material.Dirt, 1));
+        Assert.True(add(new Cell(13, 16, WorldGrid.Size - 1), Material.Dirt, 1));
         var headCover = new Cell(13, 17, 15);
         Assert.Equal(Material.Air, game.World.GetMaterial(new Cell(13, 16, 15)));
         var origin = zombie.Position;
@@ -72,7 +76,7 @@ public class SizeRouteTests
         Assert.True(game.CoreHp < Balance.CoreHp);
         // The nearby Kilo can legitimately breach its own column at z=16
         // while following. All cover outside those two approaches stays intact.
-        Assert.InRange(game.World.Barriers.Count(), 29, 30);
+        Assert.InRange(game.World.Barriers.Count(), 31, 32);
         for (int z = 0; z < WorldGrid.Size; z++)
             if (z is not (15 or 16 or 17))
                 Assert.Equal(1, Assert.IsType<ChessVsZombies.Core.Barrier>(game.World.GetBarrier(new Cell(13, 17, z))).Hp);

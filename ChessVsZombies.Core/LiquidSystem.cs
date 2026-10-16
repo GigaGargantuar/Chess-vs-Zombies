@@ -95,13 +95,16 @@ public sealed class LiquidState
 public sealed class LiquidSystem
 {
     public const int UnitsPerBlock = 10;
+    public const int TurretCapacityUnits = 5;
     public const int WaterCost = 100, MercuryCost = 800, LavaCost = 1000;
     public const float ObsidianHpPerUnit = 5;
     public const float StepSeconds = .1f;
     private const double StepDuration = .1d;
     private static readonly LiquidKind[] DensityOrder = [LiquidKind.Mercury, LiquidKind.Lava, LiquidKind.Water];
     private static readonly LiquidKind[] SurfaceOrder = [LiquidKind.Water, LiquidKind.Lava, LiquidKind.Mercury];
-    private static readonly Cell[] LateralDirections = [new(1, 0, 0), new(0, 0, 1), new(-1, 0, 0), new(0, 0, -1)];
+    private static readonly Cell[] LateralDirections = [new(1, 0, 0), new(1, 0, 1), new(0, 0, 1), new(-1, 0, 1),
+        new(-1, 0, 0), new(-1, 0, -1), new(0, 0, -1), new(1, 0, -1)];
+    private static readonly Cell[] DisplacementDirections = [new(0, 1, 0), new(1, 0, 0), new(0, 0, 1), new(-1, 0, 0), new(0, 0, -1), new(0, -1, 0)];
     private static readonly Cell[] PositiveDirections = [new(1, 0, 0), new(0, 1, 0), new(0, 0, 1)];
     private readonly WorldGrid _world;
     private readonly Dictionary<Cell, int[]> _cells = [];
@@ -112,6 +115,8 @@ public sealed class LiquidSystem
     public long SuppliedWaterUnits { get; private set; }
     /// <summary>Changes only when liquid amounts or positions change, not when a flow timer ticks.</summary>
     public long Revision { get; private set; }
+    /// <summary>Turrets reserve half a cell; the remaining capacity is shared by liquid and crust.</summary>
+    public Func<Cell, bool>? IsTurretCell { get; set; }
 
     public LiquidSystem(WorldGrid world) => _world = world ?? throw new ArgumentNullException(nameof(world));
     public IEnumerable<LiquidCell> Cells => _cells.Keys.Union(_world.ObsidianCells.Select(s => s.Cell))
@@ -187,7 +192,8 @@ public sealed class LiquidSystem
         {
             var (min, max) = Region(cell, kind);
             var capacity = (int)MathF.Round((max.X - min.X) * (max.Y - min.Y) * (max.Z - min.Z) * UnitsPerBlock);
-            return capacity - DensityOrder.Where(k => SameRegion(cell, k, kind)).Sum(k => amounts[(int)k]);
+            return Math.Min(capacity - DensityOrder.Where(k => SameRegion(cell, k, kind)).Sum(k => amounts[(int)k]),
+                CellCapacity(cell) - (_world.GetObsidian(cell)?.Units ?? 0) - amounts.Sum());
         }
     }
 
@@ -226,12 +232,230 @@ public sealed class LiquidSystem
     public bool CanAdd(Cell cell, LiquidKind kind, int units) => Enum.IsDefined(kind) && units > 0 &&
         CanHoldLiquid(cell) && units <= FreeUnits(cell, kind);
 
-    /// <summary>All-or-none pour. GameSession additionally rejects cells occupied by turrets.</summary>
+    /// <summary>All-or-none pour, including the reduced capacity of a turret cell.</summary>
     public bool TryAdd(Cell cell, LiquidKind kind, int units)
     {
         if (!CanAdd(cell, kind, units)) return false;
         Change(cell, kind, units);
         return true;
+    }
+
+    /// <summary>
+    /// Plans placement pressure without changing the simulation. The limit is liquid units left
+    /// in this cell; an optional final crust also constrains each retained phase to its opening.
+    /// Pressure follows open faces, preferring upward space; escaping parcels remain accounted.
+    /// </summary>
+    public bool CanDisplaceLiquid(Cell cell, int maximumRemainingUnits = 0, ObsidianCell? remainingCrust = null) =>
+        TryPlanDisplacement(cell, maximumRemainingUnits, remainingCrust, out _);
+
+    /// <summary>Applies the complete placement displacement, or leaves every unit untouched.</summary>
+    public bool TryDisplaceLiquid(Cell cell, int maximumRemainingUnits = 0, ObsidianCell? remainingCrust = null)
+    {
+        if (!TryPlanDisplacement(cell, maximumRemainingUnits, remainingCrust, out var plan)) return false;
+        foreach (var parcel in plan)
+        {
+            Change(cell, parcel.Kind, -parcel.Units);
+            if (parcel.Escaped) ReleaseOutside(parcel.Kind, parcel.Units);
+            else Change(parcel.To, parcel.Kind, parcel.Units);
+        }
+        if (GetTotalUnits(cell) == 0) _cells.Remove(cell);
+        return true;
+    }
+
+    private readonly record struct DisplacedParcel(Cell To, LiquidKind Kind, int Units, bool Escaped = false);
+
+    private bool TryPlanDisplacement(Cell cell, int maximumRemainingUnits, ObsidianCell? remainingCrust,
+        out List<DisplacedParcel> plan)
+    {
+        plan = [];
+        if (!WorldGrid.IsInside(cell) || maximumRemainingUnits is < 0 or > UnitsPerBlock ||
+            remainingCrust is not null && (remainingCrust.Cell != cell || !remainingCrust.HasValidGeometryAndDurability())) return false;
+        var finalCrust = remainingCrust ?? _world.GetObsidian(cell);
+        int[] retained = [GetUnits(cell, LiquidKind.Water), GetUnits(cell, LiquidKind.Mercury), GetUnits(cell, LiquidKind.Lava)];
+        int limit = Math.Min(maximumRemainingUnits, Math.Max(0, CellCapacity(cell) - (finalCrust?.Units ?? 0)));
+        var required = new int[3];
+        foreach (var kind in SurfaceOrder)
+        {
+            var region = Region(cell, kind, finalCrust);
+            int capacity = RegionCapacity(region);
+            int regionUnits = DensityOrder.Where(k => Region(cell, k, finalCrust) == region).Sum(k => retained[(int)k]);
+            int move = Math.Min(retained[(int)kind], Math.Max(Math.Max(0, retained.Sum() - limit), regionUnits - capacity));
+            retained[(int)kind] -= move;
+            required[(int)kind] = move;
+        }
+        var reserved = new Dictionary<Cell, int[]>();
+        var escaped = new int[3];
+        foreach (var kind in SurfaceOrder)
+        {
+            int remaining = required[(int)kind];
+            if (remaining == 0) continue;
+            var pending = new Queue<Cell>();
+            var visited = new HashSet<Cell> { cell };
+            pending.Enqueue(cell);
+            while (pending.TryDequeue(out var current) && remaining > 0)
+            {
+                if (current != cell)
+                {
+                    reserved.TryGetValue(current, out var amounts);
+                    int reservedInRegion = amounts is null ? 0 : DensityOrder.Where(k => SameRegion(current, k, kind)).Sum(k => amounts[(int)k]);
+                    int free = Math.Min(FreeUnits(current) - (amounts?.Sum() ?? 0), FreeUnits(current, kind) - reservedInRegion);
+                    int move = Math.Min(remaining, Math.Max(0, free));
+                    if (move > 0)
+                    {
+                        if (amounts is null) reserved.Add(current, amounts = new int[3]);
+                        amounts[(int)kind] += move;
+                        plan.Add(new(current, kind, move));
+                        remaining -= move;
+                    }
+                }
+                if (remaining == 0) break;
+                if (RegionReachesOpenBoundary(current, kind))
+                {
+                    escaped[(int)kind] += remaining;
+                    plan.Add(new(current, kind, remaining, true));
+                    remaining = 0;
+                    break;
+                }
+                foreach (var direction in DisplacementDirections)
+                {
+                    var next = current + direction;
+                    if (next == cell || visited.Contains(next) || !CanHoldLiquid(next) ||
+                        !RegionsConnect(current, next, kind)) continue;
+                    visited.Add(next);
+                    pending.Enqueue(next);
+                }
+            }
+            if (remaining != 0) return TryPlanReassignedDisplacement(cell, limit, finalCrust, out plan);
+        }
+        return DensityOrder.All(kind => _escapedUnits[(int)kind] <= long.MaxValue - escaped[(int)kind]);
+    }
+
+    private sealed class DisplacementEdge(int to, int reverse, int capacity)
+    {
+        public int To { get; } = to;
+        public int Reverse { get; } = reverse;
+        public int InitialCapacity { get; } = capacity;
+        public int Capacity { get; set; } = capacity;
+    }
+
+    // The usual pressure plan needs only the nearest available space. If a crust
+    // compartment makes that greedy assignment fail, reassign retained and outgoing
+    // phases together. At most ten real source units pass through this network.
+    private bool TryPlanReassignedDisplacement(Cell source, int retentionLimit, ObsidianCell? finalCrust,
+        out List<DisplacedParcel> plan)
+    {
+        plan = [];
+        var network = new List<List<DisplacementEdge>> { new(), new() };
+        const int start = 0, sink = 1;
+        var cellNodes = new Dictionary<Cell, int>();
+        var regionNodes = new Dictionary<(Cell Cell, Vector3 Min, Vector3 Max), int>();
+        var parcels = new List<(DisplacementEdge Edge, Cell Cell, LiquidKind Kind, bool Escaped)>();
+        int required = GetTotalUnits(source);
+        foreach (var kind in DensityOrder)
+        {
+            int units = GetUnits(source, kind);
+            if (units == 0) continue;
+            int kindNode = Node();
+            Edge(start, kindNode, units);
+            var retainedRegion = Region(source, kind, finalCrust);
+            if (retentionLimit > 0 && RegionCapacity(retainedRegion) > 0)
+                Edge(kindNode, Destination(source, retainedRegion, retentionLimit, RegionCapacity(retainedRegion)), units);
+            bool escapes = false;
+            var pending = new Queue<Cell>();
+            var visited = new HashSet<Cell> { source };
+            pending.Enqueue(source);
+            while (pending.TryDequeue(out var current))
+            {
+                if (current != source)
+                {
+                    var region = Region(current, kind);
+                    int regionFree = RegionCapacity(region) - DensityOrder.Where(k => SameRegion(current, k, kind)).Sum(k => GetUnits(current, k));
+                    int free = FreeUnits(current);
+                    if (free > 0 && regionFree > 0)
+                    {
+                        var edge = Edge(kindNode, Destination(current, region, free, regionFree), units);
+                        parcels.Add((edge, current, kind, false));
+                    }
+                }
+                escapes |= RegionReachesOpenBoundary(current, kind);
+                foreach (var direction in DisplacementDirections)
+                {
+                    var next = current + direction;
+                    if (visited.Contains(next) || !RegionsConnect(current, next, kind)) continue;
+                    visited.Add(next);
+                    pending.Enqueue(next);
+                }
+            }
+            if (escapes)
+            {
+                var edge = Edge(kindNode, sink, units);
+                parcels.Add((edge, default, kind, true));
+            }
+        }
+        int sent = 0;
+        while (sent < required)
+        {
+            int amount = Send(start, required - sent, new bool[network.Count]);
+            if (amount == 0) return false;
+            sent += amount;
+        }
+        foreach (var parcel in parcels)
+        {
+            int units = parcel.Edge.InitialCapacity - parcel.Edge.Capacity;
+            if (units > 0) plan.Add(new(parcel.Cell, parcel.Kind, units, parcel.Escaped));
+        }
+        foreach (var kind in DensityOrder)
+            if (_escapedUnits[(int)kind] > long.MaxValue - plan.Where(parcel => parcel.Escaped && parcel.Kind == kind).Sum(parcel => parcel.Units))
+                return false;
+        return true;
+
+        int Node() { network.Add([]); return network.Count - 1; }
+        DisplacementEdge Edge(int from, int to, int capacity)
+        {
+            var forward = new DisplacementEdge(to, network[to].Count, capacity);
+            var reverse = new DisplacementEdge(from, network[from].Count, 0);
+            network[from].Add(forward);
+            network[to].Add(reverse);
+            return forward;
+        }
+        int Destination(Cell cell, (Vector3 Min, Vector3 Max) region, int cellFree, int regionFree)
+        {
+            if (!cellNodes.TryGetValue(cell, out int cellNode))
+            {
+                cellNodes.Add(cell, cellNode = Node());
+                Edge(cellNode, sink, cellFree);
+            }
+            var key = (cell, region.Min, region.Max);
+            if (!regionNodes.TryGetValue(key, out int regionNode))
+            {
+                regionNodes.Add(key, regionNode = Node());
+                Edge(regionNode, cellNode, regionFree);
+            }
+            return regionNode;
+        }
+        int Send(int node, int amount, bool[] visited)
+        {
+            if (node == sink) return amount;
+            visited[node] = true;
+            foreach (var edge in network[node])
+            {
+                if (edge.Capacity <= 0 || visited[edge.To]) continue;
+                int transfer = Send(edge.To, Math.Min(amount, edge.Capacity), visited);
+                if (transfer == 0) continue;
+                edge.Capacity -= transfer;
+                network[edge.To][edge.Reverse].Capacity += transfer;
+                return transfer;
+            }
+            return 0;
+        }
+    }
+
+    private bool RegionReachesOpenBoundary(Cell cell, LiquidKind kind)
+    {
+        var (min, max) = Region(cell, kind);
+        return cell.X == 0 && min.X <= .00001f || cell.X == WorldGrid.Size - 1 && max.X >= WorldGrid.Size - .00001f ||
+            cell.Z == 0 && min.Z <= .00001f || cell.Z == WorldGrid.Size - 1 && max.Z >= WorldGrid.Size - .00001f ||
+            cell.Y == 0 && min.Y <= .00001f;
     }
 
     /// <summary>The upper exposed phase can be scooped, without reaching through a crust or roof.</summary>
@@ -314,6 +538,7 @@ public sealed class LiquidSystem
         foreach (var crust in state.Obsidian)
         {
             if (crust is null || !crust.HasValidGeometryAndDurability() ||
+                crust.Units > CellCapacity(crust.Cell) ||
                 _world.GetMaterial(crust.Cell) is not (Material.Air or Material.Obsidian) || !solids.TryAdd(crust.Cell, crust))
                 throw new InvalidDataException("Invalid or overlapping obsidian crust.");
         }
@@ -324,7 +549,7 @@ public sealed class LiquidSystem
                 cell.Lava is < 0 or > UnitsPerBlock || _world.GetMaterial(cell.Cell) is not (Material.Air or Material.Obsidian))
                 throw new InvalidDataException("Invalid liquid cell.");
             solids.TryGetValue(cell.Cell, out var crust);
-            if (cell.Water + cell.Mercury + cell.Lava + (crust?.Units ?? 0) > UnitsPerBlock ||
+            if (cell.Water + cell.Mercury + cell.Lava + (crust?.Units ?? 0) > CellCapacity(cell.Cell) ||
                 cell.ObsidianUnits != (crust?.Units ?? 0) || cell.CrustFace != crust?.Face ||
                 !liquids.TryAdd(cell.Cell, [cell.Water, cell.Mercury, cell.Lava]))
                 throw new InvalidDataException("Duplicate or overfilled liquid cell, or mismatched crust geometry.");
@@ -460,7 +685,7 @@ public sealed class LiquidSystem
             if (!CanTransfer(upper, lower, occupied)) continue;
             foreach (var kind in DensityOrder)
             {
-                if (!CanTransferKind(upper, lower, kind)) continue;
+                if (!CanTransferKind(upper, lower, kind, occupied)) continue;
                 var transfer = Math.Min(GetUnits(upper, kind), FreeUnits(lower, kind));
                 if (transfer > 0) Move(upper, lower, kind, transfer);
             }
@@ -472,7 +697,7 @@ public sealed class LiquidSystem
                     var buoyant = DensityOrder[light];
                     var exchange = Math.Min(GetUnits(upper, dense), GetUnits(lower, buoyant));
                     if (exchange <= 0 || IsReactivePair(dense, buoyant) ||
-                        !CanTransferKind(upper, lower, dense) || !CanTransferKind(lower, upper, buoyant)) continue;
+                        !CanTransferKind(upper, lower, dense, occupied) || !CanTransferKind(lower, upper, buoyant, occupied)) continue;
                     Move(upper, lower, dense, exchange);
                     Move(lower, upper, buoyant, exchange);
                 }
@@ -482,43 +707,140 @@ public sealed class LiquidSystem
     private void Level(Func<Cell, bool>? occupied)
     {
         var cells = _cells.Keys.OrderBy(c => c.Y).ThenBy(c => c.X).ThenBy(c => c.Z).ToArray();
+        var mergedCells = new HashSet<Cell>();
         foreach (var from in cells)
+            if (TryMergeSingleUnit(from, occupied, out var target))
+            {
+                mergedCells.Add(from);
+                mergedCells.Add(target);
+            }
+        foreach (var from in cells)
+        {
+            if (mergedCells.Contains(from)) continue;
             for (var direction = 0; direction < LateralDirections.Length; direction++)
             {
                 var to = from + LateralDirections[(direction + _flowTick % LateralDirections.Length) % LateralDirections.Length];
                 if (!CanTransfer(from, to, occupied)) continue;
-                for (var i = 0; i < UnitsPerBlock && FreeUnits(to) > 0 && GetTotalUnits(from) > 0; i++)
+                while (FreeUnits(to) > 0 && GetTotalUnits(from) > 0)
                 {
-                    var transferable = SurfaceOrder.Where(k => GetUnits(from, k) > 0 && FreeUnits(to, k) > 0 && CanTransferKind(from, to, k)).Select(k => (LiquidKind?)k).FirstOrDefault();
+                    var transferable = SurfaceOrder.Where(k => GetUnits(from, k) > 0 && FreeUnits(to, k) > 0 && CanTransferKind(from, to, k, occupied)).Select(k => (LiquidKind?)k).FirstOrDefault();
                     if (transferable is not { } kind) break;
                     var sourceSurface = RegionSurface(from, kind);
                     var targetSurface = RegionSurface(to, kind);
                     var sourceArea = OpenHorizontalArea(from);
                     var targetArea = OpenHorizontalArea(to);
-                    // Do not move a whole discrete unit when doing so would reverse the height difference.
-                    if (sourceSurface - targetSurface + .00001f < .1f / sourceArea + .1f / targetArea) break;
-                    Move(from, to, kind, 1);
+                    // Equalize a whole parcel before inspecting single-unit remnants. Checking
+                    // intermediate units would reject ordinary 10 -> 5/5 spreading as reversible.
+                    int transfer = Math.Min(GetUnits(from, kind), Math.Min(FreeUnits(to, kind),
+                        (int)MathF.Floor((sourceSurface - targetSurface + .00001f) / (.1f / sourceArea + .1f / targetArea))));
+                    // Do not create a remnant that would immediately merge back into a deeper
+                    // neighbor. This keeps 4 -> 2/2 stable in an L-shaped cavity while still
+                    // allowing an isolated 2 -> 1/1 split with equal-depth neighbors.
+                    while (transfer > 0 && (WouldMergeAfterTransfer(from, from, to, kind, transfer, occupied) ||
+                        WouldMergeAfterTransfer(to, from, to, kind, transfer, occupied))) transfer--;
+                    if (transfer <= 0) break;
+                    Move(from, to, kind, transfer);
                 }
             }
+        }
     }
 
-    private bool CanTransfer(Cell from, Cell to, Func<Cell, bool>? occupied) => WorldGrid.IsInside(from) && WorldGrid.IsInside(to) &&
-        occupied?.Invoke(from) != true && occupied?.Invoke(to) != true && CanHoldLiquid(from) && CanHoldLiquid(to) && !_world.BlocksFace(from, to);
+    private bool TryMergeSingleUnit(Cell from, Func<Cell, bool>? occupied, out Cell target)
+    {
+        target = default;
+        if (GetTotalUnits(from) != 1) return false;
+        var kind = SurfaceOrder.First(k => GetUnits(from, k) == 1);
+        float sourceDepth = ColumnDepth(from, kind);
+        Cell? deepest = null;
+        float deepestDepth = sourceDepth;
+        for (int direction = 0; direction < LateralDirections.Length; direction++)
+        {
+            var to = from + LateralDirections[(direction + _flowTick % LateralDirections.Length) % LateralDirections.Length];
+            if (!CanTransfer(from, to, occupied) || FreeUnits(to, kind) < 1 || !CanTransferKind(from, to, kind, occupied)) continue;
+            float depth = ColumnDepth(to, kind);
+            if (depth <= deepestDepth + .00001f) continue;
+            deepest = to;
+            deepestDepth = depth;
+        }
+        if (deepest is not { } destination) return false;
+        target = destination;
+        Move(from, target, kind, 1);
+        return true;
+    }
+
+    private float ColumnDepth(Cell cell, LiquidKind kind)
+    {
+        float depth = RegionSurface(cell, kind) - Region(cell, kind).Min.Y;
+        while (Region(cell, kind).Min.Y <= cell.Y + .00001f)
+        {
+            var lower = cell + new Cell(0, -1, 0);
+            if (!RegionsConnect(cell, lower, kind)) break;
+            var (min, max) = Region(lower, kind);
+            // A lower pool contributes only when it actually reaches this cell's floor.
+            if (RegionSurface(lower, kind) < lower.Y + .99999f) break;
+            depth += max.Y - min.Y;
+            cell = lower;
+        }
+        return depth;
+    }
+
+    private bool WouldMergeAfterTransfer(Cell candidate, Cell from, Cell to, LiquidKind movedKind, int transfer, Func<Cell, bool>? occupied)
+    {
+        if (TotalAfter(candidate) != 1) return false;
+        var kind = SurfaceOrder.First(k => UnitsAfter(candidate, k) == 1);
+        float depth = DepthAfter(candidate, kind);
+        var (min, max) = Region(candidate, kind);
+        var source = new LiquidVolume(kind, min, new Vector3(max.X,
+            MathF.Min(max.Y, min.Y + .1f / ((max.X - min.X) * (max.Z - min.Z))), max.Z));
+        foreach (var direction in LateralDirections)
+        {
+            var neighbor = candidate + direction;
+            if (!CanTransfer(candidate, neighbor, occupied) || !CanTransferVolume(candidate, neighbor, kind, source, occupied)) continue;
+            int regionUnits = DensityOrder.Where(k => SameRegion(neighbor, k, kind)).Sum(k => UnitsAfter(neighbor, k));
+            int free = Math.Min(CellCapacity(neighbor) - (_world.GetObsidian(neighbor)?.Units ?? 0) - TotalAfter(neighbor),
+                RegionCapacity(Region(neighbor, kind)) - regionUnits);
+            if (free > 0 && DepthAfter(neighbor, kind) > depth + .00001f) return true;
+        }
+        return false;
+
+        int Delta(Cell cell) => cell == from ? -transfer : cell == to ? transfer : 0;
+        int UnitsAfter(Cell cell, LiquidKind phase) => GetUnits(cell, phase) + (phase == movedKind ? Delta(cell) : 0);
+        int TotalAfter(Cell cell) => GetTotalUnits(cell) + Delta(cell);
+        float DepthAfter(Cell cell, LiquidKind phase) => ColumnDepth(cell, phase) +
+            (SameRegion(cell, phase, movedKind) ? Delta(cell) * .1f / OpenHorizontalArea(cell) : 0);
+    }
+
+    private bool CanTransfer(Cell from, Cell to, Func<Cell, bool>? occupied)
+    {
+        if (!WorldGrid.IsInside(from) || !WorldGrid.IsInside(to) || occupied?.Invoke(from) == true || occupied?.Invoke(to) == true ||
+            !CanHoldLiquid(from) || !CanHoldLiquid(to)) return false;
+        var delta = to - from;
+        if (delta.Manhattan == 1) return !_world.BlocksFace(from, to);
+        if (delta.Y != 0 || Math.Abs(delta.X) != 1 || Math.Abs(delta.Z) != 1) return false;
+        return DiagonalPassesThrough(from + new Cell(delta.X, 0, 0)) || DiagonalPassesThrough(from + new Cell(0, 0, delta.Z));
+
+        bool DiagonalPassesThrough(Cell middle) => occupied?.Invoke(middle) != true && CanHoldLiquid(middle) &&
+            !_world.BlocksFace(from, middle) && !_world.BlocksFace(middle, to);
+    }
     private bool CanHoldLiquid(Cell cell) => WorldGrid.IsInside(cell) && _world.GetMaterial(cell) is Material.Air or Material.Obsidian &&
-        (_world.GetObsidian(cell)?.Units ?? 0) < UnitsPerBlock;
-    private int FreeUnits(Cell cell) => UnitsPerBlock - GetTotalUnits(cell) - (_world.GetObsidian(cell)?.Units ?? 0);
+        (_world.GetObsidian(cell)?.Units ?? 0) < CellCapacity(cell);
+    private int CellCapacity(Cell cell) => IsTurretCell?.Invoke(cell) == true ? TurretCapacityUnits : UnitsPerBlock;
+    private int FreeUnits(Cell cell) => CellCapacity(cell) - GetTotalUnits(cell) - (_world.GetObsidian(cell)?.Units ?? 0);
     private int FreeUnits(Cell cell, LiquidKind kind)
     {
-        var (min, max) = Region(cell, kind);
-        var capacity = (int)MathF.Round((max.X - min.X) * (max.Y - min.Y) * (max.Z - min.Z) * UnitsPerBlock);
-        return capacity - DensityOrder.Where(k => SameRegion(cell, k, kind)).Sum(k => GetUnits(cell, k));
+        return Math.Min(FreeUnits(cell), RegionCapacity(Region(cell, kind)) -
+            DensityOrder.Where(k => SameRegion(cell, k, kind)).Sum(k => GetUnits(cell, k)));
     }
 
-    private (Vector3 Min, Vector3 Max) Region(Cell cell, LiquidKind kind)
+    private (Vector3 Min, Vector3 Max) Region(Cell cell, LiquidKind kind) => Region(cell, kind, _world.GetObsidian(cell));
+    private static int RegionCapacity((Vector3 Min, Vector3 Max) region) =>
+        (int)MathF.Round((region.Max.X - region.Min.X) * (region.Max.Y - region.Min.Y) * (region.Max.Z - region.Min.Z) * UnitsPerBlock);
+
+    private static (Vector3 Min, Vector3 Max) Region(Cell cell, LiquidKind kind, ObsidianCell? crust)
     {
         var min = new Vector3(cell.X, cell.Y, cell.Z);
         var max = min + Vector3.One;
-        if (_world.GetObsidian(cell) is not { } crust) return (min, max);
+        if (crust is null) return (min, max);
         if (crust.OffsetUnits > 0)
         {
             var below = crust.Face == CrustFace.Bottom ? kind == LiquidKind.Mercury : kind != LiquidKind.Water;
@@ -543,17 +865,43 @@ public sealed class LiquidSystem
         return min.Y + DensityOrder.Where(k => SameRegion(cell, k, kind)).Sum(k => GetUnits(cell, k)) /
             (UnitsPerBlock * (max.X - min.X) * (max.Z - min.Z));
     }
-    private bool CanTransferKind(Cell from, Cell to, LiquidKind kind)
+    private bool CanTransferKind(Cell from, Cell to, LiquidKind kind, Func<Cell, bool>? occupied = null)
     {
         if (GetUnits(from, kind) == 0) return false;
         var source = GetVolumes(from).First(v => v.Kind == kind);
+        return CanTransferVolume(from, to, kind, source, occupied);
+    }
+
+    private bool CanTransferVolume(Cell from, Cell to, LiquidKind kind, LiquidVolume source, Func<Cell, bool>? occupied)
+    {
         var (min, max) = Region(to, kind);
         var d = to - from;
+        if (d.X != 0 && d.Z != 0)
+        {
+            if (!Overlaps(source.Min.Y, source.Max.Y, min.Y, max.Y)) return false;
+            return Through(from + new Cell(d.X, 0, 0)) || Through(from + new Cell(0, 0, d.Z));
+
+            bool Through(Cell middle) => occupied?.Invoke(middle) != true && RegionsConnect(from, middle, kind) &&
+                CanTransferVolume(from, middle, kind, source, occupied) && RegionsConnect(middle, to, kind);
+        }
         if (d.Y < 0 && (source.Min.Y > from.Y + .00001f || max.Y < to.Y + .99999f) ||
             d.Y > 0 && (source.Max.Y < from.Y + .99999f || min.Y > to.Y + .00001f)) return false;
         return d.X != 0 ? Overlaps(source.Min.Y, source.Max.Y, min.Y, max.Y) && Overlaps(source.Min.Z, source.Max.Z, min.Z, max.Z) :
             d.Y != 0 ? Overlaps(source.Min.X, source.Max.X, min.X, max.X) && Overlaps(source.Min.Z, source.Max.Z, min.Z, max.Z) :
             Overlaps(source.Min.X, source.Max.X, min.X, max.X) && Overlaps(source.Min.Y, source.Max.Y, min.Y, max.Y);
+    }
+
+    private bool RegionsConnect(Cell from, Cell to, LiquidKind kind)
+    {
+        if (!CanHoldLiquid(from) || !CanHoldLiquid(to) || _world.BlocksFace(from, to)) return false;
+        var (sourceMin, sourceMax) = Region(from, kind);
+        var (min, max) = Region(to, kind);
+        var delta = to - from;
+        if (delta.Y < 0 && (sourceMin.Y > from.Y + .00001f || max.Y < to.Y + .99999f) ||
+            delta.Y > 0 && (sourceMax.Y < from.Y + .99999f || min.Y > to.Y + .00001f)) return false;
+        return delta.X != 0 ? Overlaps(sourceMin.Y, sourceMax.Y, min.Y, max.Y) && Overlaps(sourceMin.Z, sourceMax.Z, min.Z, max.Z) :
+            delta.Y != 0 ? Overlaps(sourceMin.X, sourceMax.X, min.X, max.X) && Overlaps(sourceMin.Z, sourceMax.Z, min.Z, max.Z) :
+            Overlaps(sourceMin.X, sourceMax.X, min.X, max.X) && Overlaps(sourceMin.Y, sourceMax.Y, min.Y, max.Y);
     }
     private float OpenHorizontalArea(Cell cell)
     {

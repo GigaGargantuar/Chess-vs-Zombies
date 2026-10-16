@@ -320,19 +320,18 @@ public sealed class Zombie
         {
             if (IsShieldFacingHit(incomingDirection)) AbsorbWith(ArmorSlot.Shield, ref damage);
             var delivery = shot ?? (kind == DamageKind.Pierce ? ShotKind.Pellet : ShotKind.Melee);
-            if (delivery == ShotKind.Lob) AbsorbWith(ArmorSlot.Helmet, ref damage);
-            else if (delivery == ShotKind.Pellet) AbsorbWith(PelletArmorSlot(incomingDirection), ref damage);
+            if (delivery is ShotKind.Pellet or ShotKind.Lob) AbsorbWith(DirectionalArmorSlot(incomingDirection), ref damage);
         }
         _bodyHp = Math.Max(0, _bodyHp - damage);
         if (_bodyHp <= 0) SetGuardFacing(null);
     }
 
-    private static ArmorSlot PelletArmorSlot(Vector3? incomingDirection)
+    private static ArmorSlot DirectionalArmorSlot(Vector3? incomingDirection)
     {
         if (incomingDirection is not { } incoming || !float.IsFinite(incoming.X) ||
             !float.IsFinite(incoming.Y) || !float.IsFinite(incoming.Z)) return ArmorSlot.Chestplate;
         // Even a grazing shot retains whether it came from above or below.
-        // The actual travel vector has zero Y for a level pellet.
+        // Pellets and lobs both use their actual travel vector at impact.
         if (incoming.Y == 0) return ArmorSlot.Chestplate;
         return incoming.Y < 0 ? ArmorSlot.Helmet : ArmorSlot.Boots;
     }

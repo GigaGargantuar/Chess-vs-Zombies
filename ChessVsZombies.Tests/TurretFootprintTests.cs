@@ -24,7 +24,8 @@ public sealed class TurretFootprintTests
         Assert.Equal(new Vector3(7, turretY + .5f, 15.5f), aim);
         Assert.Equal(Vector3.DistanceSquared(turret.Cell.Center, aim), distance, 5);
         Fire(game);
-        Assert.Equal(aim, Assert.Single(game.Projectiles).Target);
+        Assert.Equal(2, game.Projectiles.Count);
+        Assert.All(game.Projectiles, projectile => Assert.Equal(aim, projectile.Target));
     }
 
     [Fact]
@@ -79,13 +80,17 @@ public sealed class TurretFootprintTests
         Assert.Equal(ShotKind.Lob, shot);
         AssertOnBody(kilo, aim);
         Assert.Equal(2 * (aim.Z - turret.Cell.Center.Z), turret.Cell.Center.X - aim.X, 5);
-        var projectile = Assert.Single(game.Projectiles);
-        Assert.Equal(ShotKind.Lob, projectile.Kind);
-        Assert.Equal(aim, projectile.Target);
+        Assert.Equal(2, game.Projectiles.Count);
+        Assert.All(game.Projectiles, projectile =>
+        {
+            Assert.Equal(ShotKind.Lob, projectile.Kind);
+            AssertOnBody(kilo, projectile.Target);
+        });
+        Assert.Contains(game.Projectiles, projectile => projectile.Target == aim);
     }
 
     [Fact]
-    public void TheNearestEligibleAimKeepsSelectionAndLaunchInTheSameShotFamily()
+    public void TheNearestEligibleAimRemainsInTheVolleyAlongsideOtherOccupiedDestinations()
     {
         var game = new GameSession();
         var turret = AddTurret(game, PieceKind.Rook, new(10, 16, 15));
@@ -97,9 +102,11 @@ public sealed class TurretFootprintTests
 
         Assert.Same(kilo, target);
         Assert.Equal(ShotKind.Pellet, shot);
-        var projectile = Assert.Single(game.Projectiles);
-        Assert.Equal(shot, projectile.Kind);
-        Assert.Equal(new Vector3(9, 16.5f, 15.5f), projectile.Target);
+        Assert.Equal(3, game.Projectiles.Count);
+        Assert.Equal(2, game.Projectiles.Count(projectile => projectile.Kind == shot));
+        Assert.All(game.Projectiles.Where(projectile => projectile.Kind == shot),
+            projectile => Assert.Equal(new Vector3(9, 16.5f, 15.5f), projectile.Target));
+        Assert.Single(game.Projectiles, projectile => projectile.Kind == ShotKind.Lob);
     }
 
     [Fact]

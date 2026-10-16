@@ -9,9 +9,17 @@ public sealed partial class GameSession
     private readonly Dictionary<Cell, Cell> _bucketRoutes = [];
     private readonly Dictionary<ZombieSize, Dictionary<Cell, Cell>> _sizedBucketRoutes = [];
     private readonly Dictionary<ZombieSize, Dictionary<Cell, Cell>> _waterAttackRoutes = [];
+    private readonly Dictionary<(ZombieSize Size, bool AttackLava), BucketRouteWorkspace> _bucketRouteWorkspaces = [];
     private readonly HashSet<Cell> _bucketWorkCells = [];
     private int _bucketWorldRevision = -1, _bucketTopologyRevision = -1;
     private long _bucketLiquidRevision = -1;
+
+    private sealed class BucketRouteWorkspace
+    {
+        public Dictionary<Cell, Cell> Routes { get; } = [];
+        public Dictionary<Cell, bool> Valid { get; } = [];
+        public Queue<Cell> Frontier { get; } = [];
+    }
 
     private void ResetBucketBehavior()
     {
@@ -19,6 +27,7 @@ public sealed partial class GameSession
         _bucketRoutes.Clear();
         _sizedBucketRoutes.Clear();
         _waterAttackRoutes.Clear();
+        _bucketRouteWorkspaces.Clear();
         _bucketWorkCells.Clear();
         _bucketWorldRevision = _bucketTopologyRevision = -1;
         _bucketLiquidRevision = -1;
@@ -287,9 +296,17 @@ public sealed partial class GameSession
     private Dictionary<Cell, Cell> BuildSizedBucketRoutes(ZombieSize size, bool attackLava = false)
     {
         var shape = new Zombie { Size = size };
-        var routes = new Dictionary<Cell, Cell>();
-        var frontier = new Queue<Cell>();
-        var valid = new Dictionary<Cell, bool>();
+        if (!_bucketRouteWorkspaces.TryGetValue((size, attackLava), out var workspace))
+            _bucketRouteWorkspaces[(size, attackLava)] = workspace = new BucketRouteWorkspace();
+        // Revision changes still rebuild the complete field immediately. Keep
+        // its scratch storage and published dictionary instead of collecting
+        // them every time water moves or a worker changes the pool.
+        var routes = workspace.Routes;
+        var frontier = workspace.Frontier;
+        var valid = workspace.Valid;
+        routes.Clear();
+        frontier.Clear();
+        valid.Clear();
         bool IsStand(Cell cell)
         {
             if (!valid.TryGetValue(cell, out bool result)) valid[cell] = result = IsSizedBucketStand(cell, shape);

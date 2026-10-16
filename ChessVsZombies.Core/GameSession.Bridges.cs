@@ -121,12 +121,13 @@ public sealed partial class GameSession
             !IsValidStep(from, next) || !HasZombieSupport(from, zombie) ||
             Vector3.DistanceSquared(zombie.Position, zombie.StandAt(from)) > .000001f) return false;
         var floor = next + new Cell(0, -1, 0);
-        if (!IsEmpty(floor) || !World.HasOrthogonalBlockSupport(floor) || !IsEmpty(next)) return false;
+        if (!CanPlaceDisplacingSolid(floor) || !World.HasOrthogonalBlockSupport(floor) || !IsEmpty(next)) return false;
         if (IsOccupiedByZombie(floor))
         {
             RequestBuilderYield(zombie, from, floor);
             return false;
         }
+        if (!Liquids.TryDisplaceLiquid(floor)) return false;
         if (zombie.CarriedBlocks > 0)
         {
             if (!World.RestoreTerrainPlacement(floor, zombie.CarriedBlockMaterial)) return false;
@@ -168,19 +169,20 @@ public sealed partial class GameSession
         {
             var drop = _pendingBlockDrops[i];
             Cell? destination = null;
-            // Keep the death column. If occupied (including liquid), release the
-            // solid above it and let normal gravity/displacement settle it. This
+            // Keep the death column. Wet cells can receive the block by displacing
+            // their liquid; occupied or sealed cells defer release higher up. This
             // never overwrites terrain, traps a live body, or deletes liquid.
             for (int y = drop.Cell.Y; y < WorldGrid.Size; y++)
             {
                 var candidate = new Cell(drop.Cell.X, y, drop.Cell.Z);
-                if (!IsEmpty(candidate) || IsOccupiedByZombie(candidate)) continue;
+                if (IsOccupiedByZombie(candidate) || !CanPlaceDisplacingSolid(candidate)) continue;
                 destination = candidate;
                 break;
             }
             // A completely obstructed column retains the finite block for a
             // later geometry change; pending drops are included in checkpoints.
             if (!destination.HasValue) { i++; continue; }
+            if (!Liquids.TryDisplaceLiquid(destination.Value)) { i++; continue; }
             bool restored = drop.WasBarrier
                 ? World.AddBarrier(destination.Value, drop.Content, drop.Hp)
                 : World.RestoreTerrainPlacement(destination.Value, drop.Content);
@@ -192,7 +194,7 @@ public sealed partial class GameSession
             // before placing its siblings, otherwise an airborne pair/chunk
             // counts itself as orthogonal support and remains suspended forever.
             var resting = destination.Value;
-            while (resting.Y > 0 && !World.HasOrthogonalBlockSupport(resting))
+            while (resting.Y > 0)
             {
                 var below = resting + new Cell(0, -1, 0);
                 if (TrySelectTurret(below) != null || !World.MoveBlock(resting, below)) break;

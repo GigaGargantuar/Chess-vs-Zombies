@@ -90,12 +90,12 @@ public sealed class ObsidianPlacementTests
         Assert.False(game.BuildObsidian(GroundCell, CrustFace.Bottom));
         var wet = GroundCell + new Cell(0, 0, 2);
         Assert.True(game.Liquids.TryAdd(wet, LiquidKind.Water, 1));
-        Assert.False(game.BuildObsidian(wet, CrustFace.Bottom));
+        Assert.True(game.BuildObsidian(wet, CrustFace.Bottom));
         Assert.Equal(1, game.Liquids.GetUnits(wet, LiquidKind.Water));
-        Assert.Equal(10, game.Inventory.ObsidianLayers);
+        Assert.Equal(9, game.Inventory.ObsidianLayers);
         Assert.True(game.StartLevel());
         Assert.False(game.BuildObsidian(GroundCell + new Cell(2, 0, 0), CrustFace.Bottom));
-        Assert.Equal(10, game.Inventory.ObsidianLayers);
+        Assert.Equal(9, game.Inventory.ObsidianLayers);
     }
 
     [Fact]
@@ -179,8 +179,8 @@ public sealed class ObsidianPlacementTests
 
     [Theory]
     [InlineData(2, 16)] // A partial crust already resting on ground.
-    [InlineData(10, 19)] // A whole obsidian block is not a fragile crust.
-    public void SupportedCrustAndWholeObsidianDoNotShatterUnderAStationaryLoad(int units, int y)
+    [InlineData(10, 19)] // A detached whole block falls with its load without shattering.
+    public void SupportedPartialCrustAndFallingWholeObsidianDoNotShatterUnderALoad(int units, int y)
     {
         var source = new Cell(8, y, 8);
         var game = WithCrust(source, units, CrustFace.Bottom, units * 5);
@@ -189,11 +189,18 @@ public sealed class ObsidianPlacementTests
 
         game.Update(.01f);
 
-        Assert.Equal(units, game.World.GetObsidian(source)!.Units);
-        Assert.NotNull(game.World.GetBarrier(source + new Cell(0, 1, 0)));
+        Assert.Equal(units, game.World.GetObsidian(GroundCell)!.Units);
+        Assert.NotNull(game.World.GetBarrier(GroundCell + new Cell(0, 1, 0)));
         Assert.Equal(210, witness.Hp);
         Assert.Empty(game.Feedback.Hits);
-        Assert.Empty(game.Falls.Blocks);
+        if (y == GroundCell.Y) Assert.Empty(game.Falls.Blocks);
+        else
+        {
+            Assert.Equal(2, game.Falls.Blocks.Count);
+            Assert.Equal(source.Center, game.Falls.Blocks.Single(fall => fall.Destination == GroundCell).Position);
+            Assert.Equal((source + new Cell(0, 1, 0)).Center,
+                game.Falls.Blocks.Single(fall => fall.Destination == GroundCell + new Cell(0, 1, 0)).Position);
+        }
     }
 
     [Theory]
@@ -203,9 +210,15 @@ public sealed class ObsidianPlacementTests
     public void LateralAttachmentAnywhereInTheLoadedColumnPreventsCompression(int anchoredHeight)
     {
         var source = new Cell(8, 19, 8);
-        var game = WithCrust(source, 2, CrustFace.Bottom, 10);
+        // The upper face touches the load. A bottom slab with an actual gap
+        // below a hanging column would itself be free to fall.
+        var game = WithCrust(source, 2, CrustFace.Top, 10);
         AddBarrier(game, source + new Cell(0, 1, 0), Material.Stone, 500);
         AddBarrier(game, source + new Cell(0, 2, 0), Material.Stone, 500);
+        // Reach only the selected column member; the supporting pillar sits
+        // another cell away so it does not directly anchor the lower members.
+        for (int y = GroundCell.Y; y <= source.Y + anchoredHeight; y++)
+            PlaceTerrain(game, new Cell(source.X + 2, y, source.Z), Material.Stone);
         PlaceTerrain(game, source + new Cell(1, anchoredHeight, 0), Material.Stone);
 
         game.Update(.01f);
@@ -216,20 +229,26 @@ public sealed class ObsidianPlacementTests
     }
 
     [Fact]
-    public void FallingStackStopsAtARealSideAnchorBeforeReachingTheGround()
+    public void FallingStackPassesARealSideAnchorAndCompressesOnlyOnTheGround()
     {
         var source = new Cell(8, 19, 8);
         var game = WithCrust(source, 2, CrustFace.Bottom, 10);
         AddBarrier(game, source + new Cell(0, 1, 0), Material.Stone, 500);
-        PlaceTerrain(game, new Cell(9, 17, 8), Material.Stone);
+        for (int y = GroundCell.Y; y <= 17; y++)
+            PlaceTerrain(game, new Cell(9, y, 8), Material.Stone);
+        var witness = AddWitness(game);
+        witness.Position = GroundCell.Center + Vector3.UnitZ;
 
         game.Update(.01f);
 
-        var landing = new Cell(8, 17, 8);
-        Assert.Equal(new ObsidianCell(landing, 2, CrustFace.Bottom, 10), game.World.GetObsidian(landing));
-        Assert.NotNull(game.World.GetBarrier(landing + new Cell(0, 1, 0)));
-        Assert.Empty(game.Feedback.Hits);
-        Assert.Equal(2, game.Falls.Blocks.Count);
+        Assert.Empty(game.World.ObsidianCells);
+        Assert.Equal(500, game.World.GetBarrier(GroundCell)!.Hp);
+        Assert.Equal(Material.Stone, game.World.GetMaterial(new Cell(9, 17, 8)));
+        Assert.Equal(190, witness.Hp);
+        Assert.Equal(20, Assert.Single(game.Feedback.Hits).Amount);
+        var fall = Assert.Single(game.Falls.Blocks);
+        Assert.Equal(GroundCell, fall.Destination);
+        Assert.Equal((source + new Cell(0, 1, 0)).Center, fall.Position);
     }
 
     [Fact]

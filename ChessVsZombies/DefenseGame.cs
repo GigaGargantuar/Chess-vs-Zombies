@@ -25,6 +25,10 @@ public sealed class DefenseGame : Game
     private readonly FlyCamera cameraControl = new();
     private Vector3 camera => WorldRenderer.ToXna(cameraControl.Position);
     private bool captured = true, paused, showZones = true, saveBlocked, batchAllTurrets = true;
+    private readonly TowerBatchSelection batchSelection = new();
+    private bool batchSelectMode, batchCornerDepthOverride;
+    private float batchCornerDepth = 8;
+    private Cell? batchCorner;
     private int tool, panel, pourUnits = 10;
     private Material recoveredMaterial = Material.Wood;
     private Material BlockMaterial => tool == 4 ? Material.Dirt : tool == 5 ? Material.Stone : recoveredMaterial;
@@ -40,8 +44,20 @@ public sealed class DefenseGame : Game
     private readonly JumpEditorModel jumpEditor = new();
     private Cell? jumpPreview;
     private UpgradeTemplate upgradeTemplate => session.UpgradeTemplate;
+    private UpgradeKind? templateField;
+    private string templateFieldText = "";
+    private bool templateFieldSelected;
+    private Rectangle templateFieldBounds;
     private readonly bool smoke, smokeCombat;
+    private readonly bool smokeFormationRestore;
     private readonly bool smokeHorde;
+    private readonly bool smokeSaveHorde;
+    private readonly bool smokePerformanceRecovery;
+    private readonly bool profileSmoke;
+    private readonly bool uncachedTurrets;
+    private readonly bool verifyRenderGeometry;
+    private readonly List<WorldRenderProfile> hordeRenderProfiles = [];
+    private int hordeInitialTurrets, hordeInitialEnemies, hordePeakProjectiles;
     private readonly bool smokeMegaGuard, smokeGiantDeaths, smokeThrownCover, smokeTowerPenetration, smokeTerrainImpact;
     private readonly string smokePanel;
     private readonly string? capturePath;
@@ -49,6 +65,10 @@ public sealed class DefenseGame : Game
     private int frameCount;
     private List<double>? hordeUpdateTimes, hordeFrameTimes;
     private long previousHordeFrame;
+    private readonly CombatOverlayPerformance overlayPerformance = new();
+    private long previousOverlayFrame;
+    private bool previousOverlayFrameActive;
+    private int reducedOverlayFrames;
     private readonly int captureFrame = 90;
     private double elapsed;
     private readonly string savePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ChessVsZombies", "campaign.json");
@@ -60,6 +80,21 @@ public sealed class DefenseGame : Game
         graphics = new GraphicsDeviceManager(this) { PreferredBackBufferWidth = 1440, PreferredBackBufferHeight = 900, GraphicsProfile = GraphicsProfile.HiDef, SynchronizeWithVerticalRetrace = true };
         Window.Title = "Chess vs Zombies";
         Window.AllowUserResizing = true;
+        Window.TextInput += (_, e) =>
+        {
+            if (!IsActive || captured || panel != 2 || templateField is null) return;
+            if (e.Character is >= '0' and <= '9')
+            {
+                if (templateFieldSelected) templateFieldText = "";
+                templateFieldSelected = false;
+                if (templateFieldText.Length < 10) templateFieldText += e.Character;
+            }
+            else if (e.Character == '\b')
+            {
+                templateFieldText = templateFieldSelected || templateFieldText.Length == 0 ? "" : templateFieldText[..^1];
+                templateFieldSelected = false;
+            }
+        };
         IsMouseVisible = false;
         IsFixedTimeStep = true;
         TargetElapsedTime = TimeSpan.FromSeconds(1d / 60);
@@ -68,22 +103,38 @@ public sealed class DefenseGame : Game
         smokeThrownCover = args.Contains("--smoke-thrown-cover");
         smokeTowerPenetration = args.Contains("--smoke-tower-penetration");
         smokeTerrainImpact = args.Contains("--smoke-terrain-impact");
-        smokeHorde = args.Contains("--smoke-horde");
-        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes") || args.Contains("--smoke-megas") || args.Contains("--smoke-merged") || args.Contains("--smoke-all-in-one");
+        smokeFormationRestore = args.Contains("--smoke-formation-restore");
+        smokeSaveHorde = args.Contains("--smoke-save-horde");
+        smokePerformanceRecovery = args.Contains("--smoke-performance-recovery");
+        profileSmoke = args.Contains("--profile-smoke");
+        uncachedTurrets = args.Contains("--uncached-turrets");
+        verifyRenderGeometry = args.Contains("--verify-render-geometry");
+        smokeHorde = args.Contains("--smoke-horde") || smokeSaveHorde || smokePerformanceRecovery;
+        smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-liquid-turrets") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes") || args.Contains("--smoke-megas") || args.Contains("--smoke-merged") || args.Contains("--smoke-all-in-one");
         smoke = smoke || smokeMegaGuard || smokeGiantDeaths || smokeThrownCover || smokeTowerPenetration || smokeTerrainImpact || smokeHorde;
+        smoke = smoke || args.Contains("--smoke-formation") || smokeFormationRestore;
+        smoke = smoke || args.Contains("--smoke-batch-select") || args.Contains("--smoke-batch-spend");
+        smoke = smoke || args.Contains("--smoke-camera-up") || args.Contains("--smoke-camera-down");
+        smoke = smoke || args.Contains("--smoke-jump-cost");
         smokeCombat = args.Contains("--smoke-combat");
         smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : args.Contains("--smoke-megas") ? "megas" : args.Contains("--smoke-merged") ? "merged" : "";
         if (args.Contains("--smoke-all-in-one")) smokePanel = "all-in-one";
+        if (args.Contains("--smoke-liquid-turrets")) smokePanel = "liquid-turrets";
         if (smokeMegaGuard || smokeGiantDeaths) smokePanel = "megas";
         if (smokeThrownCover) smokePanel = "thrown";
         if (smokeTowerPenetration) smokePanel = "penetration";
         if (smokeTerrainImpact) smokePanel = "terrain-impact";
         if (smokeHorde) smokePanel = "horde";
+        if (args.Contains("--smoke-formation") || smokeFormationRestore) smokePanel = "formation";
+        if (args.Contains("--smoke-batch-select") || args.Contains("--smoke-batch-spend")) smokePanel = args.Contains("--smoke-batch-spend") ? "batch-spend" : "batch-select";
+        if (args.Contains("--smoke-camera-up") || args.Contains("--smoke-camera-down")) smokePanel = args.Contains("--smoke-camera-up") ? "camera-up" : "camera-down";
+        if (args.Contains("--smoke-jump-cost")) smokePanel = "jump-cost";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
         if (smoke) IsFixedTimeStep = false;
         if (smokePanel == "armor") cameraControl = new FlyCamera(new System.Numerics.Vector3(20, 19, 31), MathF.PI, -.31f);
         if (smokePanel == "liquids") cameraControl = new FlyCamera(new System.Numerics.Vector3(18.5f, 18, 25), MathF.PI, -.54f);
+        if (smokePanel == "liquid-turrets") cameraControl = new FlyCamera(new System.Numerics.Vector3(20.5f, 19, 27), MathF.PI, -MathF.Atan2(2.5f, 5.5f));
         if (smokePanel == "falls") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 31), MathF.PI, -.4f);
         if (smokePanel == "bridges") cameraControl = new FlyCamera(new System.Numerics.Vector3(20.5f, 21, 31), MathF.PI, -.39f);
         if (smokePanel == "buckets") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 20.5f, 12), .26f, -.35f);
@@ -93,6 +144,11 @@ public sealed class DefenseGame : Game
         if (smokeTowerPenetration) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 34), MathF.PI, -.54f);
         if (smokeTerrainImpact) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 22, 32), MathF.PI, -.5f);
         if (smokeHorde) cameraControl = new FlyCamera(new System.Numerics.Vector3(16, 43, 47), MathF.PI, -.72f);
+        if (smokePanel == "formation") cameraControl = new FlyCamera(new System.Numerics.Vector3(23, 22, 32), MathF.PI, -.52f);
+        if (smokePanel is "batch-select" or "batch-spend") cameraControl = new FlyCamera(new System.Numerics.Vector3(23, 22, 32), MathF.PI, -.52f);
+        if (smokePanel == "camera-up") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 19, 22.5f), .7f, MathF.PI / 2);
+        if (smokePanel == "camera-down") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 30, 22.5f), .7f, -MathF.PI / 2);
+        if (smokePanel == "jump-cost") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 19, 28), MathF.PI, -MathF.Atan2(2.5f, 5.5f));
         int frameIndex = Array.IndexOf(args, "--capture-frame");
         if (frameIndex >= 0 && frameIndex + 1 < args.Length && int.TryParse(args[frameIndex + 1], out var requestedFrame))
             captureFrame = Math.Clamp(requestedFrame, 1, 600);
@@ -103,7 +159,7 @@ public sealed class DefenseGame : Game
         Activated += (_, _) => { synchronizeInput = true; suppressMouseUntilReleased = true; };
         Deactivated += (_, _) => ReleaseCursorForFocusLoss();
         Window.ClientSizeChanged += (_, _) => { if (captured) CenterMouse(); };
-        Exiting += (_, _) => SaveCheckpoint();
+        Exiting += (_, _) => { CommitTemplateField(); SaveCheckpoint(); };
     }
     protected override void Initialize()
     {
@@ -114,10 +170,14 @@ public sealed class DefenseGame : Game
     {
         batch = new SpriteBatch(GraphicsDevice); pixel = new Texture2D(GraphicsDevice, 1, 1); pixel.SetData(new[] { Color.White });
         font = new UiFont(GraphicsDevice); renderer = new WorldRenderer(GraphicsDevice); jumpView = new JumpEditorView(GraphicsDevice);
+        renderer.UseTurretCache = !smoke || !uncachedTurrets;
+        renderer.VerifyGeometry = smoke && verifyRenderGeometry;
         if (smokeHorde)
         {
             PrepareHordeSmoke();
-            SetNotice("500 simultaneous zombies / 388 Standard, 97 Milli, 10 Kilo and 5 Mega / live rendered simulation.");
+            if (profileSmoke) { session.Profile = new SimulationProfile(); renderer.ProfileEnabled = true; }
+            SetNotice(smokeSaveHorde ? "Checkpoint-based approximation / 409 towers versus 300 zombies / isolated simulation."
+                : "500 simultaneous zombies / 388 Standard, 97 Milli, 10 Kilo and 5 Mega / live rendered simulation.");
         }
         else if (smoke)
         {
@@ -170,12 +230,17 @@ public sealed class DefenseGame : Game
                 for (int y = 16; y <= 19; y++) session.BuildBarrier(new Cell(13, y, 18));
             }
             if (smokePanel == "bridges") PrepareBridgeSmoke();
+            if (smokePanel == "liquid-turrets") PrepareLiquidTurretSmoke();
             if (smokePanel == "buckets") PrepareBucketSmoke();
             if (smokePanel == "sizes") PrepareSizeSmoke();
             if (smokePanel == "megas") PrepareMegaSmoke();
             if (smokeThrownCover) PrepareThrownCoverSmoke();
             if (smokeTowerPenetration) PrepareTowerPenetrationSmoke();
             if (smokeTerrainImpact) PrepareTerrainImpactSmoke();
+            if (smokePanel == "formation") PrepareFormationSmoke();
+            if (smokePanel is "batch-select" or "batch-spend") PrepareBatchSelectionSmoke();
+            if (smokePanel is "camera-up" or "camera-down") PrepareVerticalCameraSmoke();
+            if (smokePanel == "jump-cost") PrepareJumpCostSmoke();
             if (smokePanel is "merged" or "all-in-one")
             {
                 if (smokePanel == "all-in-one") session.SetAllInOne(true);
@@ -192,14 +257,125 @@ public sealed class DefenseGame : Game
                 smokePanel == "merged" ? "Five levels in one battle. Every surviving tower pays 25 currency on victory." :
                 smokePanel == "megas" ? "Mega / 3 x 3 x 3. Two hands, two real blocks per hand. Stick left / chunky throw right." :
                 smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
+                smokePanel == "liquid-turrets" ? "Liquid sharing / wet tower left / obsidian shell at crosshair / one unit of room for pouring." :
+                smokePanel == "formation" ? "Saved formation / ghost towers mark missing positions / auto restore constructs one tower at a time." :
+                smokePanel is "batch-select" or "batch-spend" ? "Batch selection / two 3D corners, one added tower and one excluded tower / upgrade only the cyan group." :
+                smokePanel is "camera-up" or "camera-down" ? "Quaternion camera / exact vertical view / traditional mouse panning and level movement." :
+                smokePanel == "jump-cost" ? "Jump request 71 / radius 2 / spent 2 / 69 banked / identical reapplication spends 0." :
                 smokeCombat ? "Live simulation / rendered validation" : "Crosshair placement / rendered validation");
         }
         else LoadCheckpoint();
         CenterMouse();
         base.LoadContent();
     }
+    private void PrepareFormationSmoke()
+    {
+        session.Reset();
+        for (int x = 20; x <= 24; x += 2)
+            for (int z = 20; z <= 24; z += 2)
+            {
+                session.Deploy((PieceKind)((x + z) / 2 % 4), new Cell(x, 16, z));
+                if (z == 22) session.Deploy(PieceKind.Knight, new Cell(x, 17, z));
+            }
+        if (smokeFormationRestore)
+        {
+            session.Economy.GetProgress(UpgradeKind.HP).PullCount = 1;
+            session.Economy.GetProgress(UpgradeKind.HP).Available = 1;
+            session.Economy.Apply(session.TrySelectTurret(new Cell(22, 16, 22))!, UpgradeKind.HP);
+        }
+        session.SaveFormation();
+        foreach (var turret in session.Turrets.Where(t => t.Cell.X != 20).OrderByDescending(t => t.Cell.Y).ToArray())
+            session.Remove(turret.Cell);
+        selected = null;
+        panel = 8;
+        Capture(false);
+        if (smokeFormationRestore)
+        {
+            session.BuyTool(ToolKind.Shovel);
+            session.Inventory.Add(Material.Dirt, 2);
+            session.BuildBarrier(new Cell(22, 16, 20));
+            session.Dig(new Cell(24, 15, 20));
+            session.StartAutoRestoreFormation();
+        }
+    }
+    private void PrepareBatchSelectionSmoke()
+    {
+        session.Reset();
+        batchSelection.Clear();
+        for (int x = 20; x <= 24; x += 2)
+            for (int z = 20; z <= 24; z += 2)
+            {
+                session.Deploy((PieceKind)((x + z) / 2 % 4), new Cell(x, 16, z));
+                if (z == 22) session.Deploy(PieceKind.Knight, new Cell(x, 17, z));
+            }
+        foreach (var kind in new[] { UpgradeKind.HP, UpgradeKind.ATK })
+        {
+            session.Economy.GetProgress(kind).PullCount = 21;
+            session.Economy.GetProgress(kind).Available = 21;
+        }
+        upgradeTemplate.Points[UpgradeKind.HP] = 2;
+        upgradeTemplate.Points[UpgradeKind.ATK] = 1;
+        batchSelectMode = true;
+        batchAllTurrets = false;
+        batchCorner = new Cell(20, 16, 20);
+        SelectBatchCorner();
+        batchCorner = new Cell(22, 17, 22);
+        SelectBatchCorner();
+        hit = new Cell(24, 16, 24);
+        ChangeBatchTowerSelection(true);
+        hit = new Cell(20, 16, 20);
+        ChangeBatchTowerSelection(false);
+        if (BatchTargets().Length != 6) throw new InvalidOperationException("The batch selection smoke must select six towers.");
+        if (smokePanel == "batch-spend")
+        {
+            BuyUpgradeBatch(false);
+            if (session.Turrets.Count(t => session.Economy.GetAllocated(t, UpgradeKind.HP) == 2 &&
+                session.Economy.GetAllocated(t, UpgradeKind.ATK) == 1) != 6 ||
+                session.Economy.GetProgress(UpgradeKind.HP).Available != 9 || session.Economy.GetProgress(UpgradeKind.ATK).Available != 15)
+                throw new InvalidOperationException("Batch spending must affect only the six selected towers.");
+        }
+        selected = null;
+        panel = 1;
+        Capture(false);
+    }
+    private void PrepareVerticalCameraSmoke()
+    {
+        session.Reset();
+        session.Inventory.Add(Material.Stone, 40);
+        for (int y = 16; y <= 22; y++) session.BuildBarrier(new Cell(20, y, 20), Material.Stone);
+        for (int x = 20; x <= 24; x++)
+            for (int z = 20; z <= 24; z++)
+                if (x != 20 || z != 20) session.BuildBarrier(new Cell(x, 22, z), Material.Stone);
+        for (int x = 20; x <= 24; x += 2)
+            for (int z = 20; z <= 24; z += 2)
+                session.Deploy((PieceKind)((x + z) / 2 % 4), new Cell(x, 23, z));
+        if (session.Turrets.Count != 9) throw new InvalidOperationException("The vertical camera smoke requires nine elevated towers.");
+        selected = null;
+        Capture(false);
+    }
+    private void PrepareJumpCostSmoke()
+    {
+        session.Reset();
+        var cell = new Cell(22, 16, 22);
+        session.Deploy(PieceKind.Knight, cell);
+        var jump = session.Economy.GetProgress(UpgradeKind.Jump);
+        jump.PullCount = 701;
+        jump.Available = 71;
+        upgradeTemplate.Points[UpgradeKind.Jump] = 71;
+        upgradeTemplate.UseJumpPattern = true;
+        upgradeTemplate.JumpPattern = [new Cell(2, 0, 0)];
+        hit = cell;
+        hitLiquid = false;
+        ApplyTemplateToTarget();
+        ApplyTemplateToTarget();
+        if (jump.Available != 69 || session.Economy.GetAllocated(session.Turrets[0], UpgradeKind.Jump) != 2)
+            throw new InvalidOperationException("A radius-2 jump pattern must spend two points once, leaving 69 banked.");
+        panel = 2;
+        Capture(false);
+    }
     private void PrepareHordeSmoke()
     {
+        if (smokeSaveHorde) { PrepareSaveHordeSmoke(); return; }
         var levels = new LevelCatalog();
         levels.Set(new LevelDefinition
         {
@@ -234,6 +410,17 @@ public sealed class DefenseGame : Game
         while (wave.Spawned < wave.TotalCount)
             if (!spawn(wave)) throw new InvalidOperationException($"Horde smoke could spawn only {wave.Spawned}/{wave.TotalCount} zombies.");
         if (session.Zombies.Count != 500) throw new InvalidOperationException("Horde smoke requires exactly 500 live zombies.");
+        InitializeHordeMetrics();
+    }
+    private void PrepareSaveHordeSmoke()
+    {
+        session = SaveHordeScenario.Create(savePath);
+        InitializeHordeMetrics();
+    }
+    private void InitializeHordeMetrics()
+    {
+        hordeInitialTurrets = session.Turrets.Count;
+        hordeInitialEnemies = session.Zombies.Count;
         hordeUpdateTimes = [];
         hordeFrameTimes = [];
         showZones = false;
@@ -255,6 +442,10 @@ public sealed class DefenseGame : Game
         var metrics = new
         {
             Frames = frameCount, SimulatedSeconds = hordeUpdateTimes!.Count / 60d,
+            CheckpointApproximation = smokeSaveHorde,
+            InitialTurrets = hordeInitialTurrets, InitialEnemies = hordeInitialEnemies,
+            PeakProjectiles = hordePeakProjectiles,
+            VerifiedGeometryChecks = renderer.VerifiedGeometryChecks,
             Spawned = session.Waves.Sum(w => w.Spawned), LiveZombies = session.Zombies.Count(z => z.Hp > 0),
             LivingTowers = session.Turrets.Count(t => t.Hp > 0), session.CoreHp, session.Phase,
             WarmupFramesExcluded = warmup,
@@ -262,6 +453,25 @@ public sealed class DefenseGame : Game
             // Intervals between completed draws include presentation and any frame
             // limiting; they are native rendered-frame timings, not isolated GPU time.
             RenderedFrame = Statistics(hordeFrameTimes!.Skip(warmup)),
+            ReducedOverlayFrames = reducedOverlayFrames,
+            PerformanceMode = overlayPerformance.ReducedDetail,
+            SyntheticFrameTimings = smokePerformanceRecovery,
+            LaserVertices = renderer.LastProfile.LaserVertices,
+            SimulationStages = session.Profile?.Report(Math.Max(1, hordeUpdateTimes.Count - warmup - 1)),
+            RenderStages = hordeRenderProfiles.Count == 0 ? null : new
+            {
+                TotalMs = hordeRenderProfiles.Average(p => p.TotalMs),
+                TerrainRebuildMs = hordeRenderProfiles.Average(p => p.TerrainRebuildMs),
+                TurretMeshMs = hordeRenderProfiles.Average(p => p.TurretMeshMs),
+                ZombieMeshMs = hordeRenderProfiles.Average(p => p.ZombieMeshMs),
+                OtherGeometryMs = hordeRenderProfiles.Average(p => p.OtherGeometryMs),
+                DynamicCopyMs = hordeRenderProfiles.Average(p => p.DynamicCopyMs),
+                DynamicSubmitMs = hordeRenderProfiles.Average(p => p.DynamicSubmitMs),
+                LiquidMs = hordeRenderProfiles.Average(p => p.LiquidMs),
+                TurretVertices = hordeRenderProfiles.Average(p => p.TurretVertices),
+                ZombieVertices = hordeRenderProfiles.Average(p => p.ZombieVertices),
+                DynamicVertices = hordeRenderProfiles.Average(p => p.DynamicVertices)
+            },
             Runtime = Environment.Version.ToString()
         };
         string json = JsonSerializer.Serialize(metrics, new JsonSerializerOptions { WriteIndented = true });
@@ -462,6 +672,28 @@ public sealed class DefenseGame : Game
         selected = null;
         paused = true;
     }
+    private void PrepareLiquidTurretSmoke()
+    {
+        session = new GameSession();
+        var wetCell = new Cell(18, 16, 21);
+        var shellCell = new Cell(20, 16, 21);
+        session.Deploy(PieceKind.Bishop, wetCell);
+        session.Deploy(PieceKind.Rook, shellCell);
+        session.BuyLiquid(LiquidKind.Water);
+        session.Liquids.RestoreState(new LiquidState
+        {
+            Cells = [new LiquidCell(wetCell, 5, 0, 0), new LiquidCell(shellCell, 0, 0, 0, 4, CrustFace.West)],
+            Obsidian = [new ObsidianCell(shellCell, 4, CrustFace.West, 20, OppositeUnits: 2, OppositeHp: 10)]
+        });
+        selected = session.TrySelectTurret(shellCell);
+        panel = 6;
+        tool = 7;
+        pourUnits = 1;
+        showZones = false;
+        paused = true;
+        Aim();
+    }
+
     private void PrepareBucketSmoke()
     {
         session.Economy.Credit(4000);
@@ -527,6 +759,7 @@ public sealed class DefenseGame : Game
         tool = 10;
     }
     private Vector3 Forward => WorldRenderer.ToXna(cameraControl.Forward);
+    private Matrix CameraView => Matrix.CreateLookAt(camera, camera + Forward, WorldRenderer.ToXna(cameraControl.Up));
     private void CenterMouse()
     {
         if (!IsActive || !captured) return;
@@ -535,6 +768,7 @@ public sealed class DefenseGame : Game
     }
     private void Capture(bool value)
     {
+        CommitTemplateField();
         captured = value && IsActive;
         IsMouseVisible = !captured;
         if (captured) { suppressMouseUntilReleased = true; CenterMouse(); }
@@ -569,24 +803,33 @@ public sealed class DefenseGame : Game
         uiScale = Math.Max(.4f, uiScale); width = Window.ClientBounds.Width / uiScale; height = Window.ClientBounds.Height / uiScale;
         if (IsActive && !smoke && !resynchronizing)
         {
-            if (panel == 3) HandleJumpEditorInput(keys, mouse);
+            if (templateField.HasValue && panel == 2 && !captured) HandleTemplateFieldInput(keys, mouse);
+            else if (panel == 3) HandleJumpEditorInput(keys, mouse);
             else
             {
                 if (Pressed(keys, Keys.Tab)) Capture(!captured);
-                if (Pressed(keys, Keys.Escape)) { if (panel == 7) panel = 5; else Capture(!captured); }
+                if (Pressed(keys, Keys.Escape))
+                {
+                    if (batchSelectMode) { batchSelectMode = false; panel = 1; Capture(false); }
+                    else if (panel == 7) panel = 5;
+                    else Capture(!captured);
+                }
                 if (Pressed(keys, Keys.P)) paused = !paused;
-                if (Pressed(keys, Keys.F1)) { panel = 4; Capture(false); }
+                if (Pressed(keys, Keys.F1)) { batchSelectMode = false; panel = 4; Capture(false); }
                 if (Pressed(keys, Keys.V)) showZones = !showZones;
                 if (Pressed(keys, Keys.G)) { panel = 1; Capture(false); }
-                if (Pressed(keys, Keys.U)) { SelectTarget(); panel = 2; Capture(false); }
-                if (Pressed(keys, Keys.J)) { SelectTarget(); OpenJumpEditor(); }
-                if (panel != 3 && Pressed(keys, Keys.L)) { panel = 6; Capture(false); }
+                if (Pressed(keys, Keys.B)) ToggleBatchSelection();
+                if (batchSelectMode && Pressed(keys, Keys.Home)) batchCornerDepthOverride = false;
+                if (Pressed(keys, Keys.U)) { batchSelectMode = false; SelectTarget(); panel = 2; Capture(false); }
+                if (Pressed(keys, Keys.F)) { batchSelectMode = false; panel = 8; Capture(false); }
+                if (Pressed(keys, Keys.J)) { batchSelectMode = false; SelectTarget(); OpenJumpEditor(); }
+                if (panel != 3 && Pressed(keys, Keys.L)) { batchSelectMode = false; panel = 6; Capture(false); }
                 if (panel != 3 && Pressed(keys, Keys.Enter)) BeginLevel();
                 if (panel != 3 && Pressed(keys, Keys.R) && session.Phase == GamePhase.Defeat) { LoadCheckpoint(); paused = false; }
-                for (int i = 0; i < 7; i++) if (panel != 3 && Pressed(keys, (Keys)((int)Keys.D1 + i))) { tool = i; panel = i >= 4 ? 5 : 0; }
-                if (panel != 3 && Pressed(keys, Keys.D8)) { tool = 7; panel = 6; }
-                if (panel != 3 && Pressed(keys, Keys.D9)) { tool = 8; panel = 6; }
-                if (panel != 3 && Pressed(keys, Keys.D0)) { tool = 9; panel = 6; }
+                for (int i = 0; i < 7; i++) if (panel != 3 && Pressed(keys, (Keys)((int)Keys.D1 + i))) { batchSelectMode = false; tool = i; panel = i >= 4 ? 5 : 0; }
+                if (panel != 3 && Pressed(keys, Keys.D8)) { batchSelectMode = false; tool = 7; panel = 6; }
+                if (panel != 3 && Pressed(keys, Keys.D9)) { batchSelectMode = false; tool = 8; panel = 6; }
+                if (panel != 3 && Pressed(keys, Keys.D0)) { batchSelectMode = false; tool = 9; panel = 6; }
                 if (panel != 3 && captured)
                 {
                     mouse = Mouse.GetState();
@@ -599,11 +842,28 @@ public sealed class DefenseGame : Game
                     if (keys.IsKeyDown(Keys.LeftShift) || keys.IsKeyDown(Keys.RightShift)) movement.Y--;
                     cameraControl.MovePrecise(movement, dt * (keys.IsKeyDown(Keys.LeftControl) ? 12 : 7), point => session.World.IsSolidAt(point) || session.Turrets.Any(t => t.Cell == new Cell((int)MathF.Floor(point.X), (int)MathF.Floor(point.Y), (int)MathF.Floor(point.Z))));
                     Aim();
+                    if (batchSelectMode && mouse.ScrollWheelValue != previousMouse.ScrollWheelValue)
+                    {
+                        if (!batchCornerDepthOverride && batchCorner.HasValue)
+                            batchCornerDepth = System.Numerics.Vector3.Distance(cameraControl.Position, batchCorner.Value.Center);
+                        batchCornerDepth = Math.Clamp(batchCornerDepth + (mouse.ScrollWheelValue - previousMouse.ScrollWheelValue) / 120f, 1, 64);
+                        batchCornerDepthOverride = true;
+                        UpdateBatchCorner();
+                    }
                     if (!suppressMouseUntilReleased)
                     {
-                        if (mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released) RemoveTarget();
-                        if (mouse.RightButton == ButtonState.Pressed && previousMouse.RightButton == ButtonState.Released) PlaceDefense();
-                        if (mouse.MiddleButton == ButtonState.Pressed && previousMouse.MiddleButton == ButtonState.Released) ApplyTemplateToTarget();
+                        if (batchSelectMode)
+                        {
+                            if (mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released) ChangeBatchTowerSelection(false);
+                            if (mouse.RightButton == ButtonState.Pressed && previousMouse.RightButton == ButtonState.Released) ChangeBatchTowerSelection(true);
+                            if (mouse.MiddleButton == ButtonState.Pressed && previousMouse.MiddleButton == ButtonState.Released) SelectBatchCorner();
+                        }
+                        else
+                        {
+                            if (mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released) RemoveTarget();
+                            if (mouse.RightButton == ButtonState.Pressed && previousMouse.RightButton == ButtonState.Released) PlaceDefense();
+                            if (mouse.MiddleButton == ButtonState.Pressed && previousMouse.MiddleButton == ButtonState.Released) ApplyTemplateToTarget();
+                        }
                     }
                     CenterMouse();
                 }
@@ -612,7 +872,7 @@ public sealed class DefenseGame : Game
                     var point = new Point((int)(mouse.X / uiScale), (int)(mouse.Y / uiScale));
                     var clicked = buttons.LastOrDefault(b => b.Area.Contains(point)); clicked.Action?.Invoke();
                 }
-                if (panel != 3 && Pressed(keys, Keys.Delete) && session.CanInteractWithTowers)
+                if (panel != 3 && !batchSelectMode && Pressed(keys, Keys.Delete) && session.CanInteractWithTowers)
                 {
                     Aim();
                     var c = selected?.Cell ?? hit;
@@ -624,6 +884,8 @@ public sealed class DefenseGame : Game
         if (smokeMegaGuard && frameCount > 0 && frameCount % 15 == 0) QueueMegaGuardSmokeVolley();
         if (smokeThrownCover && frameCount is 15 or 30) QueueThrownCoverSmokeShot(25);
         var queuedBeforeUpdate = session.QueuedUpgradeBatch;
+        bool restoringFormation = session.IsAutoRestoringFormation;
+        int towersBeforeUpdate = session.Turrets.Count;
         bool graceBeforeUpdate = queuedBeforeUpdate?.GraceRemaining.HasValue ?? false;
         if (!paused && (IsActive || smoke))
         {
@@ -638,6 +900,9 @@ public sealed class DefenseGame : Game
         if (queuedBeforeUpdate != null && (session.QueuedUpgradeBatch == null ||
             !graceBeforeUpdate && session.QueuedUpgradeBatch.GraceRemaining.HasValue))
         { SetNotice(session.Message); SaveCheckpoint(); }
+        if (restoringFormation && (session.Turrets.Count != towersBeforeUpdate || !session.IsAutoRestoringFormation))
+        { SetNotice(session.FormationRestoreStatus); SaveCheckpoint(); }
+        if (batchSelection.SelectedIds.Count > 0) batchSelection.Prune(session.Turrets);
         // Frame 30 shows both two-block hands and all four armor slots. Frame
         // 90 shows the stick/chunk arcs; around frame 150 they scatter as debris.
         if (smokePanel == "megas" && frameCount == 60) paused = false;
@@ -663,6 +928,7 @@ public sealed class DefenseGame : Game
         if (oldPhase == GamePhase.Combat && session.Phase == GamePhase.Building) { SetNotice(session.Message); SaveCheckpoint(); }
         if (oldPhase != GamePhase.Defeat && session.Phase == GamePhase.Defeat)
         {
+            batchSelectMode = false;
             if (panel == 3) { panel = 0; jumpPreview = null; }
             Capture(false);
             SetNotice("The core has fallen. Retry the saved preparation with R.");
@@ -676,11 +942,22 @@ public sealed class DefenseGame : Game
     }
     private void Aim()
     {
-        var aim = WorldPicker.Pick(session, cameraControl.Position, cameraControl.Forward);
+        var aim = WorldPicker.Pick(session, cameraControl.Position, cameraControl.Forward, includeLiquids: !batchSelectMode);
         hit = aim?.Hit;
         placement = aim?.Placement;
         highlight = aim?.Highlight;
         hitLiquid = aim?.IsLiquid ?? false;
+        if (batchSelectMode)
+        {
+            obsidianPlacementFace = null;
+            UpdateBatchCorner();
+            SelectTarget();
+            return;
+        }
+        if (hitLiquid && hit is { } liquidCell && (tool is >= 0 and <= 5 or 10))
+            placement = highlight = liquidCell;
+        else if (tool is >= 7 and <= 9 && hit is { } towerCell && session.TrySelectTurret(towerCell) != null)
+            placement = highlight = towerCell;
         obsidianPlacementFace = null;
         if (tool == 10 && recoveredMaterial == Material.Obsidian)
         {
@@ -691,6 +968,11 @@ public sealed class DefenseGame : Game
                 if (session.World.GetObsidian(target) is { } existing) obsidianPlacementFace = aim?.ObsidianFace ?? existing.Face;
                 else if (hit is { } support && (support - target).Manhattan == 1)
                     obsidianPlacementFace = LiquidSystem.FaceToward(target, support);
+                else if (hitLiquid)
+                {
+                    CrustFace[] faces = [CrustFace.Bottom, CrustFace.West, CrustFace.East, CrustFace.North, CrustFace.South, CrustFace.Top];
+                    obsidianPlacementFace = faces.FirstOrDefault(face => session.CanBuildObsidian(target, face), CrustFace.Bottom);
+                }
             }
         }
         SelectTarget();
@@ -755,7 +1037,57 @@ public sealed class DefenseGame : Game
     }
     private int[] BatchTargets() => batchAllTurrets
         ? session.Turrets.Where(turret => turret.Hp > 0).Select(turret => turret.Id).ToArray()
-        : selected is { Hp: > 0 } turret ? [turret.Id] : [];
+        : batchSelection.GetTargets(session.Turrets).Select(turret => turret.Id).ToArray();
+
+    private void ToggleBatchSelection()
+    {
+        if (!session.CanInteractWithTowers) { SetNotice("Retry the level before selecting towers for upgrades."); return; }
+        batchSelectMode = !batchSelectMode;
+        batchAllTurrets = false;
+        panel = 1;
+        if (batchSelectMode)
+        {
+            batchCornerDepthOverride = false;
+            Capture(true);
+            SetNotice("Batch select: MIDDLE two 3D corners / RIGHT add a tower / LEFT deselect / wheel corner depth / B finish.");
+        }
+        else
+        {
+            Capture(false);
+            SetNotice($"{BatchTargets().Length} towers selected. Spend or queue upgrade points in the armory.");
+        }
+    }
+    private void UpdateBatchCorner()
+    {
+        if (batchCornerDepthOverride)
+            batchCorner = TowerSelectionCursor.Pick(cameraControl.Position, cameraControl.Forward, batchCornerDepth);
+        else
+            batchCorner = hit.HasValue && session.TrySelectTurret(hit.Value) != null ? hit
+                : placement ?? hit ?? TowerSelectionCursor.Pick(cameraControl.Position, cameraControl.Forward, batchCornerDepth);
+    }
+    private void SelectBatchCorner()
+    {
+        if (!batchCorner.HasValue) { SetNotice("Aim inside the battlefield or scroll to adjust the 3D corner depth."); return; }
+        bool completing = batchSelection.IsChoosingSecondCorner;
+        batchSelection.SelectCorner(batchCorner.Value, session.Turrets);
+        batchAllTurrets = false;
+        SetNotice(completing ? $"Box added: {BatchTargets().Length} towers selected. RIGHT adds / LEFT deselects / B finish."
+            : $"First corner: {batchCorner.Value}. Middle-click the opposite 3D corner.");
+    }
+    private void ChangeBatchTowerSelection(bool add)
+    {
+        if (hit is not { } cell || session.TrySelectTurret(cell) is not { } tower)
+        { SetNotice(add ? "Aim directly at a living tower to add it to the batch." : "Aim directly at a selected tower to deselect it."); return; }
+        if (add) batchSelection.Add(tower); else batchSelection.Remove(tower);
+        batchAllTurrets = false;
+        SetNotice($"{tower.Kind} #{tower.Id} {(add ? "selected" : "deselected")} / {BatchTargets().Length} towers in the batch.");
+    }
+    private void ClearBatchSelection()
+    {
+        batchSelection.Clear();
+        batchAllTurrets = false;
+        SetNotice("Batch selection cleared. Choose two corners or add individual towers.");
+    }
 
     private void BuyUpgradeBatch(bool queue)
     {
@@ -781,18 +1113,68 @@ public sealed class DefenseGame : Game
         SetNotice(session.Message); SaveCheckpoint();
     }
     private int TemplatePoints(UpgradeKind kind) => upgradeTemplate.Points.GetValueOrDefault(kind);
-    private int TemplateMaximum(UpgradeKind kind) => session.Economy.GetAllocationCap(kind);
+    private int TemplateMaximum(UpgradeKind kind)
+    {
+        int cap = session.Economy.GetAllocationCap(kind);
+        return kind == UpgradeKind.Jump && upgradeTemplate.UseJumpPattern
+            ? (int)Math.Min(cap, JumpRules.FormationRadius(upgradeTemplate.JumpPattern)) : cap;
+    }
     private int TemplateApplicable(UpgradeKind kind)
     {
         if (selected is not null && session.Economy.GetRange(selected, kind) == int.MaxValue) return 0;
         int used = selected is null ? 0 : session.Economy.GetAllocated(selected, kind);
-        return Math.Min(session.Economy.GetProgress(kind).Available,
+        int applicable = Math.Min(session.Economy.GetProgress(kind).Available,
             Math.Max(0, session.Economy.GetAllocationCap(kind) - used));
+        if (kind == UpgradeKind.Jump && upgradeTemplate.UseJumpPattern)
+        {
+            long limit = selected is null ? JumpRules.FormationRadius(upgradeTemplate.JumpPattern)
+                : session.Economy.GetJumpPatternPointCost(selected, upgradeTemplate.JumpPattern) ?? int.MaxValue;
+            applicable = (int)Math.Min(applicable, limit);
+        }
+        return applicable;
     }
-    private void ChangeTemplatePoints(UpgradeKind kind, int delta)
+    private void SetTemplatePoints(UpgradeKind kind, long amount)
     {
-        upgradeTemplate.Points[kind] = delta < 0 ? Math.Max(0, TemplatePoints(kind) + delta) : Math.Min(TemplatePoints(kind) + delta, TemplateMaximum(kind));
+        upgradeTemplate.Points[kind] = (int)Math.Clamp(amount, 0, TemplateMaximum(kind));
         SaveTemplate();
+    }
+    private void BeginTemplateField(UpgradeKind kind)
+    {
+        CommitTemplateField();
+        templateField = kind;
+        templateFieldText = TemplatePoints(kind).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        templateFieldSelected = true;
+    }
+    private void CommitTemplateField()
+    {
+        if (templateField is not { } kind) return;
+        templateField = null;
+        if (templateFieldText == TemplatePoints(kind).ToString(System.Globalization.CultureInfo.InvariantCulture)) return;
+        long.TryParse(templateFieldText, out long amount);
+        SetTemplatePoints(kind, amount);
+    }
+    private void HandleTemplateFieldInput(KeyboardState keys, MouseState mouse)
+    {
+        if (Pressed(keys, Keys.Escape)) { templateField = null; return; }
+        if (Pressed(keys, Keys.Enter)) { CommitTemplateField(); return; }
+        if (Pressed(keys, Keys.Tab))
+        {
+            int direction = keys.IsKeyDown(Keys.LeftShift) || keys.IsKeyDown(Keys.RightShift) ? -1 : 1;
+            var kinds = Enum.GetValues<UpgradeKind>();
+            var next = kinds[(Array.IndexOf(kinds, templateField!.Value) + direction + kinds.Length) % kinds.Length];
+            BeginTemplateField(next);
+            return;
+        }
+        if ((keys.IsKeyDown(Keys.LeftControl) || keys.IsKeyDown(Keys.RightControl)) && Pressed(keys, Keys.A))
+            templateFieldSelected = true;
+        if (Pressed(keys, Keys.Delete)) { templateFieldText = ""; templateFieldSelected = false; }
+        if (!suppressMouseUntilReleased && mouse.LeftButton == ButtonState.Pressed && previousMouse.LeftButton == ButtonState.Released)
+        {
+            var point = new Point((int)(mouse.X / uiScale), (int)(mouse.Y / uiScale));
+            if (templateFieldBounds.Contains(point)) { templateFieldSelected = true; return; }
+            CommitTemplateField();
+            buttons.LastOrDefault(b => b.Area.Contains(point)).Action?.Invoke();
+        }
     }
     private void ToggleTemplatePattern()
     {
@@ -882,6 +1264,20 @@ public sealed class DefenseGame : Game
         if (smoke || saveBlocked) return;
         if (!SaveStore.TrySaveUpgradeTemplate(upgradeTemplate, savePath, out var error)) SetNotice(error);
     }
+    private void SaveFormation()
+    {
+        if (!session.SaveFormation()) { SetNotice(session.Message); return; }
+        SetNotice(session.Message);
+        if (session.Phase == GamePhase.Building) { SaveCheckpoint(); return; }
+        if (smoke || saveBlocked) return;
+        if (!SaveStore.TrySaveFormationTemplate(session.SavedFormation!, savePath, out var error)) SetNotice(error);
+    }
+    private void ToggleFormationRestore()
+    {
+        if (session.IsAutoRestoringFormation) session.CancelAutoRestoreFormation();
+        else session.StartAutoRestoreFormation(cell => !cameraControl.Intersects(cell));
+        SetNotice(session.Message);
+    }
     private void LoadCheckpoint()
     {
         if (SaveStore.TryLoad(savePath, out var restored, out var error))
@@ -894,42 +1290,61 @@ public sealed class DefenseGame : Game
             if (saveBlocked) SetNotice(error + " Original save preserved; saving disabled.");
         }
         selected = null;
+        batchSelection.Clear();
+        batchSelectMode = false;
+        batchCornerDepthOverride = false;
         draftPattern.Clear();
         if (panel == 3) panel = 2;
     }
     protected override void Draw(GameTime gameTime)
     {
+        long overlayFrame = Stopwatch.GetTimestamp();
+        bool overlayFrameActive = (IsActive || smoke) && !paused && panel != 3;
+        // Deterministic presentation-only smoke: exercise both transitions even
+        // when the machine running the test cannot sustain the recovery FPS.
+        double frameSeconds = smokePerformanceRecovery ? (frameCount < 90 ? 1d / 30 : 1d / 60) :
+            previousOverlayFrame == 0 ? 0 : Stopwatch.GetElapsedTime(previousOverlayFrame, overlayFrame).TotalSeconds;
+        overlayPerformance.ObserveFrame(frameSeconds,
+            session.Phase == GamePhase.Combat, overlayFrameActive && previousOverlayFrameActive);
+        previousOverlayFrame = overlayFrame;
+        previousOverlayFrameActive = overlayFrameActive;
+        session.Feedback.Enabled = !overlayPerformance.ReducedDetail;
+        if (overlayPerformance.ReducedDetail) reducedOverlayFrames++;
         GraphicsDevice.Clear(Background);
         if (panel == 3) jumpView.Draw(jumpEditor, draftPattern, JumpEditorRadius(), jumpPreview);
         else
         {
-            var view = Matrix.CreateLookAt(camera, camera + Forward, Vector3.Up);
+            var view = CameraView;
             var projection = Matrix.CreatePerspectiveFieldOfView(MathHelper.ToRadians(65), GraphicsDevice.Viewport.AspectRatio, .08f, 150);
-            bool towerTool = tool is >= 0 and <= 3;
             bool liquidTool = tool is >= 7 and <= 9;
             bool obsidianTool = tool == 10 && recoveredMaterial == Material.Obsidian;
-            bool validPlacement = tool != 6 && placement is { } p && (towerTool ? session.CanInteractWithTowers : session.Phase == GamePhase.Building) && WorldGrid.IsInside(p) &&
+            bool validPlacement = tool != 6 && placement is { } p &&
                 (obsidianTool ? obsidianPlacementFace.HasValue && session.CanBuildObsidian(p, obsidianPlacementFace.Value) :
-                (liquidTool ? session.CanPourLiquid(p, (LiquidKind)(tool - 7), pourUnits) :
-                    (tool is 4 or 5 or 10 ? WorldGrid.IsFortificationZone(p) && session.Inventory.GetCount(BlockMaterial) > 0 && session.World.HasOrthogonalBlockSupport(p) : WorldGrid.IsTurretZone(p) && session.HasTowerSupport(p)) && session.Liquids.GetTotalUnits(p) == 0) &&
-                (liquidTool || session.World.GetMaterial(p) == Material.Air) && !session.Turrets.Any(t => t.Cell == p) &&
-                (!towerTool || !session.IsOccupiedByZombie(p))) && !cameraControl.Intersects(p);
-            renderer.Draw(session, view, projection, highlight, tool == 6 ? null : placement, validPlacement, selected, showZones, elapsed);
+                liquidTool ? session.CanPourLiquid(p, (LiquidKind)(tool - 7), pourUnits) :
+                tool is 4 or 5 or 10 ? session.CanBuildBarrier(p, BlockMaterial) : session.CanDeploy((PieceKind)tool, p)) &&
+                !cameraControl.Intersects(p);
+            renderer.Draw(session, view, projection, highlight, batchSelectMode || tool == 6 ? null : placement, validPlacement,
+                batchSelectMode ? null : selected, showZones, elapsed,
+                batchAllTurrets ? null : batchSelection, batchCorner, batchSelectMode, reducedDetail: overlayPerformance.ReducedDetail);
         }
         buttons.Clear();
         batch.Begin(SpriteSortMode.Deferred, BlendState.NonPremultiplied, SamplerState.LinearClamp, null, null, null, Matrix.CreateScale(uiScale));
         if (panel == 3) DrawJumpEditorHud();
         else
         {
-            var view = Matrix.CreateLookAt(camera, camera + Forward, Vector3.Up);
+            var view = CameraView;
             var projection = Matrix.CreatePerspectiveFieldOfView(MathHelper.ToRadians(65), GraphicsDevice.Viewport.AspectRatio, .08f, 150);
-            CombatOverlay.Draw(session, batch, pixel, font, GraphicsDevice.Viewport, view, projection, uiScale);
+            if (!overlayPerformance.ReducedDetail)
+                CombatOverlay.Draw(session, batch, pixel, font, GraphicsDevice.Viewport, view, projection, uiScale);
             DrawHud();
         }
         batch.End();
         frameCount++;
         if (smokeHorde)
         {
+            hordePeakProjectiles = Math.Max(hordePeakProjectiles, session.Projectiles.Count);
+            if (profileSmoke && frameCount > 30) hordeRenderProfiles.Add(renderer.LastProfile);
+            if (profileSmoke && frameCount == 30) session.Profile!.Reset();
             long now = Stopwatch.GetTimestamp();
             if (previousHordeFrame != 0) hordeFrameTimes!.Add(Stopwatch.GetElapsedTime(previousHordeFrame, now).TotalMilliseconds);
             previousHordeFrame = now;
@@ -975,6 +1390,14 @@ public sealed class DefenseGame : Game
         // Crosshair always marks the true camera ray, including when menus release the pointer.
         float cx = width / 2, cy = height / 2; var crossColor = placement.HasValue ? Teal : TextColor;
         Fill(cx - 11, cy - 1, 7, 2, crossColor); Fill(cx + 4, cy - 1, 7, 2, crossColor); Fill(cx - 1, cy - 11, 2, 7, crossColor); Fill(cx - 1, cy + 4, 2, 7, crossColor); Fill(cx - 1, cy - 1, 2, 2, crossColor);
+        if (batchSelectMode)
+        {
+            Fill(width / 2 - 215, 102, 430, 53, Panel);
+            Text($"BATCH SELECT / {batchSelection.SelectedIds.Count} towers / B finish", width / 2 - 195, 108, 17, Teal);
+            Text(batchCorner is { } corner ? $"{(batchSelection.IsChoosingSecondCorner ? "Second" : "First")} corner {corner} / {(batchCornerDepthOverride ? $"depth {batchCornerDepth:0.0}" : "aim surface")} / wheel depth"
+                : "Corner outside the field / wheel depth / Home aim surface", width / 2 - 195, 135, 12, Gold);
+        }
+        bool turretEnvironmentShown = false;
         if (hit.HasValue)
         {
             var barrier = session.World.GetBarrier(hit.Value);
@@ -986,7 +1409,21 @@ public sealed class DefenseGame : Game
                     : $"{(tool == 6 ? "EXCAVATE" : "TARGET")}  {hit.Value}";
             if (hitLiquid)
                 label = string.Join("  /  ", Enum.GetValues<LiquidKind>().Where(kind => session.Liquids.GetUnits(hit.Value, kind) > 0).Select(kind => $"{kind.ToString().ToUpperInvariant()} {session.Liquids.GetUnits(hit.Value, kind)}/10")) +
-                    (placement is { } above ? $"  /  ABOVE {above}" : "  /  TOP OF GRID");
+                    (placement == hit ? $"  /  DISPLACE AT {hit.Value}" : placement is { } above ? $"  /  ABOVE {above}" : "  /  TOP OF GRID");
+            else if (session.TrySelectTurret(hit.Value) is { } aimedTurret)
+            {
+                label = $"{aimedTurret.Kind.ToString().ToUpperInvariant()} #{aimedTurret.Id}  /  {aimedTurret.Hp:0}/{session.Economy.GetMaxHp(aimedTurret)} HP";
+                int liquidUnits = session.Liquids.GetTotalUnits(aimedTurret.Cell);
+                var shell = session.World.GetObsidian(aimedTurret.Cell);
+                if (liquidUnits > 0 || shell != null)
+                {
+                    var status = liquidUnits > 0 ? $"WET {liquidUnits}/5 UNITS" : "";
+                    if (shell != null)
+                        status += $"{(status.Length > 0 ? "  /  " : "")}OBSIDIAN SHELL {shell.Hp:0} HP  /  {(session.Phase == GamePhase.Combat ? "CLEARING SHELL" : "SHOOTING BLOCKED")}";
+                    Text(status, cx - font.Measure(status, 12) / 2, cy + 43, 12, shell != null ? Gold : Teal);
+                    turretEnvironmentShown = true;
+                }
+            }
             else if (session.World.GetObsidian(hit.Value) is { } crust)
                 label = $"OBSIDIAN {crust.Units}/10  /  {crust.Hp:0}/{crust.Units * LiquidSystem.ObsidianHpPerUnit:0} HP";
             Text(label, cx - font.Measure(label, 13) / 2, cy + 21, 13, crossColor);
@@ -996,7 +1433,7 @@ public sealed class DefenseGame : Game
             var materialLabel = recoveredMaterial == Material.Obsidian
                 ? $"PLACE OBSIDIAN  /  {session.Inventory.ObsidianLayers:N0} LAYERS  /  1 LAYER PER CLICK"
                 : $"PLACE {recoveredMaterial.ToString().ToUpperInvariant()}  /  {session.Inventory.GetCount(recoveredMaterial):N0} IN BAG  /  {Balance.BlockHp(recoveredMaterial):N0} HP";
-            Text(materialLabel, cx - font.Measure(materialLabel, 12) / 2, cy + 43, 12, Gold);
+            Text(materialLabel, cx - font.Measure(materialLabel, 12) / 2, cy + (turretEnvironmentShown ? 63 : 43), 12, Gold);
         }
         float left = 28;
         Text("SECTOR  /  32 x 32 x 32", left, 116, 14, Muted);
@@ -1008,7 +1445,23 @@ public sealed class DefenseGame : Game
             int resupplying = session.Zombies.Count(session.IsZombieRetreating);
             if (resupplying > 0) Text($"{resupplying} returning for supplies", left, 197, 12, Gold);
             float y = 210;
-            foreach (var wave in session.Waves)
+            if (overlayPerformance.ReducedDetail)
+            {
+                double hp = 0, maximum = 0;
+                foreach (var zombie in session.Zombies)
+                {
+                    if (zombie.BodyHp <= 0) continue;
+                    hp += zombie.Hp;
+                    maximum += zombie.MaxHp;
+                }
+                Text("ACTIVE ENEMY HP + ARMOR", left, y, 12, Muted);
+                Text($"{hp:N0} / {maximum:N0}", left, y + 21, 16, Red);
+                Fill(left, y + 47, 220, 7, Raised);
+                Fill(left, y + 47, 220 * (float)Math.Clamp(hp / Math.Max(1, maximum), 0, 1), 7, Red);
+                Text("PERFORMANCE MODE", left, y + 70, 12, Gold);
+                Text("Damage indicators disabled", left, y + 90, 12, Muted);
+            }
+            else foreach (var wave in session.Waves)
             {
                 string source = session.AllInOne ? $"L{LevelRange}" : $"L{session.GetSourceLevelNumber(wave.Index):00}";
                 Text($"{wave.Index + 1:00}  {source}  {(wave.Started ? "HP REMAINING" : "WAITING")}", left, y, 12, Muted);
@@ -1032,22 +1485,25 @@ public sealed class DefenseGame : Game
         Fill(px, py, 312, height - 248, Panel);
         Fill(px, py, 312, 3, Teal);
         Text("COMMAND", px + 20, py + 19, 13, Muted); Text(captured ? "TAB TO INTERACT" : "CURSOR RELEASED", px + 117, py + 19, 12, Teal);
-        Button("Deploy", px + 16, py + 51, 88, 36, () => panel = 0, panel is 0 or 5 or 6 or 7);
+        Button("Deploy", px + 16, py + 51, 88, 36, () => { batchSelectMode = false; panel = 0; }, panel is 0 or 5 or 6 or 7 or 8);
         Button("Armory", px + 111, py + 51, 88, 36, () => panel = 1, panel == 1);
-        Button("Template", px + 206, py + 51, 90, 36, () => panel = 2, panel is 2 or 3);
+        Button("Template", px + 206, py + 51, 90, 36, () => { batchSelectMode = false; panel = 2; }, panel is 2 or 3);
         if (panel == 0) DrawDeployPanel(px, py + 106);
         else if (panel == 1) DrawGachaPanel(px, py + 106);
         else if (panel == 2) DrawUpgradePanel(px, py + 106);
         else if (panel == 5) DrawTerrainPanel(px, py + 106);
         else if (panel == 6) DrawLiquidPanel(px, py + 106);
         else if (panel == 7) DrawMaterialsPanel(px, py + 106);
+        else if (panel == 8) DrawFormationPanel(px, py + 106);
         else DrawHelpPanel(px, py + 106);
         float footer = height - 114;
         Fill(0, footer, width, 114, Background); Rule(0, footer, width);
         if (noticeTime > 0) Text(Trim(notice, (int)(width / 9)), 28, footer + 13, 17, Gold);
+        else if (batchSelectMode) Text("Choose two opposite 3D corners, then refine the group with right and left click.", 28, footer + 13, 17, Teal);
         else Text(captured ? "LEFT remove    RIGHT place    MIDDLE apply template to the aimed tower    U configure template" : "Choose point counts and a pattern, then press Tab and middle-click a tower to apply.", 28, footer + 13, 17, Teal);
-        Text("WASD  move     MOUSE  look     SPACE / SHIFT  up / down     TAB  cursor     ENTER  start level", 28, footer + 48, 15, Muted);
-        Text("1-4 pieces   5 dirt   6 stone   7 dig   8/9/0 liquids   L liquid shop   G armory   U template   J pattern   P pause   F1 help", 28, footer + 75, 14, Muted);
+        Text(batchSelectMode ? "MIDDLE  two 3D corners    RIGHT  add tower    LEFT  deselect    WHEEL  corner depth    HOME  aim surface    B  finish"
+            : "WASD  move     MOUSE  look     SPACE / SHIFT  up / down     TAB  cursor     ENTER  start level", 28, footer + 48, 15, Muted);
+        Text("1-4 pieces   5/6 blocks   7 dig   8/9/0 liquids   L shop   G armory   U upgrades   J pattern   F formation   B batch select   P pause   F1 help", 28, footer + 75, 13, Muted);
         if (paused) { Fill(width / 2 - 125, 101, 250, 44, Background); Text("SIMULATION PAUSED", width / 2 - 100, 110, 19, Gold); }
         if (session.Phase == GamePhase.Defeat)
         {
@@ -1062,15 +1518,15 @@ public sealed class DefenseGame : Game
         string[] names = ["Pawn", "Knight", "Bishop", "Rook"], descriptions = ["Adjacent orthogonal melee", "24 jumps / 3 planes / lobbed shots", "Unlimited plane rays / pellets", "Unlimited orthogonal / pellets"];
         for (int i = 0; i < 4; i++)
         {
-            int k = i; float row = y + 34 + i * 59; bool active = tool == i;
-            Button($"{i + 1}   {names[i]}", x + 16, row, 280, 51, () => { tool = k; panel = 0; }, active);
+            int k = i; float row = y + 34 + i * 53; bool active = tool == i;
+            Button($"{i + 1}   {names[i]}", x + 16, row, 280, 47, () => { tool = k; panel = 0; }, active);
             Text(Balance.PieceCost((PieceKind)i).ToString(), x + 269, row + 9, 19, active ? Background : Gold);
             Text(descriptions[i], x + 54, row + 32, 12, active ? new Color(30, 75, 64) : Muted);
         }
-        float next = y + 274;
+        float next = y + 250;
         Button("Terrain / tools & blocks", x + 16, next, 280, 34, () => panel = 5, textSize: 17);
         Button("Liquids / water, mercury & lava", x + 16, next + 39, 280, 34, () => panel = 6, textSize: 17);
-        Text("Pieces: outside the 8-cube enclosure", x + 20, next + 82, 12, Muted);
+        Button("F  Formation / save & auto restore", x + 16, next + 78, 280, 34, () => panel = 8, textSize: 15);
         bool preparation = session.Phase == GamePhase.Building;
         Text(preparation ? "BATTLE MODE / choose before starting" : "BATTLE MODE / locked during combat", x + 20, height - 306, 12, Muted);
         Button("1 level", x + 16, height - 283, 78, 40, () => SelectBattleMode(0), !session.MergeFiveLevels, preparation, textSize: 14);
@@ -1080,6 +1536,41 @@ public sealed class DefenseGame : Game
         Text(session.AllInOne ? "5x spawns / final equipment / 7.5x bonus" : session.MergeFiveLevels ? "2.5x bonus / resets after win or loss" : "Merge 5: 25 C / All in one: 75 C per survivor", x + 20, height - 222, 11, Muted);
         Button(preparation ? $"ENTER  /  Start {(session.LevelSpan == 1 ? "level" : "levels")}" : "DEFENSE ACTIVE", x + 16, height - 201, 280, 47,
             BeginLevel, preparation, preparation);
+    }
+    private void DrawFormationPanel(float x, float y)
+    {
+        Text("TURRET FORMATION", x + 20, y, 21);
+        Text("Save the towers you have built and configured.", x + 20, y + 33, 12, Muted);
+        Text("Positions, piece types, upgrades and jumps.", x + 20, y + 53, 12, Muted);
+        bool canInteract = session.CanInteractWithTowers;
+        Button(session.SavedFormation == null ? "Save formation" : "Replace saved formation", x + 16, y + 82, 280, 43,
+            SaveFormation, enabled: canInteract && session.Turrets.Any(t => t.Hp > 0), textSize: 17);
+        int savedCount = session.SavedFormation?.Towers.Count ?? 0;
+        Text(savedCount == 0 ? "No formation saved yet." : $"{savedCount:N0} saved / {session.MissingFormationCount:N0} missing", x + 20, y + 141, 17, Teal);
+        Text("Terrain uses your blocks and owned tools.", x + 20, y + 174, 12, Muted);
+        Rule(x + 20, y + 206, 272);
+        Text("COST TO REBUILD MISSING TOWERS", x + 20, y + 225, 12, Muted);
+        Text($"{session.MissingFormationCurrencyCost:N0} currency / {session.Economy.Currency:N0} held", x + 20, y + 249, 17, Gold);
+        var points = session.MissingFormationUpgradeCosts;
+        Text($"Points: HP {points.GetValueOrDefault(UpgradeKind.HP):N0} / ATK {points.GetValueOrDefault(UpgradeKind.ATK):N0}", x + 20, y + 281, 13, Muted);
+        Text($"O {points.GetValueOrDefault(UpgradeKind.Orthogonal):N0} / PD {points.GetValueOrDefault(UpgradeKind.PlaneDiagonal):N0} / SD {points.GetValueOrDefault(UpgradeKind.SpaceDiagonal):N0} / J {points.GetValueOrDefault(UpgradeKind.Jump):N0}", x + 20, y + 303, 13, Muted);
+        Button(session.IsAutoRestoringFormation ? "Stop auto restore" : "Auto restore", x + 16, y + 339, 280, 45,
+            ToggleFormationRestore, session.IsAutoRestoringFormation,
+            session.IsAutoRestoringFormation || canInteract && session.MissingFormationCount > 0, textSize: 19);
+        string statusLine = "";
+        int statusRow = 0;
+        foreach (string word in session.FormationRestoreStatus.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string nextLine = statusLine.Length == 0 ? word : statusLine + " " + word;
+            if (font.Measure(nextLine, 12) > 272 && statusLine.Length > 0)
+            {
+                Text(statusLine, x + 20, y + 399 + statusRow++ * 18, 12, session.IsAutoRestoringFormation ? Gold : Muted);
+                statusLine = word;
+            }
+            else statusLine = nextLine;
+        }
+        Text(statusLine, x + 20, y + 399 + statusRow * 18, 12, session.IsAutoRestoringFormation ? Gold : Muted);
+        Button("Back to deploy", x + 16, height - 201, 280, 47, () => panel = 0);
     }
     private void DrawTerrainPanel(float x, float y)
     {
@@ -1142,7 +1633,7 @@ public sealed class DefenseGame : Game
         Button("-", x + 16, y + 406, 58, 36, () => pourUnits = Math.Max(1, pourUnits - 1));
         Text($"{pourUnits} / 10", x + 119, y + 413, 18, Gold);
         Button("+", x + 238, y + 406, 58, 36, () => pourUnits = Math.Min(10, pourUnits + 1));
-        Text("Dig a basin to contain the flow.", x + 20, y + 456, 13, Muted);
+        Text("Towers share up to 5 units with liquid / crust.", x + 20, y + 456, 12, Muted);
         Button("Return to field", x + 16, height - 201, 280, 47, () => Capture(true), true);
     }
     private static Color LiquidColor(LiquidKind kind) => kind switch
@@ -1157,58 +1648,85 @@ public sealed class DefenseGame : Game
         foreach (var kind in Enum.GetValues<UpgradeKind>())
         {
             var progress = session.Economy.GetProgress(kind);
-            float row = y + 58 + i++ * 31;
+            float row = y + 52 + i++ * 22;
             Text(UpgradeName(kind), x + 20, row, 14);
             Text($"{progress.Available} pts / cap {progress.Rank}", x + 175, row, 12, Gold);
         }
-        Button("Pull 1 / 5", x + 16, y + 252, 135, 40, () => Pull(1), true, session.Phase == GamePhase.Building);
-        Button("Pull 10 / 50", x + 161, y + 252, 135, 40, () => Pull(10), false, session.Phase == GamePhase.Building);
-        Text("BATCH TARGETS", x + 20, y + 307, 13, Muted);
-        Button($"All ({session.Turrets.Count(turret => turret.Hp > 0)})", x + 16, y + 328, 135, 36,
-            () => batchAllTurrets = true, batchAllTurrets);
-        Button(selected is null ? "Aimed (none)" : $"Aimed #{selected.Id}", x + 161, y + 328, 135, 36,
-            () => batchAllTurrets = false, !batchAllTurrets);
+        bool preparation = session.Phase == GamePhase.Building;
+        Button("Pull 1 / 5", x + 16, y + 190, 135, 32, () => Pull(1), true, preparation, textSize: 14);
+        Button("Pull 10 / 50", x + 161, y + 190, 135, 32, () => Pull(10), enabled: preparation, textSize: 14);
+        Button("Pull 100 / 500", x + 16, y + 230, 135, 32, () => Pull(100), enabled: preparation, textSize: 14);
+        Button("Pull 1000 / 5000", x + 161, y + 230, 135, 32, () => Pull(1000), enabled: preparation, textSize: 14);
+        Text("BATCH TARGETS", x + 20, y + 276, 13, Muted);
+        Button($"All ({session.Turrets.Count(turret => turret.Hp > 0)})", x + 16, y + 298, 135, 30,
+            () => { batchAllTurrets = true; batchSelectMode = false; }, batchAllTurrets, textSize: 16);
+        Button($"Selected ({batchSelection.SelectedIds.Count})", x + 161, y + 298, 135, 30,
+            () => batchAllTurrets = false, !batchAllTurrets, textSize: 16);
+        Button(batchSelectMode ? "B  Finish selecting" : "B  Select in field", x + 16, y + 336, 190, 30,
+            ToggleBatchSelection, batchSelectMode, session.CanInteractWithTowers, textSize: 15);
+        Button("Clear", x + 214, y + 336, 82, 30, ClearBatchSelection, enabled: batchSelection.SelectedIds.Count > 0 || batchSelection.FirstCorner.HasValue, textSize: 15);
         var costs = session.GetUpgradeBatchCosts(BatchTargets(), upgradeTemplate);
         Text($"Full: HP {costs.GetValueOrDefault(UpgradeKind.HP)}  ATK {costs.GetValueOrDefault(UpgradeKind.ATK)}  O {costs.GetValueOrDefault(UpgradeKind.Orthogonal)}",
-            x + 20, y + 373, 12, Muted);
+            x + 20, y + 378, 12, Muted);
         Text($"PD {costs.GetValueOrDefault(UpgradeKind.PlaneDiagonal)}  SD {costs.GetValueOrDefault(UpgradeKind.SpaceDiagonal)}  J {costs.GetValueOrDefault(UpgradeKind.Jump)}",
-            x + 20, y + 391, 12, Muted);
-        Button("Spend now", x + 16, y + 407, 135, 40, () => BuyUpgradeBatch(false),
+            x + 20, y + 396, 12, Muted);
+        Button("Spend now", x + 16, y + 416, 135, 36, () => BuyUpgradeBatch(false),
             enabled: BatchTargets().Length > 0 && session.Economy.Progress.Values.Any(progress => progress.Available > 0));
         var queued = session.QueuedUpgradeBatch;
-        Button(queued == null ? "Queue full" : "Cancel queue", x + 161, y + 407, 135, 40,
+        Button(queued == null ? "Queue full" : "Cancel queue", x + 161, y + 416, 135, 36,
             queued == null ? () => BuyUpgradeBatch(true) : CancelUpgradeBatch,
             enabled: queued != null || BatchTargets().Length > 0);
-        Text(queued == null ? "Batch points only; middle-click for pattern."
+        Text(queued == null ? $"{(batchAllTurrets ? "All living towers" : $"{batchSelection.SelectedIds.Count} selected towers")} / template points per tower."
             : queued.GraceRemaining is { } seconds
                 ? $"Queued {queued.Cost} pts / {seconds:0.0}s to cancel"
                 : $"Queued {queued.Cost} pts / waiting for each type",
-            x + 20, y + 456, 11, queued == null ? Muted : Gold);
-        Button("Configure upgrade template", x + 16, height - 201, 280, 47, () => panel = 2);
+            x + 20, y + 460, 11, queued == null ? Muted : Gold);
+        Button("Configure upgrade template", x + 16, height - 201, 280, 47, () => { batchSelectMode = false; panel = 2; });
     }
     private void DrawUpgradePanel(float x, float y)
     {
         Text("UPGRADE TEMPLATE", x + 20, y, 22);
-        Text("Middle-click applies matching points.", x + 20, y + 33, 12, Muted);
+        Text(templateField.HasValue ? "Enter saves / Esc cancels / Tab next."
+            : "Click a number to edit / Min 0 / Max cap.", x + 20, y + 33, 12, Muted);
         Text(selected is null ? "Aim at a tower to inspect its allocations." : $"{selected.Kind} #{selected.Id}   HP {selected.Hp:0}/{session.Economy.GetMaxHp(selected)}   ATK {session.Economy.GetAttack(selected)}", x + 20, y + 58, 13, Teal);
         int i = 0;
         foreach (var kind in Enum.GetValues<UpgradeKind>())
         {
             float row = y + 89 + i++ * 51;
             int amount = TemplatePoints(kind), allocated = selected is null ? 0 : session.Economy.GetAllocated(selected, kind);
-            Text(UpgradeName(kind), x + 20, row, 16);
+            Text(UpgradeName(kind), x + 20, row, 14);
             bool infinite = selected is not null && session.Economy.GetRange(selected, kind) == int.MaxValue;
             var progress = session.Economy.GetProgress(kind);
-            Text(infinite ? $"Have {progress.Available} / unlimited"
+            Text(kind == UpgradeKind.Jump && upgradeTemplate.UseJumpPattern
+                ? $"Have {progress.Available} / pattern {JumpRules.FormationRadius(upgradeTemplate.JumpPattern)} / paid {allocated}"
+                : infinite ? $"Have {progress.Available} / unlimited"
                 : $"Have {progress.Available} / cap {progress.Rank} / used {allocated}",
-                x + 20, row + 23, 11, Muted);
-            Button("-", x + 190, row, 31, 34, () => ChangeTemplatePoints(kind, -1), false, amount > 0);
-            Text(amount.ToString(), x + 232, row + 6, 18, amount > TemplateApplicable(kind) ? Muted : Gold);
-            Button("+", x + 263, row, 31, 34, () => ChangeTemplatePoints(kind, 1), false, amount < TemplateMaximum(kind));
+                x + 20, row + 30, 11, Muted);
+            bool editing = templateField == kind;
+            var fieldBounds = new Rectangle((int)(x + 156), (int)(row - 3), 64, 28);
+            Fill(fieldBounds.X, fieldBounds.Y, fieldBounds.Width, fieldBounds.Height, editing ? new Color(39, 57, 70) : Background);
+            if (editing)
+            {
+                templateFieldBounds = fieldBounds;
+                Fill(fieldBounds.X, fieldBounds.Bottom - 2, fieldBounds.Width, 2, Teal);
+                if (templateFieldSelected) Fill(fieldBounds.X + 4, fieldBounds.Y + 3, fieldBounds.Width - 8, 20, new Color(58, 89, 99));
+            }
+            string value = editing ? templateFieldText : amount.ToString();
+            float size = Math.Min(16, 54 * 16 / Math.Max(1, font.Measure(value, 16)));
+            Text(value, fieldBounds.X + 5, row + 2, size, editing ? TextColor : amount > TemplateApplicable(kind) ? Muted : Gold);
+            if (editing && !templateFieldSelected && (int)(elapsed * 2) % 2 == 0)
+                Fill(fieldBounds.X + 5 + font.Measure(value, size), row + 2, 1, 18, Teal);
+            buttons.Add((fieldBounds, () => BeginTemplateField(kind)));
+            Button("Min", x + 225, row - 3, 34, 28, () => SetTemplatePoints(kind, 0), textSize: 10);
+            Button("Max", x + 264, row - 3, 34, 28, () => SetTemplatePoints(kind, TemplateMaximum(kind)), textSize: 10);
         }
         Button("J  /  Jump pattern", x + 16, y + 408, 177, 40, OpenJumpEditor);
         Button(upgradeTemplate.UseJumpPattern ? "Use: ON" : "Use: OFF", x + 201, y + 408, 95, 40, ToggleTemplatePattern, upgradeTemplate.UseJumpPattern);
-        Text($"Up to {upgradeTemplate.Points.Values.Sum(v => (long)v)} pts; unused points stay banked.", x + 20, y + 459, 12, Muted);
+        Text(upgradeTemplate.UseJumpPattern
+            ? selected is { } target && session.Economy.GetJumpPatternPointCost(target, upgradeTemplate.JumpPattern) is { } jumpCost
+                ? $"Jump needed: {jumpCost}. Extra Jump requests stay banked."
+                : $"Jump limit: {JumpRules.FormationRadius(upgradeTemplate.JumpPattern)} per tower; paid points count."
+            : $"Up to {upgradeTemplate.Points.Values.Sum(v => (long)v)} pts; unused points stay banked.", x + 20, y + 459, 12, Muted);
         Button("Ready / return to field", x + 16, height - 201, 280, 47, () => Capture(true), true);
     }
     private void DrawJumpEditorHud()
@@ -1257,7 +1775,7 @@ public sealed class DefenseGame : Game
     private void DrawHelpPanel(float x, float y)
     {
         Text("FIELD MANUAL", x + 20, y, 23);
-        string[] lines = ["WASD  horizontal movement", "Space  ascend / Shift  descend", "Mouse  pan / Ctrl  move faster", "Tab  release or capture mouse", "Left click  remove tower / block", "Right click  place / pour", "Middle click  apply template", "1-4 pieces / 5 dirt / 6 stone", "7 dig / 8 water / 9 mercury / 0 lava", "L liquid shop / G armory", "U upgrade template / J pattern", "Enter  begin prepared level", "P pause / V zone guides", "R retry / F1 this panel", "Close window  save & quit"]; int i = 0;
+        string[] lines = ["WASD  horizontal movement", "Space  ascend / Shift  descend", "Mouse  pan / Ctrl  move faster", "Tab  release or capture mouse", "Left click  remove tower / block", "Right click  place / pour", "Middle click  apply upgrade template", "B batch: middle corners / right add", "B batch: left deselect / wheel depth", "1-4 pieces / 5-7 terrain / 8-0 liquids", "L shop / G armory / U upgrades", "J pattern / F formation", "Enter start / P pause / V guides", "R retry / F1 help / close to save"]; int i = 0;
         foreach (var line in lines) Text(line, x + 20, y + 49 + i++ * 27, 15, Muted);
         Button("Return to field", x + 16, height - 201, 280, 47, () => { panel = 0; Capture(true); }, true);
     }

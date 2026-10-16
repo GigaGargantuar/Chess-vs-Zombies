@@ -52,7 +52,7 @@ public class BuoyantRouteCacheTests
         Query(game, zombie);
         Assert.Equal(1, game.BuoyantRouteSearchCount);
         game.DamageZombie(zombie, 420, DamageKind.Pierce, ShotKind.Pellet, -zombie.Facing);
-        game.DamageZombie(zombie, 210, DamageKind.Blunt, ShotKind.Lob, Vector3.UnitY);
+        game.DamageZombie(zombie, 210, DamageKind.Blunt, ShotKind.Lob, -Vector3.UnitY);
         game.DamageZombie(zombie, 210, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitY);
         Assert.Empty(zombie.ArmorPieces);
         Query(game, zombie);
