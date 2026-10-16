@@ -93,7 +93,7 @@ public sealed partial class GameSession
                 else if (hitSomething)
                 {
                     float hpBefore = ProjectileDiagnostics?.CaptureContacts == true ? zombie?.Hp ??
-                        (terrain.HasValue ? World.GetTerrainHp(terrain.Value) : 0) : 0;
+                        ProjectileTerrainHp(terrain, crustFace) : 0;
                     var previousAge = startAge + dt * (sample - 1) / steps;
                     var hitAge = previousAge + (endAge - previousAge) * fraction;
                     if (zombie != null)
@@ -102,7 +102,7 @@ public sealed partial class GameSession
                         DamageProjectileTerrain(terrain.Value, projectile.Damage, crustFace);
                     ProjectileDiagnostics?.Contact(projectile, hitAge, zombie != null ? "body" : terrain.HasValue ? "terrain" : "boundary",
                         zombie?.Id ?? -1, -1, terrain, crustFace, hpBefore,
-                        ProjectileDiagnostics.CaptureContacts ? zombie?.Hp ?? (terrain.HasValue ? World.GetTerrainHp(terrain.Value) : 0) : 0);
+                        ProjectileDiagnostics.CaptureContacts ? zombie?.Hp ?? ProjectileTerrainHp(terrain, crustFace) : 0);
                     stopped = true;
                 }
                 from = to;
@@ -116,6 +116,15 @@ public sealed partial class GameSession
                 reorder = _megaFlights.Count > 0 && CurrentProjectileScene != sceneBeforeImpact;
             }
         }
+    }
+
+    private float ProjectileTerrainHp(Cell? cell, CrustFace? face)
+    {
+        if (!cell.HasValue) return 0;
+        if (World.GetBarrier(cell.Value) is { } barrier) return barrier.Hp;
+        if (World.GetObsidian(cell.Value) is { } crust)
+            return face.HasValue ? crust.Parts.FirstOrDefault(part => part.Face == face.Value)?.Hp ?? 0 : crust.Hp;
+        return World.GetTerrainHp(cell.Value);
     }
 
     private void RemoveResolvedProjectile(Projectile projectile, int originalIndex)

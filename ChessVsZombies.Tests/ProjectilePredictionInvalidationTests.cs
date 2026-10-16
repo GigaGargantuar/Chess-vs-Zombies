@@ -8,6 +8,24 @@ namespace ChessVsZombies.Tests;
 
 public sealed class ProjectilePredictionInvalidationTests
 {
+    [Theory]
+    [InlineData(false, 3f)]
+    [InlineData(true, 5f)]
+    public void ContactDiagnosticsReportTheActualBarrierOrCrustPartDurability(bool crust, float hp)
+    {
+        var game = Create();
+        var cell = new Cell(8, 20, 8);
+        if (crust) Assert.True((bool)Invoke(game.World, "AddObsidian", cell, 1, CrustFace.West, 0)!);
+        else Assert.True((bool)Invoke(game.World, "AddBarrier", cell, Material.Dirt, (float?)hp)!);
+        game.Projectiles.Add(Shot(2));
+        Invoke(game, "UpdateProjectiles", .05f);
+        var contact = Assert.Single(game.ProjectileDiagnostics!.Contacts);
+        Assert.Equal("terrain", contact.Kind);
+        Assert.Equal(cell, contact.Cell);
+        Assert.Equal(hp, contact.HpBefore);
+        Assert.Equal(hp - 2, contact.HpAfter);
+    }
+
     [Fact]
     public void OuterForecastAndStableSortShareOnlyAnIdenticalFrameQuery()
     {

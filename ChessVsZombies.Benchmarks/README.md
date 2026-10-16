@@ -80,3 +80,44 @@ The frame interval improvement is about 35%. A separate headless run (30 warmup,
 All 241 setup/warmup/measurement state hashes match the baseline exactly: trace SHA-256 `84E0E4AF86F80AACAD69E03C73196114BE7FFB4E34080CF9C078574A008D3CB4`. The capture PNG is byte-identical before/after, and a separate 90-frame run passed 46,890 raw vertex verification checks. The Release suite passes 1,425 tests, including exact navigation fields, scalar/masked sweep costs, exhaustive/projectile broad-phase comparisons, public turret mutations, collapse support and repeated liquid-route rebuilds. The save checkpoint hash remains unchanged.
 
 These improvements do not establish 60 FPS or remove all hitches: the final native run still has a 234 ms maximum update, down from 261 ms, with large navigation/liquid-route rebuilds remaining expensive after terrain changes. Update cadence, routes, target/contact tie order, floating-point hit calculations, damage, collision and simulation time were preserved. Raw local captures/metrics, traces, baseline assemblies and verification files are under `artifacts/perf409/`.
+
+## Projectile processing experiments, 2026-10-16 (cloud)
+
+The source baseline is `b55426794e386b6d6271d8e61cc99a2d61faf31d`. The user-reported frozen wave-95 save (180 Bishops, 371 queued enemies, tower attack reduced to one) and its newer native profiling harness are **not present in this checkout**. The older `SaveHordeScenario` above changes the encounter and approximates tower positions; it cannot establish equivalence with that report. No native wave-95 speedup or FPS result is claimed here.
+
+The cloud probe is a separately labeled deterministic stress fixture: 40 actors (including eight giant cover carriers), 1,000 actual pellet/lob projectiles, and eight moving material blocks. It includes nonlethal impacts, two body deaths and 906 ordered contacts. Every sample starts from the same fresh state and calls production `UpdateProjectiles(0.05f)` once. Actor movement, turret firing, navigation and drawing are excluded from this kernel measurement. Setup is completed before timing all measured fixtures, followed by a full GC. Production gameplay has no actor cap or reduced update/decision rate.
+
+```sh
+DOTNET_TieredCompilation=0 dotnet run -c Release --project ChessVsZombies.Benchmarks -- --projectile-probe --count 1000 --warmup 5 --ticks 20
+DOTNET_TieredCompilation=0 dotnet run -c Release --project ChessVsZombies.Benchmarks -- --projectile-probe --count 1000 --warmup 1 --ticks 1 --verify-output artifacts/projectile-performance/contacts.json
+DOTNET_TieredCompilation=0 dotnet run -c Release --project ChessVsZombies.Benchmarks -- --scenario mixed --count 500 --warmup 60 --ticks 180 --verify-output artifacts/projectile-performance/mixed-trace.json
+DOTNET_TieredCompilation=0 dotnet run -c Release --project ChessVsZombies.Benchmarks -- --scenario mixed --count 500 --warmup 60 --ticks 180 --profile
+```
+
+Use built binaries for timing after a separate build. `--work-counts`, `--verify-output` and `--profile` are separate diagnostic runs; do not compare their timing/GC results with ordinary runs. Profile stage timings are inclusive and must not be added together. Contact records identify each original shot in append order, its physical target/part, age at contact, damage and durability before/after. Per-tick state verification also captures individual body/armor/material HP, exact positions and trajectories, death/order state, terrain, liquid, inventory and RNG state; it does not accept aggregate HP totals or floating-point tolerances as equivalence.
+
+Environment: Debian 13 x64 cloud VM, AMD EPYC 9V74, five exposed vCPUs, .NET runtime 8.0.32 / SDK 8.0.426, Release, `DOTNET_TieredCompilation=0`, seed 12345. All timing variants include the optional work-counter/contact hooks with diagnostics disabled. Their source versions are `177fc8d` (original algorithm plus harness), `bd9e11e` (liveness only), and `b645bef` (ordering/frame reuse). Runs were sequential, with no concurrent build, test or renderer. Two ordinary kernel runs per variant used five warmup samples and 20 measured samples each (40 measured samples per variant); the order was baseline/liveness/candidate, then candidate/baseline/liveness. Values below show the range of those two run summaries, not pooled percentiles.
+
+| Kernel variant | Mean ms | Median ms | p95 ms | Maximum ms | Bytes/update |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 1866.7–1929.6 | 1861.5–1937.0 | 1919.3–2063.9 | 1958.7–2075.5 | 13,019,709 |
+| Body-liveness checks only | 1173.1–1269.4 | 1160.8–1260.9 | 1265.9–1325.4 | 1283.2–1356.8 | 13,019,709 |
+| Liveness + stable order/frame predictions | 57.1–58.6 | 56.8–58.2 | 62.0–62.9 | 63.6–73.7 | 1,017,569 |
+
+The liveness change replaces total-HP sums only where body survival is the question. Actual HP arithmetic, armor coverage and damage remain unchanged. The second change retains the original stable sorted suffix after HP-only impacts. Body death, held/flying part destruction, reactive hand motion, terrain or topology changes invalidate it. Exact repeated forecast queries can also share a result within the same flying-block frame; keys include projectile age, duration and scene revisions. Nothing is retained across body movement, guard placement, flying-block advancement or a different frame interval. The existing projectile paths, subdivision times, boundary tolerance, hit tests and tie rules are unchanged.
+
+| Work per kernel sample | Baseline | Candidate |
+| --- | ---: | ---: |
+| Forecast evaluations | 513,601 | 18,961 |
+| Pending sorts | 928 | 24 |
+| Body / held-cover / flight queries (each) | 1,286,565 | 53,361 |
+| Chronological slices | 22 | 22 |
+| Resolved contacts | 906 | 906 |
+
+All three variants have byte-identical ordered contact/state traces: SHA-256 `6F043A7969B4FC3C9BDF590CC1E02A8E5FAB226FA73F6D66B2E8D37D371F3F8A`. The 241 setup/warmup/measured states of the separate 500-actor mixed scenario also match exactly: trace SHA-256 `059777B1D2B901BDD119B85B56F3DB5A859025616C63F62245F0B48893F1A72F`. The kernel's individual contacts are flying-block, body and boundary contacts; held-cover/terrain changes and piercing are covered by focused invalidation and existing physical-contact regressions.
+
+One ordinary full-update mixed run per variant (60 warmup + 180 measured updates, four simulated seconds total) measured baseline/liveness/candidate means of 16.850 / 14.298 / 14.084 ms, medians of 4.828 / 3.739 / 3.675 ms, and p95 of 86.726 / 84.293 / 86.918 ms. Maximums were 185.506 / 139.355 / 139.868 ms. This broader scenario retained 491 living actors and 21 towers identically. Its tail hitch remains; the much larger kernel gain must not be extrapolated to whole-game FPS. Further body/cover/flight candidate work remains (53,361 queries each in the dense probe). No new spatial index or simplified hitbox was introduced.
+
+A separate instrumented candidate run measured inclusive mean stage costs of 5.03 ms in zombie movement, 4.67 ms in projectiles, and 3.94 ms in navigation rebuilds (21 rebuilds). Navigation time overlaps its callers; these values must not be summed. This identifies remaining work in the cloud mixed scenario, without assigning those costs to the unavailable native fixture.
+
+The unmodified baseline has 1,665 passing tests and eight failing `CombatOverlayPerformanceTests` after main changed its production FPS thresholds. The final Release suite has 1,675 passing tests (ten added cases), with exactly the same eight failures and no new failing case. Its build has zero warnings/errors. Local raw measurements, exact traces, failure logs and the final validation summary are under `artifacts/projectile-performance/`; that folder is ignored by git. The earlier unpublished Mega/mobile-cover branch is preserved separately rather than replacing current main's newer game code.

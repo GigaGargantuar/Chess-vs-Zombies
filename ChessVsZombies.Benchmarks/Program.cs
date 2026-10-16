@@ -18,7 +18,7 @@ static int Run(string[] arguments)
         var options = Options.Parse(arguments);
         if (options.Help)
         {
-            Console.WriteLine("Usage: dotnet run -c Release --project ChessVsZombies.Benchmarks -- [--scenario marching|defended|mixed|all] [--save-path checkpoint.json --turrets 409 --count 300] [--warmup 60] [--ticks 180] [--seed 12345] [--verify] [--verify-output trace.json]");
+            Console.WriteLine("Usage: dotnet run -c Release --project ChessVsZombies.Benchmarks -- [--scenario marching|defended|mixed|all] [--save-path checkpoint.json --turrets 409 --count 300] [--warmup 60] [--ticks 180] [--seed 12345] [--verify] [--verify-output trace.json] [--profile]; or --projectile-probe [--count 1000 --warmup 5 --ticks 20 --work-counts --verify-output trace.json]");
             return 0;
         }
 
@@ -43,6 +43,7 @@ static void Measure(string scenario, Options options)
 {
     const float dt = 1f / 60f;
     var game = CreateScenario(scenario, options);
+    if (options.Profile) game.Profile = new SimulationProfile();
     int spawned = game.Zombies.Count(zombie => zombie.Hp > 0);
     List<TickSnapshot>? trace = options.Verify ? [] : null;
     void RecordTick(string stage, int tick)
@@ -59,6 +60,11 @@ static void Measure(string scenario, Options options)
         RecordTick("warmup", i + 1);
     }
     int liveBegin = game.Zombies.Count(zombie => zombie.Hp > 0);
+    if (options.Profile)
+    {
+        game.Profile!.Reset();
+        game.ProjectileDiagnostics = new();
+    }
     string initialHash = Snapshot(game);
     GC.Collect();
     GC.WaitForPendingFinalizers();
@@ -92,6 +98,13 @@ static void Measure(string scenario, Options options)
     Console.WriteLine(FormattableString.Invariant($"  ms/update mean={elapsed.Average():F3} median={median:F3} p95={p95:F3} max={elapsed[^1]:F3}; allocatedBytes/update={allocated / (double)completed:F0}; GC={collections[0]}/{collections[1]}/{collections[2]}"));
     Console.WriteLine($"  initialSha256={initialHash}");
     Console.WriteLine($"  finalSha256={finalHash}");
+    if (options.Profile)
+    {
+        Console.WriteLine("  inclusiveStages=" + JsonSerializer.Serialize(game.Profile!.Report(completed)));
+        var d = game.ProjectileDiagnostics!;
+        Console.WriteLine("  projectileWork=" + JsonSerializer.Serialize(new { d.ForecastRequests, d.ForecastEvaluations,
+            d.PendingSorts, d.BodyQueries, d.CoverQueries, d.FlightQueries, d.Slices }));
+    }
     if (trace != null)
     {
         byte[] traceBytes = JsonSerializer.SerializeToUtf8Bytes(trace);
@@ -260,7 +273,7 @@ static object? PrivateState(object? value)
 sealed record TickSnapshot(string Stage, int Tick, string Sha256, int Zombies, int Turrets, int Projectiles, float CoreHp, GamePhase Phase);
 
 sealed record Options(string Scenario, int Count, int Warmup, int Ticks, int Seed, bool Help,
-    string? SavePath = null, int Turrets = 409, bool Verify = false, string? VerifyOutput = null)
+    string? SavePath = null, int Turrets = 409, bool Verify = false, string? VerifyOutput = null, bool Profile = false)
 {
     public static Options Parse(string[] args)
     {
@@ -269,6 +282,7 @@ sealed record Options(string Scenario, int Count, int Warmup, int Ticks, int See
         {
             if (args[i] is "--help" or "-h") return options with { Help = true };
             if (args[i] == "--verify") { options = options with { Verify = true }; continue; }
+            if (args[i] == "--profile") { options = options with { Profile = true }; continue; }
             if (i + 1 >= args.Length) throw new ArgumentException($"Missing value for {args[i]}.");
             string name = args[i++], value = args[i];
             int Number() => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int result)
