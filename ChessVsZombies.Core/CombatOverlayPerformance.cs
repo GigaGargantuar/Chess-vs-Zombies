@@ -3,8 +3,8 @@ namespace ChessVsZombies.Core;
 /// <summary>Presentation-only fallback driven by real rendered-frame intervals.</summary>
 public sealed class CombatOverlayPerformance
 {
-    public const double SlowFrameSeconds = 1d / 20;
-    public const double SmoothFrameSeconds = 1d / 25;
+    public const double SlowFrameSeconds = 1d / 15;
+    public const double SmoothFrameSeconds = 1d / 20;
     private double windowSeconds;
     private int windowFrames, slowWindows, smoothWindows;
 
