@@ -85,6 +85,7 @@ public sealed partial class GameSession
         Inventory.Reset();
         Feedback.Reset();
         UpgradeTemplate = new UpgradeTemplate();
+        QueuedUpgradeBatch = null;
         Turrets.Clear();
         Zombies.Clear();
         Projectiles.Clear();
@@ -144,6 +145,7 @@ public sealed partial class GameSession
         if (turret == null) return Reject("Aim at a living deployed piece to apply the upgrade template.");
         if (!Economy.TryApplyTemplate(turret, template, out var error)) return Reject(error);
         Message = Economy.LastMessage;
+        CancelChangedUpgradeBatch();
         return true;
     }
 
@@ -166,6 +168,7 @@ public sealed partial class GameSession
             CoreHp = CoreHp,
             Economy = Economy.ExportState(),
             UpgradeTemplate = SavedUpgradeTemplate.FromTemplate(UpgradeTemplate),
+            QueuedUpgradeBatch = CopyUpgradeBatch(QueuedUpgradeBatch),
             Inventory = Inventory.ExportState(),
             PendingBlockDrops = _pendingBlockDrops.ToList(),
             ReturningZombies = _returningZombies.Count == 0 ? null : _returningZombies.Select(zombie => zombie.Copy()).ToList(),
@@ -196,6 +199,7 @@ public sealed partial class GameSession
         Reset();
         Economy.ImportState(state.Economy);
         UpgradeTemplate = state.UpgradeTemplate!.ToTemplate();
+        QueuedUpgradeBatch = CopyUpgradeBatch(state.QueuedUpgradeBatch);
         var inventory = state.Inventory!;
         Inventory.Restore(inventory);
         _pendingBlockDrops.AddRange(state.PendingBlockDrops!);
@@ -353,6 +357,7 @@ public sealed partial class GameSession
             _topologyRevision++;
             SettleDefenses();
             Message = $"Recovered {Balance.PieceCost(turret.Kind)} currency. Equipped components were consumed.";
+            CancelChangedUpgradeBatch();
             return true;
         }
         if (!CanBuild()) return false;
@@ -431,6 +436,7 @@ public sealed partial class GameSession
             Liquids.Update(step, cell => TrySelectTurret(cell) != null);
             Buckets.Update(step, cell => TrySelectTurret(cell) != null);
             SettleDefenses();
+            UpdateUpgradeBatch(step);
             if (Phase == GamePhase.Combat) Step(step);
             else UpdateProjectiles(step);
             deltaSeconds -= step;
@@ -440,6 +446,7 @@ public sealed partial class GameSession
             Feedback.Update(deltaSeconds);
             Falls.Update(deltaSeconds, World, Turrets);
         }
+        CancelChangedUpgradeBatch();
     }
 
     public void DamageZombie(Zombie zombie, float damage, DamageKind kind = DamageKind.Blunt,

@@ -143,6 +143,8 @@ public sealed class CampaignState
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SavedUpgradeTemplate? UpgradeTemplate { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public UpgradeBatchState? QueuedUpgradeBatch { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<BlockDrop>? PendingBlockDrops { get; set; }
     // Optional additive v8 data: campaigns saved before returning enemies have no queue.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -449,6 +451,38 @@ public static class SaveStore
             var progress = economy.GetProgress(kind);
             if (equipped > progress.PullCount - progress.Available)
                 throw new InvalidDataException($"The saved field has more {kind} points than were consumed.");
+        }
+        if (state.QueuedUpgradeBatch is { } batch)
+        {
+            if (state.Version < 8 || batch.Targets is null || batch.Costs is null || batch.Targets.Count == 0 ||
+                batch.Targets.Count > state.Turrets.Count ||
+                batch.Targets.Any(target => target is null) ||
+                batch.GraceRemaining is < 0 or > GameSession.UpgradeBatchGraceSeconds ||
+                batch.GraceRemaining is { } remaining && !float.IsFinite(remaining) ||
+                batch.Targets.Select(target => target.TurretId).Distinct().Count() != batch.Targets.Count ||
+                batch.Costs.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value <= 0))
+                throw new InvalidDataException("The queued upgrade batch is invalid.");
+            var costs = new Dictionary<UpgradeKind, long>();
+            foreach (var target in batch.Targets)
+            {
+                var turret = state.Turrets.SingleOrDefault(saved => saved.Id == target.TurretId);
+                var projected = turret == null ? null : new Turret { Kind = turret.Kind };
+                if (projected != null)
+                    foreach (var (kind, points) in turret!.UpgradePoints!) projected.UpgradePoints[kind] = points;
+                if (turret == null || target.Expected is null || target.Additions is null || target.Additions.Count == 0 ||
+                    target.Expected.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value < 0) ||
+                    target.Additions.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value <= 0 ||
+                        economy.GetUpgradeCapacity(projected!, pair.Key) < pair.Value))
+                    throw new InvalidDataException("The queued upgrade batch has an invalid target.");
+                foreach (var kind in Enum.GetValues<UpgradeKind>())
+                    if (target.Expected.GetValueOrDefault(kind) != turret.UpgradePoints!.GetValueOrDefault(kind))
+                        throw new InvalidDataException("The queued upgrade batch target changed.");
+                foreach (var (kind, count) in target.Additions)
+                    costs[kind] = checked(costs.GetValueOrDefault(kind) + count);
+            }
+            if (costs.Count != batch.Costs.Count ||
+                costs.Any(pair => batch.Costs.GetValueOrDefault(pair.Key) != pair.Value))
+                throw new InvalidDataException("The queued upgrade batch costs are invalid.");
         }
         ValidateReturningZombies(state, ids);
     }

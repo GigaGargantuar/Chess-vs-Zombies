@@ -31,6 +31,23 @@ public sealed class Economy
 
     public int GetAllocated(Turret turret, UpgradeKind kind) => turret.UpgradePoints.GetValueOrDefault(kind);
 
+    public int GetUpgradeCapacity(Turret turret, UpgradeKind kind)
+    {
+        if (!Enum.IsDefined(kind) || !Enum.IsDefined(turret.Kind) || IsInnatelyInfinite(turret.Kind, kind)) return 0;
+        int existing = GetAllocated(turret, kind);
+        return Math.Max(0, Math.Min(GetAllocationCap(kind), SupportedAllocationLimit(turret.Kind, kind)) - existing);
+    }
+
+    /// <summary>Checks every type before deducting any points from a batch purchase.</summary>
+    public bool TrySpendUpgradeBatch(IReadOnlyDictionary<UpgradeKind, long> costs)
+    {
+        ArgumentNullException.ThrowIfNull(costs);
+        if (costs.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value < 0 ||
+            pair.Value > _progress[pair.Key].Available)) return false;
+        foreach (var (kind, amount) in costs) _progress[kind].Available -= (int)amount;
+        return true;
+    }
+
     public EconomyState ExportState() => new()
     {
         Currency = Currency,

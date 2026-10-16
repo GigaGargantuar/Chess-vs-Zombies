@@ -21,7 +21,7 @@ public sealed class DefenseGame : Game
     private bool wasActive, synchronizeInput = true, suppressMouseUntilReleased;
     private readonly FlyCamera cameraControl = new();
     private Vector3 camera => WorldRenderer.ToXna(cameraControl.Position);
-    private bool captured = true, paused, showZones = true, saveBlocked;
+    private bool captured = true, paused, showZones = true, saveBlocked, batchAllTurrets = true;
     private int tool, panel, jumpY, jumpX, jumpZ, pourUnits = 10;
     private Material recoveredMaterial = Material.Wood;
     private Material BlockMaterial => tool == 4 ? Material.Dirt : tool == 5 ? Material.Stone : recoveredMaterial;
@@ -500,7 +500,12 @@ public sealed class DefenseGame : Game
         var oldPhase = session.Phase;
         if (smokeMegaGuard && frameCount > 0 && frameCount % 15 == 0) QueueMegaGuardSmokeVolley();
         if (smokeThrownCover && frameCount is 15 or 30) QueueThrownCoverSmokeShot(25);
+        var queuedBeforeUpdate = session.QueuedUpgradeBatch;
+        bool graceBeforeUpdate = queuedBeforeUpdate?.GraceRemaining.HasValue ?? false;
         if (!paused && (IsActive || smoke)) session.Update(dt);
+        if (queuedBeforeUpdate != null && (session.QueuedUpgradeBatch == null ||
+            !graceBeforeUpdate && session.QueuedUpgradeBatch.GraceRemaining.HasValue))
+        { SetNotice(session.Message); SaveCheckpoint(); }
         // Frame 30 shows both two-block hands and all four armor slots. Frame
         // 90 shows the stick/chunk arcs; around frame 150 they scatter as debris.
         if (smokePanel == "megas" && frameCount == 60) paused = false;
@@ -612,6 +617,25 @@ public sealed class DefenseGame : Game
         for (int i = 0; i < count; i++) if (session.Economy.Pull(session.Turrets) is null) break;
         SetNotice(session.Economy.LastMessage); SaveCheckpoint();
     }
+    private int[] BatchTargets() => batchAllTurrets
+        ? session.Turrets.Where(turret => turret.Hp > 0).Select(turret => turret.Id).ToArray()
+        : selected is { Hp: > 0 } turret ? [turret.Id] : [];
+
+    private void BuyUpgradeBatch(bool queue)
+    {
+        bool bought = queue
+            ? session.QueueUpgradeBatch(BatchTargets(), upgradeTemplate)
+            : session.SpendUpgradeBatchNow(BatchTargets(), upgradeTemplate);
+        SetNotice(session.Message);
+        if (bought) SaveCheckpoint();
+    }
+
+    private void CancelUpgradeBatch()
+    {
+        session.CancelUpgradeBatch();
+        SetNotice(session.Message);
+        SaveCheckpoint();
+    }
     private void ApplyTemplateToTarget()
     {
         if (!hit.HasValue || session.TrySelectTurret(hit.Value) is not { } target)
@@ -626,7 +650,8 @@ public sealed class DefenseGame : Game
     {
         if (selected is not null && session.Economy.GetRange(selected, kind) == int.MaxValue) return 0;
         int used = selected is null ? 0 : session.Economy.GetAllocated(selected, kind);
-        return Math.Min(session.Economy.GetProgress(kind).Available, Math.Max(0, session.Economy.GetAllocationCap(kind) - used));
+        return Math.Min(session.Economy.GetProgress(kind).Available,
+            Math.Max(0, session.Economy.GetAllocationCap(kind) - used));
     }
     private void ChangeTemplatePoints(UpgradeKind kind, int delta)
     {
@@ -828,7 +853,7 @@ public sealed class DefenseGame : Game
         if (noticeTime > 0) Text(Trim(notice, (int)(width / 9)), 28, footer + 13, 17, Gold);
         else Text(captured ? "LEFT remove    RIGHT place    MIDDLE apply template to the aimed tower    U configure template" : "Choose point counts and a pattern, then press Tab and middle-click a tower to apply.", 28, footer + 13, 17, Teal);
         Text("WASD  move     MOUSE  look     SPACE / SHIFT  up / down     TAB  cursor     ENTER  start level", 28, footer + 48, 15, Muted);
-        Text("1-4 pieces   5 dirt   6 stone   7 dig   8/9/0 liquids   L liquid shop   G gacha   U template   J pattern   P pause   F1 help", 28, footer + 75, 14, Muted);
+        Text("1-4 pieces   5 dirt   6 stone   7 dig   8/9/0 liquids   L liquid shop   G armory   U template   J pattern   P pause   F1 help", 28, footer + 75, 14, Muted);
         if (paused) { Fill(width / 2 - 125, 101, 250, 44, Background); Text("SIMULATION PAUSED", width / 2 - 100, 110, 19, Gold); }
         if (session.Phase == GamePhase.Defeat)
         {
@@ -931,32 +956,57 @@ public sealed class DefenseGame : Game
     };
     private void DrawGachaPanel(float x, float y)
     {
-        Text("UPGRADE POINT SUPPLY", x + 20, y, 18); Text("5 per roll / each roll grants 1 point", x + 20, y + 29, 14, Muted);
+        Text("UPGRADE COMPONENTS", x + 20, y, 18);
+        Text("5 currency / pull; random point type", x + 20, y + 29, 13, Muted);
         int i = 0;
         foreach (var kind in Enum.GetValues<UpgradeKind>())
         {
-            var progress = session.Economy.GetProgress(kind); float row = y + 67 + i++ * 57;
-            Text(UpgradeName(kind), x + 20, row, 17); Text($"{progress.Available} pts", x + 233, row, 14, Gold);
-            Text($"Cap {progress.Rank} / tower    {progress.Duplicates % 10}/10 duplicates to next cap", x + 20, row + 25, 11, Muted);
-            Fill(x + 20, row + 44, 270, 2, Raised); Fill(x + 20, row + 44, 270 * (progress.Duplicates % 10) / 10f, 2, Teal);
+            var progress = session.Economy.GetProgress(kind);
+            float row = y + 58 + i++ * 31;
+            Text(UpgradeName(kind), x + 20, row, 14);
+            Text($"{progress.Available} pts / cap {progress.Rank}", x + 175, row, 12, Gold);
         }
-        Button("Pull / 5", x + 16, y + 419, 135, 44, () => Pull(1), true, session.Phase == GamePhase.Building);
-        Button("Pull 10 / 50", x + 161, y + 419, 135, 44, () => Pull(10), false, session.Phase == GamePhase.Building);
+        Button("Pull 1 / 5", x + 16, y + 252, 135, 40, () => Pull(1), true, session.Phase == GamePhase.Building);
+        Button("Pull 10 / 50", x + 161, y + 252, 135, 40, () => Pull(10), false, session.Phase == GamePhase.Building);
+        Text("BATCH TARGETS", x + 20, y + 307, 13, Muted);
+        Button($"All ({session.Turrets.Count(turret => turret.Hp > 0)})", x + 16, y + 328, 135, 36,
+            () => batchAllTurrets = true, batchAllTurrets);
+        Button(selected is null ? "Aimed (none)" : $"Aimed #{selected.Id}", x + 161, y + 328, 135, 36,
+            () => batchAllTurrets = false, !batchAllTurrets);
+        var costs = session.GetUpgradeBatchCosts(BatchTargets(), upgradeTemplate);
+        Text($"Full: HP {costs.GetValueOrDefault(UpgradeKind.HP)}  ATK {costs.GetValueOrDefault(UpgradeKind.ATK)}  O {costs.GetValueOrDefault(UpgradeKind.Orthogonal)}",
+            x + 20, y + 373, 12, Muted);
+        Text($"PD {costs.GetValueOrDefault(UpgradeKind.PlaneDiagonal)}  SD {costs.GetValueOrDefault(UpgradeKind.SpaceDiagonal)}  J {costs.GetValueOrDefault(UpgradeKind.Jump)}",
+            x + 20, y + 391, 12, Muted);
+        Button("Spend now", x + 16, y + 407, 135, 40, () => BuyUpgradeBatch(false),
+            enabled: BatchTargets().Length > 0 && session.Economy.Progress.Values.Any(progress => progress.Available > 0));
+        var queued = session.QueuedUpgradeBatch;
+        Button(queued == null ? "Queue full" : "Cancel queue", x + 161, y + 407, 135, 40,
+            queued == null ? () => BuyUpgradeBatch(true) : CancelUpgradeBatch,
+            enabled: queued != null || BatchTargets().Length > 0);
+        Text(queued == null ? "Batch points only; middle-click for pattern."
+            : queued.GraceRemaining is { } seconds
+                ? $"Queued {queued.Cost} pts / {seconds:0.0}s to cancel"
+                : $"Queued {queued.Cost} pts / waiting for each type",
+            x + 20, y + 456, 11, queued == null ? Muted : Gold);
         Button("Configure upgrade template", x + 16, height - 201, 280, 47, () => panel = 2);
     }
     private void DrawUpgradePanel(float x, float y)
     {
         Text("UPGRADE TEMPLATE", x + 20, y, 22);
-        Text("Middle-click applies the points that fit.", x + 20, y + 33, 12, Muted);
+        Text("Middle-click applies matching points.", x + 20, y + 33, 12, Muted);
         Text(selected is null ? "Aim at a tower to inspect its allocations." : $"{selected.Kind} #{selected.Id}   HP {selected.Hp:0}/{session.Economy.GetMaxHp(selected)}   ATK {session.Economy.GetAttack(selected)}", x + 20, y + 58, 13, Teal);
         int i = 0;
         foreach (var kind in Enum.GetValues<UpgradeKind>())
         {
-            var progress = session.Economy.GetProgress(kind); float row = y + 89 + i++ * 51;
+            float row = y + 89 + i++ * 51;
             int amount = TemplatePoints(kind), allocated = selected is null ? 0 : session.Economy.GetAllocated(selected, kind);
             Text(UpgradeName(kind), x + 20, row, 16);
             bool infinite = selected is not null && session.Economy.GetRange(selected, kind) == int.MaxValue;
-            Text(infinite ? $"Have {progress.Available} / unlimited" : $"Have {progress.Available} / cap {progress.Rank} / used {allocated}", x + 20, row + 23, 11, Muted);
+            var progress = session.Economy.GetProgress(kind);
+            Text(infinite ? $"Have {progress.Available} / unlimited"
+                : $"Have {progress.Available} / cap {progress.Rank} / used {allocated}",
+                x + 20, row + 23, 11, Muted);
             Button("-", x + 190, row, 31, 34, () => ChangeTemplatePoints(kind, -1), false, amount > 0);
             Text(amount.ToString(), x + 232, row + 6, 18, amount > TemplateApplicable(kind) ? Muted : Gold);
             Button("+", x + 263, row, 31, 34, () => ChangeTemplatePoints(kind, 1), false, amount < TemplateMaximum(kind));
@@ -1006,7 +1056,7 @@ public sealed class DefenseGame : Game
     private void DrawHelpPanel(float x, float y)
     {
         Text("FIELD MANUAL", x + 20, y, 23);
-        string[] lines = ["WASD  horizontal movement", "Space  ascend / Shift  descend", "Mouse  pan / Ctrl  move faster", "Tab  release or capture mouse", "Left click  remove tower / block", "Right click  place / pour", "Middle click  apply template", "1-4 pieces / 5 dirt / 6 stone", "7 dig / 8 water / 9 mercury / 0 lava", "L liquid shop / G gacha", "U upgrade template / J pattern", "Enter  begin prepared level", "P pause / V zone guides", "R retry / F1 this panel", "Close window  save & quit"]; int i = 0;
+        string[] lines = ["WASD  horizontal movement", "Space  ascend / Shift  descend", "Mouse  pan / Ctrl  move faster", "Tab  release or capture mouse", "Left click  remove tower / block", "Right click  place / pour", "Middle click  apply template", "1-4 pieces / 5 dirt / 6 stone", "7 dig / 8 water / 9 mercury / 0 lava", "L liquid shop / G armory", "U upgrade template / J pattern", "Enter  begin prepared level", "P pause / V zone guides", "R retry / F1 this panel", "Close window  save & quit"]; int i = 0;
         foreach (var line in lines) Text(line, x + 20, y + 49 + i++ * 27, 15, Muted);
         Button("Return to field", x + 16, height - 201, 280, 47, () => { panel = 0; Capture(true); }, true);
     }
