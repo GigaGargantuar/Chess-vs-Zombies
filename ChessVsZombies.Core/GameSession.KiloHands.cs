@@ -40,7 +40,11 @@ public sealed partial class GameSession
             }
         }
         // Resolve the whole group before moving exactly one physical hand.
-        if (selectedHand != null) selectedHand.Offset = selectedOffset;
+        if (selectedHand != null && selectedHand.Offset != selectedOffset)
+        {
+            InvalidateProjectileColliders();
+            selectedHand.Offset = selectedOffset;
+        }
     }
 
     private static bool TryFindKiloHandPosition(Zombie kilo, HeldKiloBlock hand, HeldKiloBlock? other,

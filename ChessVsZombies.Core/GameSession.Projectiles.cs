@@ -23,6 +23,7 @@ public sealed partial class GameSession
             }
             int removalIndex = remaining == null ? originalIndex-- : -1;
             var projectile = remaining == null ? Projectiles[removalIndex] : remaining[cursor++];
+            var sceneBeforeImpact = CurrentProjectileScene;
             var startAge = projectile.Age;
             projectile.Age += dt;
             if (projectile.Kind == ShotKind.Melee)
@@ -109,9 +110,10 @@ public sealed partial class GameSession
             if (stopped)
             {
                 RemoveResolvedProjectile(projectile, removalIndex);
-                // Removing terrain, cover, or a flying part can reveal a later
-                // contact for other shots, so recompute their event order.
-                reorder = _megaFlights.Count > 0;
+                // An HP-only impact leaves every pending contact time unchanged.
+                // Preserve the existing stable order until a body/part dies, a
+                // hand moves, or terrain/structure geometry actually changes.
+                reorder = _megaFlights.Count > 0 && CurrentProjectileScene != sceneBeforeImpact;
             }
         }
     }

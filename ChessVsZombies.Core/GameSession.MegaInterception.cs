@@ -9,6 +9,15 @@ public sealed partial class GameSession
     private readonly Dictionary<MegaWeaponFlight, List<MegaFlightSweep>> _megaInterceptionSweeps = [];
     private float _megaInterceptionDuration;
     private int _megaInterceptionWorldRevision, _megaInterceptionTopologyRevision;
+    private long _projectileColliderRevision;
+    private readonly record struct ProjectileScene(int World, int Topology, long Colliders);
+    private readonly record struct MegaContactPrediction(float Age, float Duration, ProjectileScene Scene, float Time);
+    private readonly Dictionary<Projectile, MegaContactPrediction> _megaContactPredictions = [];
+    private bool _megaContactPredictionsActive;
+
+    private ProjectileScene CurrentProjectileScene => new(World.Revision, _topologyRevision, _projectileColliderRevision);
+
+    private void InvalidateProjectileColliders() => _projectileColliderRevision++;
 
     private void UpdateProjectiles(float dt)
     {
@@ -45,6 +54,11 @@ public sealed partial class GameSession
 
     private void BeginMegaInterceptionFrame(float dt)
     {
+        // Bodies and held poses remain fixed during this frame except for the
+        // explicitly revisioned impact effects. Nothing is cached across a
+        // movement/guard update or a changed flying-block time interval.
+        _megaContactPredictions.Clear();
+        _megaContactPredictionsActive = true;
         _megaInterceptionDuration = dt;
         if (_megaFlights.Count == 0 || !Projectiles.Any(projectile => projectile.Kind != ShotKind.Melee))
         {
@@ -56,12 +70,28 @@ public sealed partial class GameSession
         RefreshMegaInterceptionSweeps();
     }
 
-    private void EndMegaInterceptionFrame() => _megaInterceptionSweeps.Clear();
+    private void EndMegaInterceptionFrame()
+    {
+        _megaInterceptionSweeps.Clear();
+        _megaContactPredictions.Clear();
+        _megaContactPredictionsActive = false;
+    }
 
     private float NextMegaInterceptionTime(Projectile projectile, float dt)
     {
-        if (ProjectileDiagnostics is { } diagnostics)
-        { diagnostics.ForecastRequests++; diagnostics.ForecastEvaluations++; }
+        if (ProjectileDiagnostics is { } diagnostics) diagnostics.ForecastRequests++;
+        var scene = CurrentProjectileScene;
+        if (_megaContactPredictionsActive && _megaContactPredictions.TryGetValue(projectile, out var cached) &&
+            cached.Age == projectile.Age && cached.Duration == dt && cached.Scene == scene) return cached.Time;
+        float time = ComputeNextMegaInterceptionTime(projectile, dt);
+        if (_megaContactPredictionsActive)
+            _megaContactPredictions[projectile] = new(projectile.Age, dt, CurrentProjectileScene, time);
+        return time;
+    }
+
+    private float ComputeNextMegaInterceptionTime(Projectile projectile, float dt)
+    {
+        if (ProjectileDiagnostics is { } diagnostics) diagnostics.ForecastEvaluations++;
         if (projectile.Kind == ShotKind.Melee || !float.IsFinite(projectile.Age) || !float.IsFinite(projectile.Duration) ||
             !ProjectilePointIsFinite(projectile.Origin) || !ProjectilePointIsFinite(projectile.Target)) return dt;
         float speedBound = Math.Max(projectile.GetTravelDirection(projectile.Age).Length(),
@@ -85,6 +115,7 @@ public sealed partial class GameSession
 
     private void RefreshMegaInterceptionSweeps()
     {
+        _megaContactPredictions.Clear();
         _megaInterceptionSweeps.Clear();
         _megaInterceptionWorldRevision = World.Revision;
         _megaInterceptionTopologyRevision = _topologyRevision;
@@ -162,6 +193,7 @@ public sealed partial class GameSession
         if (damage <= 0 || !float.IsFinite(damage)) return;
         block.Hp -= damage;
         if (block.Hp > 0) return;
+        InvalidateProjectileColliders();
         flight.Blocks.Remove(block);
         if (flight.Blocks.Count == 0) _megaFlights.Remove(flight);
         // Destroyed matter has no mining drop. Other parts retain their offsets,

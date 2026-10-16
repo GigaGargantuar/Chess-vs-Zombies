@@ -323,6 +323,7 @@ public sealed partial class GameSession
         held.Hp -= damage;
         // Projectile-destroyed cover is material loss, just like ordinary shot terrain.
         if (held.Hp > 0) return;
+        InvalidateProjectileColliders();
         blocks.Remove(held);
         if (blocks.Count == 0) _kiloBlocks.Remove(carrierId);
     }
