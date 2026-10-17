@@ -512,7 +512,7 @@ public sealed class LazyStandbySpawnTests
         var target = shape.StandAt(cell);
         var direction = cell.X == 0 ? Vector3.UnitX : cell.X + shape.GridFootprint == WorldGrid.Size
             ? -Vector3.UnitX : cell.Z == 0 ? Vector3.UnitZ : -Vector3.UnitZ;
-        return new Projectile { Origin = target + direction * 2, Target = target, Damage = damage,
+        return new Projectile { Origin = target + direction * 2, Target = target - direction * 2, Damage = damage,
             Kind = ShotKind.Pellet, Duration = .05f };
     }
 

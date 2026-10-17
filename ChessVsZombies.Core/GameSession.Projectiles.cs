@@ -154,14 +154,8 @@ public sealed partial class GameSession
         fraction = float.PositiveInfinity;
         if (!ProjectilePointIsInside(from)) { fraction = 0; return true; }
         var delta = to - from;
-        if (!ProjectilePointIsInside(to))
-        {
-            float enter = 0, leave = 1;
-            ProjectileAxisInterval(from.X, delta.X, 0, WorldGrid.Size, ref enter, ref leave);
-            ProjectileAxisInterval(from.Y, delta.Y, 0, WorldGrid.Size, ref enter, ref leave);
-            ProjectileAxisInterval(from.Z, delta.Z, 0, WorldGrid.Size, ref enter, ref leave);
-            fraction = leave;
-        }
+        bool reachesWall = TryFindOutboundWallContact(from, delta, out var wallFraction, out var wallFaces);
+        if (reachesWall) fraction = wallFraction;
 
         // Bound the scan to the part of this segment inside the battlefield.
         var insideEnd = float.IsFinite(fraction) ? Vector3.Lerp(from, to, fraction) : to;
@@ -218,12 +212,32 @@ public sealed partial class GameSession
             terrain = null;
             crustFace = null;
         }
-        if (TryFindStandbyImpact(from, to, ref fraction, out standby))
+        // Standby targets occupy a wall footprint. Their interior spawn-cell
+        // volume is never a projectile collider. Terrain and active bodies
+        // earlier than the wall (or terrain exactly on it) keep their priority.
+        if (reachesWall && fraction == wallFraction && terrain == null && zombie == null)
+            TryFindStandbyImpact(from, delta, wallFraction, wallFaces, out standby);
+        return float.IsFinite(fraction);
+    }
+
+    private const int WestWall = 1, EastWall = 2, NorthWall = 4, SouthWall = 8;
+
+    private static bool TryFindOutboundWallContact(Vector3 from, Vector3 delta, out float fraction, out int faces)
+    {
+        fraction = float.PositiveInfinity;
+        faces = 0;
+        static void Consider(float origin, float travel, int lowFace, int highFace, ref float earliest, ref int touched)
         {
-            zombie = null;
-            terrain = null;
-            crustFace = null;
+            if (travel == 0) return;
+            float contact = ((travel < 0 ? 0 : WorldGrid.Size) - origin) / travel;
+            if (contact is < 0 or > 1) return;
+            int face = travel < 0 ? lowFace : highFace;
+            if (contact < earliest) { earliest = contact; touched = face; }
+            else if (contact == earliest) touched |= face;
         }
+        Consider(from.X, delta.X, WestWall, EastWall, ref fraction, ref faces);
+        Consider(from.Y, delta.Y, 0, 0, ref fraction, ref faces);
+        Consider(from.Z, delta.Z, NorthWall, SouthWall, ref fraction, ref faces);
         return float.IsFinite(fraction);
     }
 

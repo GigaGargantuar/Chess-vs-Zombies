@@ -246,36 +246,54 @@ public sealed partial class GameSession
         if (exposed) InvalidateProjectileColliders();
     }
 
-    private bool TryFindStandbyImpact(Vector3 from, Vector3 to, ref float fraction, out StandbySpawn? slot)
+    private bool TryFindStandbyImpact(Vector3 from, Vector3 delta, float wallFraction, int faces, out StandbySpawn? slot)
     {
         slot = null;
-        if (_livingStandbyCount == 0) return false;
-        var min = Vector3.Min(from, to);
-        var max = Vector3.Max(from, to);
-        var delta = to - from;
-        for (int x = Math.Max(0, (int)MathF.Floor(min.X)); x <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(max.X)); x++)
-            for (int y = Math.Max(0, (int)MathF.Floor(min.Y)); y <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(max.Y)); y++)
-                for (int z = Math.Max(0, (int)MathF.Floor(min.Z)); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Floor(max.Z)); z++)
-                {
-                    if (!_standbyByCell.TryGetValue(new Cell(x, y, z), out var stacks)) continue;
-                    foreach (var stack in stacks)
-                    {
-                        if (ProjectileDiagnostics is { } diagnostics) diagnostics.StandbyStackQueries++;
-                        var front = stack.Front;
-                        if (front == null || front.Consumed || front.BodyHp <= 0) continue;
-                        bool hit = stack.Size is ZombieSize.Kilo or ZombieSize.Mega
-                            ? ProjectileBoxIntersection(from, delta, stack.Position - new Vector3(stack.Size == ZombieSize.Kilo ? 1 : 1.5f),
-                                stack.Position + new Vector3(stack.Size == ZombieSize.Kilo ? 1 : 1.5f), out var contact)
-                            : ProjectileBodyIntersection(from, delta, stack.Position, out contact, stack.Size switch
-                            {
-                                ZombieSize.Micro => .25f, ZombieSize.Milli => .5f, _ => 1f
-                            });
-                        if (!hit || contact >= fraction) continue;
-                        fraction = contact;
-                        slot = front;
-                    }
-                }
+        if (_livingStandbyCount == 0 || faces == 0) return false;
+        var point = Vector3.Clamp(from + delta * wallFraction, Vector3.Zero, new Vector3(WorldGrid.Size));
+        int x = Math.Clamp((int)MathF.Floor(point.X), 0, WorldGrid.Size - 1);
+        int y = Math.Clamp((int)MathF.Floor(point.Y), 0, WorldGrid.Size - 1);
+        int z = Math.Clamp((int)MathF.Floor(point.Z), 0, WorldGrid.Size - 1);
+        if ((faces & WestWall) != 0) CheckStandbyWallCell(new Cell(0, y, z), WestWall, point, ref slot);
+        if ((faces & EastWall) != 0) CheckStandbyWallCell(new Cell(WorldGrid.Size - 1, y, z), EastWall, point, ref slot);
+        if ((faces & NorthWall) != 0) CheckStandbyWallCell(new Cell(x, y, 0), NorthWall, point, ref slot);
+        if ((faces & SouthWall) != 0) CheckStandbyWallCell(new Cell(x, y, WorldGrid.Size - 1), SouthWall, point, ref slot);
         return slot != null;
+    }
+
+    private void CheckStandbyWallCell(Cell adjacent, int face, Vector3 point, ref StandbySpawn? selected)
+    {
+        if (!_standbyByCell.TryGetValue(adjacent, out var stacks)) return;
+        foreach (var stack in stacks)
+        {
+            if (ProjectileDiagnostics is { } diagnostics) diagnostics.StandbyStackQueries++;
+            var front = stack.Front;
+            if (front == null || front.Consumed || front.BodyHp <= 0 || !front.Cell.HasValue) continue;
+            var cell = front.Cell.Value;
+            int footprint = stack.Size switch { ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
+            bool touchesWall = face switch
+            {
+                WestWall => cell.X == 0,
+                EastWall => cell.X + footprint == WorldGrid.Size,
+                NorthWall => cell.Z == 0,
+                SouthWall => cell.Z + footprint == WorldGrid.Size,
+                _ => false
+            };
+            if (!touchesWall) continue;
+            float across = face is WestWall or EastWall ? point.Z - stack.Position.Z : point.X - stack.Position.X;
+            float height = point.Y - stack.Position.Y;
+            float radius = stack.Size switch
+            {
+                ZombieSize.Micro => .125f, ZombieSize.Milli => .25f,
+                ZombieSize.Kilo => 1f, ZombieSize.Mega => 1.5f, _ => .5f
+            };
+            bool hit = stack.Size is ZombieSize.Kilo or ZombieSize.Mega
+                ? MathF.Abs(across) <= radius && MathF.Abs(height) <= radius
+                : across * across + height * height <= radius * radius;
+            if (!hit) continue;
+            if (selected == null || front.WaveIndex < selected.WaveIndex ||
+                front.WaveIndex == selected.WaveIndex && front.Slot < selected.Slot) selected = front;
+        }
     }
 
     private void DamageStandby(StandbySpawn slot, float damage, DamageKind kind, ShotKind shot, Vector3 incoming)

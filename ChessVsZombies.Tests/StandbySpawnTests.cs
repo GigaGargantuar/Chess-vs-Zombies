@@ -321,7 +321,7 @@ public sealed class StandbySpawnTests
 
     private static void AssertForecastInvalidated(GameSession game, object slot, Action change)
     {
-        var shot = new Projectile { Origin = Origin(slot), Target = Position(slot), Damage = 1,
+        var shot = new Projectile { Origin = Origin(slot), Target = Position(slot) * 2 - Origin(slot), Damage = 1,
             Kind = ShotKind.Pellet, Duration = .05f };
         game.Projectiles.Add(shot);
         Invoke(game, "BeginMegaInterceptionFrame", .05f);
@@ -378,7 +378,7 @@ public sealed class StandbySpawnTests
     }
     private static void Fire(GameSession game, object slot, float damage)
     {
-        game.Projectiles.Add(new Projectile { Origin = Origin(slot), Target = Position(slot), Damage = damage,
+        game.Projectiles.Add(new Projectile { Origin = Origin(slot), Target = Position(slot) * 2 - Origin(slot), Damage = damage,
             Kind = ShotKind.Pellet, Duration = .05f });
         Invoke(game, "UpdateProjectiles", .05f);
     }
