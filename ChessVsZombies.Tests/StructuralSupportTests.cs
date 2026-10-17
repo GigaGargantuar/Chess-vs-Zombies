@@ -14,9 +14,9 @@ public class StructuralSupportTests
         Assert.True(game.Deploy(PieceKind.Rook, new Cell(8, 18, 8)));
         var top = game.Turrets[2];
         top.Hp = 19;
-        game.Economy.GetProgress(UpgradeKind.ATK).PullCount = 1;
-        game.Economy.GetProgress(UpgradeKind.ATK).Available = 1;
-        Assert.True(game.ApplyUpgradeTemplate(top.Cell, new UpgradeTemplate { Points = new() { [UpgradeKind.ATK] = 1 } }));
+        game.Economy.GetProgress(UpgradeKind.ATK).PullCount = 2;
+        game.Economy.GetProgress(UpgradeKind.ATK).Available = 2;
+        Assert.True(game.ApplyUpgradeTemplate(top.Cell, new UpgradeTemplate { Points = new() { [UpgradeKind.ATK] = 2 } }));
         int wallet = game.Economy.Currency;
 
         Assert.True(game.Remove(new Cell(8, 17, 8)));

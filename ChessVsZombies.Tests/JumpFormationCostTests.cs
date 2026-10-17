@@ -6,14 +6,14 @@ namespace ChessVsZombies.Tests;
 public class JumpFormationCostTests
 {
     [Fact]
-    public void EntireFormationCostsItsFarthestRadiusRegardlessOfDestinationCount()
+    public void TwoPointsBuyCurrentJumpCapRegardlessOfFormationRadiusOrDestinationCount()
     {
         var sparse = new Economy();
         var dense = new Economy();
         var first = new Turret { Kind = PieceKind.Knight };
         var second = new Turret { Kind = PieceKind.Knight };
-        Seed(sparse, 11, 2);
-        Seed(dense, 11, 2);
+        Seed(sparse, 91, 2);
+        Seed(dense, 91, 2);
         var many = Enumerable.Range(-2, 5).SelectMany(x => Enumerable.Range(-2, 5)
             .SelectMany(y => Enumerable.Range(-2, 5).Select(z => new Cell(x, y, z))))
             .Where(cell => cell.Chebyshev == 2).Take(35).ToArray();
@@ -21,27 +21,34 @@ public class JumpFormationCostTests
         Assert.True(sparse.TrySetJumpPattern(first, [new Cell(2, 0, 0)], out var sparseError), sparseError);
         Assert.True(dense.TrySetJumpPattern(second, many, out var denseError), denseError);
         Assert.Equal(2, JumpRules.FormationRadius(many));
-        Assert.Equal(2, sparse.GetAllocated(first, UpgradeKind.Jump));
-        Assert.Equal(2, dense.GetAllocated(second, UpgradeKind.Jump));
+        Assert.Equal(10, sparse.GetAllocated(first, UpgradeKind.Jump));
+        Assert.Equal(10, dense.GetAllocated(second, UpgradeKind.Jump));
         Assert.Equal(0, sparse.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(0, dense.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(35, second.JumpPattern.Count);
     }
 
     [Fact]
-    public void FarthestRadiusIncreaseUsesOnlyTheShortfallAndNeverRefundsADecrease()
+    public void PurchasedReachMakesEditsFreeAndTwoPointsCatchUpToARaisedCap()
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
         Seed(economy, 21, 5);
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 0)], out _));
+        Assert.Equal(3, economy.GetAllocated(knight, UpgradeKind.Jump));
         Assert.Equal(3, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(3, 1, 0), new Cell(2, 0, 0)], out _));
-        Assert.Equal(2, economy.GetProgress(UpgradeKind.Jump).Available);
-        Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 1)], out _));
-        Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 1)], out _));
+        Assert.Equal(3, economy.GetProgress(UpgradeKind.Jump).Available);
+
+        economy.GetProgress(UpgradeKind.Jump).PullCount = 191;
         Assert.Equal(3, economy.GetAllocated(knight, UpgradeKind.Jump));
-        Assert.Equal(2, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.True(economy.TrySetJumpPattern(knight, [new Cell(20, 1, 0)], out _));
+        Assert.Equal(20, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(1, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 1)], out _));
+        Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 1)], out _));
+        Assert.Equal(20, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(1, economy.GetProgress(UpgradeKind.Jump).Available);
     }
 
     [Fact]
@@ -101,7 +108,7 @@ public class JumpFormationCostTests
     }
 
     [Fact]
-    public void BatchBoughtJumpPointsCanPayTheFormationRadiusWithoutAnotherCharge()
+    public void BatchBoughtJumpLevelsCoverTheFormationWithoutAnotherCharge()
     {
         var game = new GameSession();
         Assert.True(game.Deploy(PieceKind.Knight, new Cell(8, 16, 8)));

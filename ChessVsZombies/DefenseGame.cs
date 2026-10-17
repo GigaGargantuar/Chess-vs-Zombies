@@ -221,7 +221,27 @@ public sealed class DefenseGame : Game
             if (smokePanel == "template")
             {
                 for (int y = 16; y <= 18; y++) session.Deploy((PieceKind)(y - 16), new Cell(20, y, 20));
-                upgradeTemplate.Points[UpgradeKind.HP] = 3; upgradeTemplate.Points[UpgradeKind.Jump] = 1; panel = 2;
+                var health = session.Economy.GetProgress(UpgradeKind.HP);
+                health.PullCount = 41;
+                health.Available = 8;
+                session.Economy.Apply(selected, UpgradeKind.HP);
+                health.PullCount = 51;
+                upgradeTemplate.Points[UpgradeKind.HP] = 2; upgradeTemplate.Points[UpgradeKind.Jump] = 1; panel = 2;
+                if (session.Economy.GetAllocated(selected, UpgradeKind.HP) != 5 ||
+                    TemplateMaximum(UpgradeKind.HP) != 2 ||
+                    TemplateApplicable(UpgradeKind.HP) != 2)
+                    throw new InvalidOperationException("The upgrade template must show a fixed level-5 tower and a two-point catch-up to cap 6.");
+                upgradeTemplate.Points[UpgradeKind.HP] = 1;
+                if (TemplateApplicable(UpgradeKind.HP) != 0)
+                    throw new InvalidOperationException("A one-point template budget cannot buy a catch-up.");
+                upgradeTemplate.Points[UpgradeKind.HP] = 2;
+                var cameraTarget = selected.Cell.Center + System.Numerics.Vector3.UnitY * 7;
+                var cameraMove = cameraTarget - cameraControl.Position;
+                var cameraForward = new System.Numerics.Vector3(MathF.Sin(cameraControl.Yaw), 0, MathF.Cos(cameraControl.Yaw));
+                var cameraRight = new System.Numerics.Vector3(-cameraForward.Z, 0, cameraForward.X);
+                cameraControl.MovePrecise(new System.Numerics.Vector3(System.Numerics.Vector3.Dot(cameraMove, cameraRight),
+                    cameraMove.Y, System.Numerics.Vector3.Dot(cameraMove, cameraForward)), cameraMove.Length(), _ => false);
+                cameraControl.Look(0, (cameraControl.Pitch + MathF.PI / 2) / .0025f);
             }
             if (smokePanel == "terrain") { session.BuyTool(ToolKind.Shovel); tool = 4; panel = 5; }
             if (smokePanel == "liquids")
@@ -311,8 +331,8 @@ public sealed class DefenseGame : Game
             }
         if (smokeFormationRestore)
         {
-            session.Economy.GetProgress(UpgradeKind.HP).PullCount = 1;
-            session.Economy.GetProgress(UpgradeKind.HP).Available = 1;
+            session.Economy.GetProgress(UpgradeKind.HP).PullCount = 2;
+            session.Economy.GetProgress(UpgradeKind.HP).Available = 2;
             session.Economy.Apply(session.TrySelectTurret(new Cell(22, 16, 22))!, UpgradeKind.HP);
         }
         session.SaveFormation();
@@ -346,7 +366,7 @@ public sealed class DefenseGame : Game
             session.Economy.GetProgress(kind).Available = 21;
         }
         upgradeTemplate.Points[UpgradeKind.HP] = 2;
-        upgradeTemplate.Points[UpgradeKind.ATK] = 1;
+        upgradeTemplate.Points[UpgradeKind.ATK] = 2;
         batchSelectMode = true;
         batchAllTurrets = false;
         batchCorner = new Cell(20, 16, 20);
@@ -361,9 +381,9 @@ public sealed class DefenseGame : Game
         if (smokePanel == "batch-spend")
         {
             BuyUpgradeBatch(false);
-            if (session.Turrets.Count(t => session.Economy.GetAllocated(t, UpgradeKind.HP) == 2 &&
-                session.Economy.GetAllocated(t, UpgradeKind.ATK) == 1) != 6 ||
-                session.Economy.GetProgress(UpgradeKind.HP).Available != 9 || session.Economy.GetProgress(UpgradeKind.ATK).Available != 15)
+            if (session.Turrets.Count(t => session.Economy.GetAllocated(t, UpgradeKind.HP) == 3 &&
+                session.Economy.GetAllocated(t, UpgradeKind.ATK) == 3) != 6 ||
+                session.Economy.GetProgress(UpgradeKind.HP).Available != 9 || session.Economy.GetProgress(UpgradeKind.ATK).Available != 9)
                 throw new InvalidOperationException("Batch spending must affect only the six selected towers.");
         }
         selected = null;
@@ -400,8 +420,8 @@ public sealed class DefenseGame : Game
         hitLiquid = false;
         ApplyTemplateToTarget();
         ApplyTemplateToTarget();
-        if (jump.Available != 69 || session.Economy.GetAllocated(session.Turrets[0], UpgradeKind.Jump) != 2)
-            throw new InvalidOperationException("A radius-2 jump pattern must spend two points once, leaving 69 banked.");
+        if (jump.Available != 69 || session.Economy.GetAllocated(session.Turrets[0], UpgradeKind.Jump) != 71)
+            throw new InvalidOperationException("A radius-2 jump pattern must spend two points once, reaching cap 71 and leaving 69 banked.");
         panel = 2;
         Capture(false);
     }
@@ -1281,25 +1301,16 @@ public sealed class DefenseGame : Game
         SetNotice(session.Message); SaveCheckpoint();
     }
     private int TemplatePoints(UpgradeKind kind) => upgradeTemplate.Points.GetValueOrDefault(kind);
-    private int TemplateMaximum(UpgradeKind kind)
-    {
-        int cap = session.Economy.GetAllocationCap(kind);
-        return kind == UpgradeKind.Jump && upgradeTemplate.UseJumpPattern
-            ? (int)Math.Min(cap, JumpRules.FormationRadius(upgradeTemplate.JumpPattern)) : cap;
-    }
+    private int TemplateMaximum(UpgradeKind kind) => 2;
     private int TemplateApplicable(UpgradeKind kind)
     {
-        if (selected is not null && session.Economy.GetRange(selected, kind) == int.MaxValue) return 0;
-        int used = selected is null ? 0 : session.Economy.GetAllocated(selected, kind);
-        int applicable = Math.Min(session.Economy.GetProgress(kind).Available,
-            Math.Max(0, session.Economy.GetAllocationCap(kind) - used));
+        var target = selected ?? new Turret { Kind = PieceKind.Pawn };
         if (kind == UpgradeKind.Jump && upgradeTemplate.UseJumpPattern)
         {
-            long limit = selected is null ? JumpRules.FormationRadius(upgradeTemplate.JumpPattern)
-                : session.Economy.GetJumpPatternPointCost(selected, upgradeTemplate.JumpPattern) ?? int.MaxValue;
-            applicable = (int)Math.Min(applicable, limit);
+            if (session.Economy.GetJumpPatternPointCost(target, upgradeTemplate.JumpPattern) is not > 0) return 0;
         }
-        return applicable;
+        return session.Economy.GetUpgradePurchase(target, kind,
+            Math.Min(TemplatePoints(kind), session.Economy.GetProgress(kind).Available)).Cost;
     }
     private void SetTemplatePoints(UpgradeKind kind, long amount)
     {
@@ -1856,7 +1867,7 @@ public sealed class DefenseGame : Game
         Button(queued == null ? "Queue full" : "Cancel queue", x + 161, y + 416, 135, 36,
             queued == null ? () => BuyUpgradeBatch(true) : CancelUpgradeBatch,
             enabled: queued != null || BatchTargets().Length > 0);
-        Text(queued == null ? $"{(batchAllTurrets ? "All living towers" : $"{batchSelection.SelectedIds.Count} selected towers")} / template points per tower."
+        Text(queued == null ? "Per stat: 2 pts to reach the current cap."
             : queued.GraceRemaining is { } seconds
                 ? $"Queued {queued.Cost} pts / {seconds:0.0}s to cancel"
                 : $"Queued {queued.Cost} pts / waiting for each type",
@@ -1867,8 +1878,8 @@ public sealed class DefenseGame : Game
     {
         Text("UPGRADE TEMPLATE", x + 20, y, 22);
         Text(templateField.HasValue ? "Enter saves / Esc cancels / Tab next."
-            : "Click a number to edit / Min 0 / Max cap.", x + 20, y + 33, 12, Muted);
-        Text(selected is null ? "Aim at a tower to inspect its allocations." : $"{selected.Kind} #{selected.Id}   HP {selected.Hp:0}/{session.Economy.GetMaxHp(selected)}   ATK {session.Economy.GetAttack(selected)}", x + 20, y + 58, 13, Teal);
+            : "Click points to edit / Max costs up to 2.", x + 20, y + 33, 12, Muted);
+        Text(selected is null ? "Aim at a tower to inspect its stat levels." : $"{selected.Kind} #{selected.Id}   HP {selected.Hp:0}/{session.Economy.GetMaxHp(selected)}   ATK {session.Economy.GetAttack(selected)}", x + 20, y + 58, 13, Teal);
         int i = 0;
         foreach (var kind in Enum.GetValues<UpgradeKind>())
         {
@@ -1877,11 +1888,14 @@ public sealed class DefenseGame : Game
             Text(UpgradeName(kind), x + 20, row, 14);
             bool infinite = selected is not null && session.Economy.GetRange(selected, kind) == int.MaxValue;
             var progress = session.Economy.GetProgress(kind);
-            Text(kind == UpgradeKind.Jump && upgradeTemplate.UseJumpPattern
-                ? $"Have {progress.Available} / pattern {JumpRules.FormationRadius(upgradeTemplate.JumpPattern)} / paid {allocated}"
+            int maxCost = selected is null ? 2
+                : session.Economy.GetUpgradePointCost(selected, kind, progress.Rank);
+            string detail = kind == UpgradeKind.Jump && upgradeTemplate.UseJumpPattern
+                ? $"Have {progress.Available} / level {allocated}/{progress.Rank} / pattern {JumpRules.FormationRadius(upgradeTemplate.JumpPattern)}"
                 : infinite ? $"Have {progress.Available} / unlimited"
-                : $"Have {progress.Available} / cap {progress.Rank} / used {allocated}",
-                x + 20, row + 30, 11, Muted);
+                : $"Have {progress.Available} / level {allocated}/{progress.Rank} / max {maxCost} pt";
+            float detailSize = Math.Min(11, 272 * 11 / Math.Max(1, font.Measure(detail, 11)));
+            Text(detail, x + 20, row + 30, detailSize, Muted);
             bool editing = templateField == kind;
             var fieldBounds = new Rectangle((int)(x + 156), (int)(row - 3), 64, 28);
             Fill(fieldBounds.X, fieldBounds.Y, fieldBounds.Width, fieldBounds.Height, editing ? new Color(39, 57, 70) : Background);
@@ -1893,7 +1907,7 @@ public sealed class DefenseGame : Game
             }
             string value = editing ? templateFieldText : amount.ToString();
             float size = Math.Min(16, 54 * 16 / Math.Max(1, font.Measure(value, 16)));
-            Text(value, fieldBounds.X + 5, row + 2, size, editing ? TextColor : amount > TemplateApplicable(kind) ? Muted : Gold);
+            Text(value, fieldBounds.X + 5, row + 2, size, editing ? TextColor : amount > 0 && TemplateApplicable(kind) == 0 ? Muted : Gold);
             if (editing && !templateFieldSelected && (int)(elapsed * 2) % 2 == 0)
                 Fill(fieldBounds.X + 5 + font.Measure(value, size), row + 2, 1, 18, Teal);
             buttons.Add((fieldBounds, () => BeginTemplateField(kind)));
@@ -1904,9 +1918,9 @@ public sealed class DefenseGame : Game
         Button(upgradeTemplate.UseJumpPattern ? "Use: ON" : "Use: OFF", x + 201, y + 408, 95, 40, ToggleTemplatePattern, upgradeTemplate.UseJumpPattern);
         Text(upgradeTemplate.UseJumpPattern
             ? selected is { } target && session.Economy.GetJumpPatternPointCost(target, upgradeTemplate.JumpPattern) is { } jumpCost
-                ? $"Jump needed: {jumpCost}. Extra Jump requests stay banked."
-                : $"Jump limit: {JumpRules.FormationRadius(upgradeTemplate.JumpPattern)} per tower; paid points count."
-            : $"Up to {upgradeTemplate.Points.Values.Sum(v => (long)v)} pts; unused points stay banked.", x + 20, y + 459, 12, Muted);
+                ? $"Jump needed: {jumpCost} pt. Extra stays banked."
+                : "Patterns cost up to 2 points per tower."
+            : "2 pts reach cap / 2 pts catch up later.", x + 20, y + 459, 12, Muted);
         Button("Ready / return to field", x + 16, height - 201, 280, 47, () => Capture(true), true);
     }
     private void DrawJumpEditorHud()
@@ -1928,10 +1942,11 @@ public sealed class DefenseGame : Game
         Button("Zoom -", x + 164, 390, 128, 42, () => jumpEditor.ZoomBy(-1));
         Text($"{draftPattern.Count} destinations", x + 20, 460, 17, Teal);
         long radius = JumpRules.FormationRadius(draftPattern);
-        Text($"Formation cost: {radius} Jump points", x + 20, 493, 14, Gold);
+        var patternCost = session.Economy.GetJumpPatternPointCost(selected ?? new Turret { Kind = PieceKind.Pawn }, draftPattern);
+        Text(patternCost is { } cost ? $"Formation cost: {cost} Jump points" : $"Formation radius: {radius}", x + 20, 493, 14, Gold);
         int cap = session.Economy.GetAllocationCap(UpgradeKind.Jump);
         Text($"Collection cap: {cap}", x + 20, 519, 13, Muted);
-        Text(cap < radius ? "New edits need a higher cap." : "One cost for the whole formation.",
+        Text(cap < radius ? "New edits need a higher cap." : "2 points whenever more reach is needed.",
             x + 20, 543, 12, cap < radius ? Gold : Muted);
         Button("Reset knight pattern", x + 19, 578, 273, 40, () =>
         {

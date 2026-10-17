@@ -47,7 +47,8 @@ public static class Balance
     public const int BucketCapacity = 10, BucketCarrierInterval = 5;
     public const float BucketReach = 2, BucketActionSeconds = 1;
     public const int HpUpgradePerPoint = 10, AtkUpgradePerPoint = 1;
-    // Retained constant names for source compatibility; ranks set caps, never stat bonuses.
+    // UpgradePoints stores purchased stat levels, independent of the component price.
+    // Retained constant names describe the bonus per level for source compatibility.
     public const int HpUpgradePerRank = HpUpgradePerPoint, AtkUpgradePerRank = AtkUpgradePerPoint;
     public static int PieceCost(PieceKind kind) => kind switch { PieceKind.Pawn => 1, PieceKind.Knight => 2, _ => 4 };
     public static bool IsTerrainMaterial(Material material) => material is Material.Dirt or Material.Stone or Material.Wood or
@@ -103,12 +104,13 @@ public sealed class Turret
     public Cell Cell { get; set; }
     public float Hp { get; set; } = Balance.TurretHp;
     public float Cooldown { get; set; }
+    /// <summary>Purchased stat levels, fixed independently of later collection-cap increases.</summary>
     public Dictionary<UpgradeKind, int> UpgradePoints { get; } = [];
     private List<Cell>? _jumpPattern;
     public List<Cell> JumpPattern => _jumpPattern ??= JumpRules.DefaultPattern(Kind);
 }
 
-/// <summary>A reusable request; each click spends only the points the aimed turret can accept.</summary>
+/// <summary>Reusable component budgets: two for each max-stat purchase, including a later catch-up.</summary>
 public sealed class UpgradeTemplate
 {
     public Dictionary<UpgradeKind, int> Points { get; set; } = [];

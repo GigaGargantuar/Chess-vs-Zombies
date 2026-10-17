@@ -41,13 +41,14 @@ public sealed class Economy
         return requested;
     }
 
-    /// <summary>Already allocated points pay toward the whole pattern; unchanged patterns need no purchase.</summary>
+    /// <summary>Existing Jump levels cover smaller patterns; buying more reach uses the normal max-stat price.</summary>
     public int? GetJumpPatternPointCost(Turret turret, IReadOnlyList<Cell>? pattern)
     {
         if (pattern is null || pattern.Count == 0 || pattern.Distinct().Count() != pattern.Count ||
             pattern.Any(offset => !IsWithinJumpRange(offset, int.MaxValue))) return null;
         if (HasJump(turret) && turret.JumpPattern.Count == pattern.Count && turret.JumpPattern.ToHashSet().SetEquals(pattern)) return 0;
-        return (int)Math.Max(0, JumpRules.FormationRadius(pattern) - Math.Max(0, GetAllocated(turret, UpgradeKind.Jump)));
+        long radius = JumpRules.FormationRadius(pattern);
+        return radius <= GetAllocated(turret, UpgradeKind.Jump) ? 0 : 2;
     }
 
     public int GetUpgradeCapacity(Turret turret, UpgradeKind kind)
@@ -55,6 +56,23 @@ public sealed class Economy
         if (!Enum.IsDefined(kind) || !Enum.IsDefined(turret.Kind) || IsInnatelyInfinite(turret.Kind, kind)) return 0;
         int existing = GetAllocated(turret, kind);
         return Math.Max(0, Math.Min(GetAllocationCap(kind), SupportedAllocationLimit(turret.Kind, kind)) - existing);
+    }
+
+    /// <summary>Each purchase, including a later catch-up, costs two matching points.</summary>
+    public int GetUpgradePointCost(Turret turret, UpgradeKind kind, int targetAllocation)
+    {
+        int existing = GetAllocated(turret, kind);
+        if (targetAllocation <= existing || (long)targetAllocation - existing > GetUpgradeCapacity(turret, kind)) return 0;
+        return 2;
+    }
+
+    /// <summary>Quotes one atomic purchase. Actual stat levels remain fixed until another purchase.</summary>
+    public (int Added, int Cost) GetUpgradePurchase(Turret turret, UpgradeKind kind, int pointBudget, int? targetAllocation = null)
+    {
+        int existing = GetAllocated(turret, kind);
+        int target = targetAllocation ?? (existing + GetUpgradeCapacity(turret, kind));
+        int cost = GetUpgradePointCost(turret, kind, target);
+        return cost > 0 && pointBudget >= cost ? (target - existing, cost) : (0, 0);
     }
 
     /// <summary>Checks every type before deducting any points from a batch purchase.</summary>
@@ -156,13 +174,13 @@ public sealed class Economy
         // The optional argument remains for call-site compatibility. Pulling must never
         // enumerate or modify deployed turrets, including when the allocation cap rises.
         LastMessage = progress.Rank > previousRank
-            ? $"Pulled 1 {kind} point! Each tower can now receive up to {progress.Rank} {kind} points."
-            : $"Pulled 1 {kind} point. {progress.Available} available; {progress.Rank} per-tower cap.";
+            ? $"Pulled 1 {kind} point! The {kind} stat cap is now {progress.Rank}; spend points to bring towers up to it."
+            : $"Pulled 1 {kind} point. {progress.Available} available; {progress.Rank} stat cap.";
         return kind;
     }
 
     public bool Apply(Turret turret, UpgradeKind kind) =>
-        TryApplyTemplate(turret, new UpgradeTemplate { Points = new() { [kind] = 1 } }, out _);
+        TryApplyTemplate(turret, new UpgradeTemplate { Points = new() { [kind] = 2 } }, out _);
 
     public bool TryApplyTemplate(Turret turret, UpgradeTemplate template, out string error)
     {
@@ -189,6 +207,7 @@ public sealed class Economy
 
         var projected = new Turret { Id = turret.Id, Kind = turret.Kind, Cell = turret.Cell, Hp = turret.Hp };
         var additions = new Dictionary<UpgradeKind, int>();
+        var costs = new Dictionary<UpgradeKind, int>();
         var applied = new List<string>();
         var skipped = new List<string>();
         long spent = 0;
@@ -204,24 +223,25 @@ public sealed class Economy
                 continue;
             }
             int available = _progress[kind].Available;
-            int capSpace = GetAllocationCap(kind) - existing;
-            int statSpace = SupportedAllocationLimit(turret.Kind, kind) - existing;
-            int added = Math.Min(requested, Math.Min(available, Math.Min(capSpace, statSpace)));
+            var (added, cost) = GetUpgradePurchase(turret, kind, Math.Min(requested, available));
             if (added > 0)
             {
                 projected.UpgradePoints[kind] = existing + added;
                 additions[kind] = added;
-                applied.Add($"{kind} +{added}");
+                costs[kind] = cost;
+                applied.Add($"{kind} +{added} ({cost} points)");
             }
-            if (added < requested)
+            if (cost < requested)
             {
                 var reasons = new List<string>();
-                if (available < requested) reasons.Add("inventory");
-                if (capSpace < requested) reasons.Add("tower cap");
-                if (statSpace < requested) reasons.Add("stat limit");
-                skipped.Add($"{kind}: {requested - added} skipped ({string.Join(", ", reasons)})");
+                int required = GetUpgradePointCost(turret, kind, existing + GetUpgradeCapacity(turret, kind));
+                if (available < required) reasons.Add("inventory");
+                if (requested < required) reasons.Add($"purchase needs {required} points");
+                if (required == 0 || cost > 0) reasons.Add("tower cap");
+                if (GetAllocationCap(kind) > SupportedAllocationLimit(turret.Kind, kind)) reasons.Add("stat limit");
+                skipped.Add($"{kind}: {requested - cost} skipped ({string.Join(", ", reasons)})");
             }
-            spent += added;
+            spent += cost;
         }
 
         List<Cell>? nextPattern = null;
@@ -238,17 +258,18 @@ public sealed class Economy
                 bool unchanged = HasJump(turret) && turret.JumpPattern.Count == template.JumpPattern.Count &&
                     turret.JumpPattern.ToHashSet().SetEquals(template.JumpPattern);
                 int allocated = GetAllocated(projected, UpgradeKind.Jump);
-                // Allocated Jump points already pay toward the radius. A smaller edited
-                // formation does not return previously spent points.
+                // Actual Jump levels cover the radius. Editing a smaller formation
+                // does not return points; purchasing reach always fills today's cap.
                 long shortfall = unchanged ? 0 : Math.Max(0, radius - allocated);
-                int freePoints = _progress[UpgradeKind.Jump].Available - additions.GetValueOrDefault(UpgradeKind.Jump);
+                int freePoints = _progress[UpgradeKind.Jump].Available - costs.GetValueOrDefault(UpgradeKind.Jump);
                 int capSpace = GetAllocationCap(UpgradeKind.Jump) - allocated;
                 int statSpace = SupportedAllocationLimit(turret.Kind, UpgradeKind.Jump) - allocated;
-                if (shortfall > freePoints || shortfall > capSpace || shortfall > statSpace)
-                    skipped.Add($"Jump pattern skipped: radius {radius} needs {shortfall} more matching Jump points within this tower's collection cap");
+                var purchase = shortfall > 0 ? GetUpgradePurchase(projected, UpgradeKind.Jump, freePoints) : default;
+                if (shortfall > capSpace || shortfall > statSpace || shortfall > 0 && purchase.Added == 0)
+                    skipped.Add($"Jump pattern skipped: radius {radius} needs a matching Jump purchase within this tower's collection cap");
                 else
                 {
-                    int extra = (int)shortfall;
+                    int extra = purchase.Added;
                     if (extra > 0) projected.UpgradePoints[UpgradeKind.Jump] = allocated + extra;
                     if (!ValidateJumpPattern(projected, template.JumpPattern, out var candidate, out var patternError))
                     {
@@ -261,8 +282,9 @@ public sealed class Economy
                         if (extra > 0)
                         {
                             additions[UpgradeKind.Jump] = additions.GetValueOrDefault(UpgradeKind.Jump) + extra;
-                            spent += extra;
-                            applied.Add($"Jump formation +{extra}");
+                            costs[UpgradeKind.Jump] = costs.GetValueOrDefault(UpgradeKind.Jump) + purchase.Cost;
+                            spent += purchase.Cost;
+                            applied.Add($"Jump formation +{extra} ({purchase.Cost} points)");
                         }
                     }
                 }
@@ -290,10 +312,10 @@ public sealed class Economy
 
         // Compute the achievable projection first, then commit only those allocations.
         // Missing components remain unspent; an unusable pattern leaves the old offsets intact.
-        foreach (var (kind, added) in additions)
+        foreach (var kind in additions.Keys)
         {
             turret.UpgradePoints[kind] = projected.UpgradePoints[kind];
-            _progress[kind].Available -= added;
+            _progress[kind].Available -= costs[kind];
         }
         turret.Hp += nextMaxHp - previousMaxHp;
         if (nextPattern is not null)

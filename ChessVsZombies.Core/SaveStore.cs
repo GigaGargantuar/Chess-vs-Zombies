@@ -111,7 +111,7 @@ public sealed class SavedUpgradeTemplate
 public sealed class CampaignState
 {
     [JsonRequired]
-    public int Version { get; set; } = 8;
+    public int Version { get; set; } = 9;
     [JsonRequired]
     public EconomyState Economy { get; set; } = new();
     [JsonRequired]
@@ -320,6 +320,8 @@ public static class SaveStore
                 migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateUpgradeTemplate(state, originalVersion) }.Where(text => text.Length > 0));
             if (state.Version < 8)
                 migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateMaterialInventory(state, originalVersion) }.Where(text => text.Length > 0));
+            if (state.Version < 9)
+                migrationNotice = string.Join(" ", new[] { migrationNotice, MigrateUpgradePricing(state) }.Where(text => text.Length > 0));
             Validate(state);
             var restored = new GameSession(levels: levels);
             restored.RestoreCheckpoint(state);
@@ -340,7 +342,7 @@ public static class SaveStore
 
     private static void Validate(CampaignState state)
     {
-        if (state.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8)) throw new InvalidDataException($"Unsupported checkpoint version {state.Version}.");
+        if (state.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9)) throw new InvalidDataException($"Unsupported checkpoint version {state.Version}.");
         if (state.AllInOne && !state.MergeFiveLevels)
             throw new InvalidDataException("All in one requires a five-level range.");
         var legacy = state.Version == 1;
@@ -474,7 +476,9 @@ public static class SaveStore
                     if (!Enum.IsDefined(kind) || points <= 0 || points > economy.GetAllocationCap(kind) || IsInnatelyInfinite(saved.Kind, kind))
                         throw new InvalidDataException("A saved piece has invalid upgrade points or exceeds its collection cap.");
                     turret.UpgradePoints.Add(kind, points);
-                    equippedCounts[kind] += points;
+                    // Allocations record achieved stats. New purchases can reach any
+                    // collection cap for two points; rank-one legacy purchases cost one.
+                    equippedCounts[kind] += state.Version >= 9 ? Math.Min(2, points) : points;
                 }
                 if (saved.Hp > economy.GetMaxHp(turret))
                     throw new InvalidDataException("A saved piece has more HP than its upgraded maximum.");
@@ -515,7 +519,12 @@ public static class SaveStore
                     if (target.Expected.GetValueOrDefault(kind) != turret.UpgradePoints!.GetValueOrDefault(kind))
                         throw new InvalidDataException("The queued upgrade batch target changed.");
                 foreach (var (kind, count) in target.Additions)
-                    costs[kind] = checked(costs.GetValueOrDefault(kind) + count);
+                {
+                    int cost = state.Version >= 9
+                        ? economy.GetUpgradePointCost(projected!, kind, checked(target.Expected.GetValueOrDefault(kind) + count))
+                        : count;
+                    costs[kind] = checked(costs.GetValueOrDefault(kind) + cost);
+                }
             }
             if (costs.Count != batch.Costs.Count ||
                 costs.Any(pair => batch.Costs.GetValueOrDefault(pair.Key) != pair.Value))
@@ -751,6 +760,39 @@ public static class SaveStore
             ? " The original version 7 file is backed up on the next save." : string.Empty);
     }
 
+    private static string MigrateUpgradePricing(CampaignState state)
+    {
+        // Preserve each queued stat target and its remaining grace period. Only its
+        // unpaid quote changes; no deployed stats or component balances are altered.
+        bool cancelledQueue = false;
+        if (state.QueuedUpgradeBatch is { } batch)
+        {
+            var economy = new Economy();
+            economy.ImportState(state.Economy);
+            var costs = new Dictionary<UpgradeKind, long>();
+            foreach (var target in batch.Targets)
+            {
+                var saved = state.Turrets.Single(turret => turret.Id == target.TurretId);
+                var turret = new Turret { Kind = saved.Kind };
+                foreach (var (kind, points) in saved.UpgradePoints!) turret.UpgradePoints[kind] = points;
+                foreach (var (kind, addition) in target.Additions)
+                {
+                    int cost = economy.GetUpgradePointCost(turret, kind, checked(target.Expected.GetValueOrDefault(kind) + addition));
+                    costs[kind] = checked(costs.GetValueOrDefault(kind) + cost);
+                }
+            }
+            if (costs.Any(pair => pair.Value > batch.Costs.GetValueOrDefault(pair.Key)))
+            {
+                state.QueuedUpgradeBatch = null;
+                cancelledQueue = true;
+            }
+            else batch.Costs = costs;
+        }
+        state.Version = 9;
+        return "Upgrade pricing updated: reaching the current stat cap costs two matching component points, including later top-ups. Existing tower stats are preserved." +
+            (cancelledQueue ? " The queued upgrade batch was cancelled without charge because its new price exceeded the original quote." : string.Empty);
+    }
+
     private static void ValidateUpgradeTemplate(SavedUpgradeTemplate template)
     {
         // A reusable request can exceed current inventory, collection caps, or the
@@ -773,7 +815,7 @@ public static class SaveStore
         using var document = JsonDocument.Parse(existing);
         if (document.RootElement.ValueKind != JsonValueKind.Object) return;
         var version = document.RootElement.EnumerateObject().FirstOrDefault(property => property.Name.Equals("Version", StringComparison.OrdinalIgnoreCase));
-        if (version.Value.ValueKind != JsonValueKind.Number || !version.Value.TryGetInt32(out var number) || number is not (1 or 2 or 3 or 4 or 5 or 6 or 7)) return;
+        if (version.Value.ValueKind != JsonValueKind.Number || !version.Value.TryGetInt32(out var number) || number is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8)) return;
         var backup = path + $".v{number}.bak";
         if (File.Exists(backup)) backup = path + $".v{number}.{Guid.NewGuid():N}.bak";
         File.Copy(path, backup);

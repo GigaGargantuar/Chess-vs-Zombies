@@ -13,13 +13,13 @@ public class UpgradeTemplateTests
         var untouched = new Turret { Kind = PieceKind.Pawn };
         Seed(economy, UpgradeKind.HP, 11, 2);
         Seed(economy, UpgradeKind.ATK, 11, 2);
-        var template = Template((UpgradeKind.HP, 2), (UpgradeKind.ATK, 1));
+        var template = Template((UpgradeKind.HP, 2), (UpgradeKind.ATK, 2));
         Assert.True(economy.TryApplyTemplate(target, template, out var error), error);
         Assert.Equal(50, economy.GetMaxHp(target));
         Assert.Equal(37, target.Hp);
-        Assert.Equal(2, economy.GetAttack(target));
+        Assert.Equal(3, economy.GetAttack(target));
         Assert.Equal(0, economy.GetProgress(UpgradeKind.HP).Available);
-        Assert.Equal(1, economy.GetProgress(UpgradeKind.ATK).Available);
+        Assert.Equal(0, economy.GetProgress(UpgradeKind.ATK).Available);
         Assert.Equal(30, economy.GetMaxHp(untouched));
         Assert.Equal(1, economy.GetAttack(untouched));
         Assert.Equal(2, template.Points[UpgradeKind.HP]);
@@ -33,7 +33,7 @@ public class UpgradeTemplateTests
         var kinds = new[] { UpgradeKind.HP, UpgradeKind.ATK, UpgradeKind.Orthogonal };
         foreach (var kind in kinds)
         {
-            Seed(economy, kind, 10, 1);
+            Seed(economy, kind, 10, 2);
             Assert.True(economy.Apply(turret, kind));
         }
         turret.Hp -= 7;
@@ -56,16 +56,16 @@ public class UpgradeTemplateTests
         var turret = new Turret { Kind = PieceKind.Pawn, Hp = 17 };
         Seed(economy, UpgradeKind.HP, 11, 2);
         Seed(economy, UpgradeKind.ATK, exceedsCap ? 2 : 11, exceedsCap ? 2 : 0);
-        var template = Template((UpgradeKind.HP, 1), (UpgradeKind.ATK, exceedsCap ? 2 : 1));
+        var template = Template((UpgradeKind.HP, 2), (UpgradeKind.ATK, 3));
         Assert.True(economy.TryApplyTemplate(turret, template, out var error), error);
         Assert.Empty(error);
-        Assert.Equal(1, economy.GetAllocated(turret, UpgradeKind.HP));
+        Assert.Equal(2, economy.GetAllocated(turret, UpgradeKind.HP));
         Assert.Equal(exceedsCap ? 1 : 0, economy.GetAllocated(turret, UpgradeKind.ATK));
-        Assert.Equal(27, turret.Hp);
-        Assert.Equal(1, economy.GetProgress(UpgradeKind.HP).Available);
-        Assert.Equal(exceedsCap ? 1 : 0, economy.GetProgress(UpgradeKind.ATK).Available);
-        Assert.Contains("ATK: 1 skipped", economy.LastMessage);
-        Assert.Equal(exceedsCap ? 2 : 1, template.Points[UpgradeKind.ATK]);
+        Assert.Equal(37, turret.Hp);
+        Assert.Equal(0, economy.GetProgress(UpgradeKind.HP).Available);
+        Assert.Equal(0, economy.GetProgress(UpgradeKind.ATK).Available);
+        Assert.Contains(exceedsCap ? "ATK: 1 skipped" : "ATK: 3 skipped", economy.LastMessage);
+        Assert.Equal(3, template.Points[UpgradeKind.ATK]);
     }
 
     [Fact]
@@ -73,9 +73,9 @@ public class UpgradeTemplateTests
     {
         var economy = new Economy();
         var turret = new Turret { Kind = PieceKind.Pawn };
-        Seed(economy, UpgradeKind.HP, 1, 1);
-        Seed(economy, UpgradeKind.Jump, 1, 1);
-        var template = Template((UpgradeKind.HP, 1), (UpgradeKind.Jump, 1));
+        Seed(economy, UpgradeKind.HP, 2, 2);
+        Seed(economy, UpgradeKind.Jump, 2, 2);
+        var template = Template((UpgradeKind.HP, 2), (UpgradeKind.Jump, 2));
         template.UseJumpPattern = true;
         template.JumpPattern.Clear();
         template.JumpPattern.Add(new Cell(3, 0, 0));
@@ -106,15 +106,14 @@ public class UpgradeTemplateTests
     }
 
     [Theory]
-    [InlineData(PieceKind.Knight, 1, 3)]
-    [InlineData(PieceKind.Pawn, 1, 2)]
-    [InlineData(PieceKind.Pawn, 2, 3)]
-    public void EachAllocatedJumpPointExtendsOnlyThatPiecesReach(PieceKind kind, int points, int range)
+    [InlineData(PieceKind.Knight, 4)]
+    [InlineData(PieceKind.Pawn, 3)]
+    public void JumpPurchaseFillsTheCurrentCapForOnlyItsTarget(PieceKind kind, int range)
     {
         var economy = new Economy();
         var turret = new Turret { Kind = kind };
         Seed(economy, UpgradeKind.Jump, 11, 2);
-        Assert.True(economy.TryApplyTemplate(turret, Template((UpgradeKind.Jump, points)), out _));
+        Assert.True(economy.TryApplyTemplate(turret, Template((UpgradeKind.Jump, 2)), out _));
         Assert.Equal(range, economy.GetRange(turret, UpgradeKind.Jump));
     }
 
@@ -138,15 +137,16 @@ public class UpgradeTemplateTests
     {
         var game = new GameSession();
         Seed(game.Economy, UpgradeKind.HP, 11, 2);
-        var template = Template((UpgradeKind.HP, 1));
+        var template = Template((UpgradeKind.HP, 2));
         Assert.False(game.ApplyUpgradeTemplate(new Cell(11, 16, 12), template));
         Assert.True(game.Deploy(PieceKind.Pawn, new Cell(11, 16, 12)));
         Assert.True(game.ApplyUpgradeTemplate(new Cell(11, 16, 12), template));
-        Assert.Equal(40, Assert.Single(game.Turrets).Hp);
+        Assert.Equal(50, Assert.Single(game.Turrets).Hp);
         Assert.True(game.StartLevel());
+        Seed(game.Economy, UpgradeKind.HP, 21, 2);
         Assert.True(game.ApplyUpgradeTemplate(new Cell(11, 16, 12), template));
         Assert.Equal(0, game.Economy.GetProgress(UpgradeKind.HP).Available);
-        Assert.Equal(50, Assert.Single(game.Turrets).Hp);
+        Assert.Equal(60, Assert.Single(game.Turrets).Hp);
         Assert.False(game.ApplyUpgradeTemplate(new Cell(10, 16, 12), template));
         Assert.Single(game.Turrets).Hp = 0;
         Assert.False(game.ApplyUpgradeTemplate(new Cell(11, 16, 12), template));
@@ -157,17 +157,18 @@ public class UpgradeTemplateTests
     {
         var economy = new Economy();
         var turret = new Turret { Kind = PieceKind.Pawn, Hp = 17 };
-        Seed(economy, UpgradeKind.HP, 21, 10); // Three points per tower.
+        Seed(economy, UpgradeKind.HP, 21, 10); // Stat cap three.
         Assert.True(economy.TryApplyTemplate(turret, Template((UpgradeKind.HP, 2)), out _));
+        Seed(economy, UpgradeKind.HP, 91, 8); // A higher cap leaves the original level three intact.
         var template = Template((UpgradeKind.HP, 5));
         Assert.True(economy.TryApplyTemplate(turret, template, out var error), error);
-        Assert.Equal(3, economy.GetAllocated(turret, UpgradeKind.HP));
-        Assert.Equal(47, turret.Hp);
-        Assert.Equal(7, economy.GetProgress(UpgradeKind.HP).Available);
-        Assert.Contains("HP: 4 skipped (tower cap)", economy.LastMessage);
+        Assert.Equal(10, economy.GetAllocated(turret, UpgradeKind.HP));
+        Assert.Equal(117, turret.Hp);
+        Assert.Equal(6, economy.GetProgress(UpgradeKind.HP).Available);
+        Assert.Contains("HP: 3 skipped (tower cap)", economy.LastMessage);
         Assert.False(economy.TryApplyTemplate(turret, template, out error));
         Assert.Contains("No upgrades applied", error);
-        Assert.Equal(7, economy.GetProgress(UpgradeKind.HP).Available);
+        Assert.Equal(6, economy.GetProgress(UpgradeKind.HP).Available);
         Assert.Equal(5, template.Points[UpgradeKind.HP]);
     }
 
@@ -195,16 +196,16 @@ public class UpgradeTemplateTests
         var economy = new Economy();
         var turret = new Turret { Kind = PieceKind.Knight };
         Seed(economy, UpgradeKind.Jump, 21, 1);
-        Seed(economy, UpgradeKind.ATK, 1, 1);
-        var template = Template((UpgradeKind.Jump, 3), (UpgradeKind.ATK, 1));
+        Seed(economy, UpgradeKind.ATK, 2, 2);
+        var template = Template((UpgradeKind.Jump, 3), (UpgradeKind.ATK, 2));
         template.UseJumpPattern = true;
         template.JumpPattern = [new Cell(5, 0, 0)];
         var before = turret.JumpPattern.ToArray();
         Assert.True(economy.TryApplyTemplate(turret, template, out var error), error);
-        Assert.Equal(3, economy.GetRange(turret, UpgradeKind.Jump));
+        Assert.Equal(2, economy.GetRange(turret, UpgradeKind.Jump));
         Assert.Equal(2, economy.GetAttack(turret));
         Assert.Equal(before, turret.JumpPattern);
-        Assert.Equal(0, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.Equal(1, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Contains("Jump: 2 skipped (inventory)", economy.LastMessage);
         Assert.Contains("Jump pattern skipped", economy.LastMessage);
 
@@ -222,8 +223,8 @@ public class UpgradeTemplateTests
     {
         var economy = new Economy();
         var turret = new Turret { Kind = PieceKind.Pawn };
-        Seed(economy, UpgradeKind.HP, 1, 1);
-        var template = Template((UpgradeKind.HP, 1), (UpgradeKind.Jump, 1));
+        Seed(economy, UpgradeKind.HP, 2, 2);
+        var template = Template((UpgradeKind.HP, 2), (UpgradeKind.Jump, 2));
         template.UseJumpPattern = true;
         if (missingPattern) template.JumpPattern = null!;
         var before = turret.JumpPattern.ToArray();
@@ -256,13 +257,13 @@ public class UpgradeTemplateTests
         var economy = new Economy();
         var turret = new Turret { Kind = PieceKind.Pawn };
         Seed(economy, UpgradeKind.HP, int.MaxValue, int.MaxValue);
-        Seed(economy, UpgradeKind.ATK, 1, 1);
-        var template = Template((UpgradeKind.HP, int.MaxValue), (UpgradeKind.ATK, 1));
+        Seed(economy, UpgradeKind.ATK, 2, 2);
+        var template = Template((UpgradeKind.HP, int.MaxValue), (UpgradeKind.ATK, 2));
         int supportedHpPoints = (int.MaxValue - Balance.TurretHp) / Balance.HpUpgradePerPoint;
         Assert.True(economy.TryApplyTemplate(turret, template, out var error), error);
         Assert.Equal(supportedHpPoints, economy.GetAllocated(turret, UpgradeKind.HP));
         Assert.Equal(Balance.TurretHp + supportedHpPoints * Balance.HpUpgradePerPoint, economy.GetMaxHp(turret));
-        Assert.Equal(int.MaxValue - supportedHpPoints, economy.GetProgress(UpgradeKind.HP).Available);
+        Assert.Equal(int.MaxValue - 2, economy.GetProgress(UpgradeKind.HP).Available);
         Assert.Equal(2, economy.GetAttack(turret));
         Assert.True(float.IsFinite(turret.Hp));
         Assert.Contains("stat limit", economy.LastMessage);

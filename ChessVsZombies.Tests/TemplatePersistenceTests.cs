@@ -26,7 +26,7 @@ public class TemplatePersistenceTests
             Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
 
             Assert.NotNull(restored);
-            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.Equal(original.UpgradeTemplate.Points.OrderBy(pair => pair.Key), restored.UpgradeTemplate.Points.OrderBy(pair => pair.Key));
             Assert.Equal(enabled, restored.UpgradeTemplate.UseJumpPattern);
             Assert.Equal(original.UpgradeTemplate.JumpPattern, restored.UpgradeTemplate.JumpPattern);
@@ -48,7 +48,7 @@ public class TemplatePersistenceTests
             var cell = new Cell(8, 16, 8);
             Assert.True(game.Deploy(PieceKind.Pawn, cell));
             var hp = game.Economy.GetProgress(UpgradeKind.HP);
-            hp.PullCount = hp.Available = 1;
+            hp.PullCount = hp.Available = 2;
             game.UpgradeTemplate.Points[UpgradeKind.HP] = 3;
             Assert.True(game.ApplyUpgradeTemplate(cell, game.UpgradeTemplate));
 
@@ -155,7 +155,7 @@ public class TemplatePersistenceTests
             restored.UpgradeTemplate.Points[UpgradeKind.ATK] = 4;
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + $".v{version}.bak"));
-            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.Equal(4, reloaded!.UpgradeTemplate.Points[UpgradeKind.ATK]);
             if (version >= 5) Assert.Equal(7.5f, Assert.Single(reloaded.World.ObsidianCells).Hp);

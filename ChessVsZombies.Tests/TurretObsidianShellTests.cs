@@ -45,8 +45,8 @@ public sealed class TurretObsidianShellTests
         Assert.True(game.Deploy(kind, new Cell(8, 16, 8)));
         var turret = Assert.Single(game.Turrets);
         var progress = game.Economy.GetProgress(UpgradeKind.ATK);
-        progress.PullCount = 1;
-        progress.Available = 1;
+        progress.PullCount = 2;
+        progress.Available = 2;
         Assert.True(game.Economy.Apply(turret, UpgradeKind.ATK));
         Assert.Equal(2, game.Economy.GetAttack(turret));
         AddShell(game, turret.Cell, 1, 5);

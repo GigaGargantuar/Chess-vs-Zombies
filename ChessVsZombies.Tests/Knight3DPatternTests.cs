@@ -49,12 +49,13 @@ public sealed class Knight3DPatternTests
         var piece = new Turret { Kind = kind };
         Assert.Equal(8, piece.JumpPattern.Count);
         Assert.All(piece.JumpPattern, offset => Assert.Equal(0, offset.Y));
-        economy.GetProgress(UpgradeKind.Jump).PullCount = 1;
-        economy.GetProgress(UpgradeKind.Jump).Available = 1;
+        economy.GetProgress(UpgradeKind.Jump).PullCount = 2;
+        economy.GetProgress(UpgradeKind.Jump).Available = 2;
 
         Assert.True(economy.Apply(piece, UpgradeKind.Jump));
 
         Assert.Equal(2, economy.GetRange(piece, UpgradeKind.Jump));
+        Assert.Equal(0, economy.GetProgress(UpgradeKind.Jump).Available);
     }
 
     [Fact]
@@ -66,7 +67,7 @@ public sealed class Knight3DPatternTests
         economy.GetProgress(UpgradeKind.Jump).Available = 3;
         Assert.True(economy.TrySetJumpPattern(knight, JumpRules.DefaultKnightPattern().Append(new Cell(3, 1, 0)), out _));
         Assert.Equal(25, knight.JumpPattern.Count);
-        Assert.Equal(0, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.Equal(1, economy.GetProgress(UpgradeKind.Jump).Available);
     }
 
     [Theory]

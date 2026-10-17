@@ -83,7 +83,7 @@ public sealed class MaterialInventoryPersistenceTests
 
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v7.bak"));
-            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.Equal(7.5f, Assert.Single(reloaded!.World.ObsidianCells).Hp);
             Assert.Equal(4, reloaded.UpgradeTemplate.Points[UpgradeKind.ATK]);

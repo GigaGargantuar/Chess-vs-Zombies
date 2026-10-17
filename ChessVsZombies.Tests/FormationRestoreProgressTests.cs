@@ -31,10 +31,11 @@ public class FormationRestoreProgressTests
         Assert.Equal(1, game.Economy.GetProgress(UpgradeKind.HP).Available);
         Assert.Equal(1, game.Economy.GetProgress(UpgradeKind.ATK).Available);
         Assert.Equal(2, game.MissingFormationUpgradeCosts[UpgradeKind.HP]);
-        Assert.Equal(1, game.MissingFormationUpgradeCosts[UpgradeKind.ATK]);
+        Assert.Equal(2, game.MissingFormationUpgradeCosts[UpgradeKind.ATK]);
         Assert.True(game.IsAutoRestoringFormation);
 
         game.Economy.GetProgress(UpgradeKind.HP).Available = 2;
+        game.Economy.GetProgress(UpgradeKind.ATK).Available = 2;
         game.Update(.36f);
 
         var restored = game.TrySelectTurret(upgradedCell)!;
@@ -160,8 +161,8 @@ public class FormationRestoreProgressTests
     private static void Allocate(GameSession game, Turret tower, UpgradeKind kind, int points)
     {
         var progress = game.Economy.GetProgress(kind);
-        progress.PullCount = 1 + (points - 1) * Balance.DuplicatesPerRank;
-        progress.Available = points;
-        for (int i = 0; i < points; i++) Assert.True(game.Economy.Apply(tower, kind));
+        progress.PullCount = Math.Max(2, 1 + (points - 1) * Balance.DuplicatesPerRank);
+        progress.Available = 2;
+        Assert.True(game.Economy.Apply(tower, kind));
     }
 }

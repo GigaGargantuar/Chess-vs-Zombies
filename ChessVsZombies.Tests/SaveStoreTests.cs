@@ -80,6 +80,152 @@ public class SaveStoreTests
     }
 
     [Fact]
+    public void TwoPointHighCapStatsRoundTripAndWaitForATwoPointTopUp()
+    {
+        WithSavePath(path =>
+        {
+            var game = new GameSession();
+            Assert.True(game.Deploy(PieceKind.Pawn, new Cell(8, 16, 8)));
+            var tower = Assert.Single(game.Turrets);
+            tower.Hp -= 13;
+            foreach (var kind in new[] { UpgradeKind.HP, UpgradeKind.ATK })
+            {
+                var progress = game.Economy.GetProgress(kind);
+                progress.PullCount = progress.Available = 291;
+                Assert.True(game.Economy.Apply(tower, kind));
+                Assert.Equal(30, game.Economy.GetAllocated(tower, kind));
+                Assert.Equal(289, progress.Available);
+            }
+
+            SaveStore.Save(game, path);
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            var savedTower = Assert.Single(restored!.Turrets);
+            Assert.Equal(330, restored.Economy.GetMaxHp(savedTower));
+            Assert.Equal(317, savedTower.Hp);
+            Assert.Equal(31, restored.Economy.GetAttack(savedTower));
+            var hp = restored.Economy.GetProgress(UpgradeKind.HP);
+            hp.PullCount += 10;
+            hp.Available += 10;
+            Assert.Equal(330, restored.Economy.GetMaxHp(savedTower));
+            Assert.Equal(317, savedTower.Hp);
+            Assert.True(restored.Economy.Apply(savedTower, UpgradeKind.HP));
+            Assert.Equal(340, restored.Economy.GetMaxHp(savedTower));
+            Assert.Equal(327, savedTower.Hp);
+            Assert.Equal(297, hp.Available);
+            SaveStore.Save(restored, path);
+            Assert.True(SaveStore.TryLoad(path, out var toppedUp, out error), error);
+            Assert.Equal(31, toppedUp!.Economy.GetAllocated(Assert.Single(toppedUp.Turrets), UpgradeKind.HP));
+        });
+    }
+
+    [Theory]
+    [InlineData(8, 5, 2)]
+    [InlineData(9, 5, 1)]
+    [InlineData(9, 1, 0)]
+    public void SavedAllocationsRequireEnoughPreviouslyConsumedComponents(int version, int allocation, int spent)
+    {
+        WithSavePath(path =>
+        {
+            var game = new GameSession();
+            Assert.True(game.Deploy(PieceKind.Pawn, new Cell(8, 16, 8)));
+            SaveStore.Save(game, path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["Version"] = version;
+            document["Turrets"]![0]!["UpgradePoints"]!["ATK"] = allocation;
+            SetLegacyProgress(document, "ATK", 41, 41 - spent);
+            AssertRejectedWithoutRewrite(path, document);
+        });
+    }
+
+    [Theory]
+    [InlineData(0, 2)]
+    [InlineData(1, 2)]
+    public void VersionEightQueuedTargetsKeepTheirStatsAndGraceWithDiscountedPrices(int existing, int newCost)
+    {
+        WithSavePath(path =>
+        {
+            var game = new GameSession();
+            Assert.True(game.Deploy(PieceKind.Pawn, new Cell(8, 16, 8)));
+            SaveStore.Save(game, path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["Version"] = 8;
+            if (existing > 0) document["Turrets"]![0]!["UpgradePoints"]!["ATK"] = existing;
+            SetLegacyProgress(document, "ATK", 41, 41 - existing);
+            document["QueuedUpgradeBatch"] = new JsonObject
+            {
+                ["Targets"] = new JsonArray(new JsonObject
+                {
+                    ["TurretId"] = Assert.Single(game.Turrets).Id,
+                    ["Expected"] = new JsonObject { ["ATK"] = existing },
+                    ["Additions"] = new JsonObject { ["ATK"] = 5 - existing }
+                }),
+                ["Costs"] = new JsonObject { ["ATK"] = 5 - existing },
+                ["GraceRemaining"] = 2.5f
+            };
+            string legacy = document.ToJsonString();
+            File.WriteAllText(path, legacy);
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.Equal(existing, restored!.Economy.GetAllocated(Assert.Single(restored.Turrets), UpgradeKind.ATK));
+            Assert.Equal(41 - existing, restored.Economy.GetProgress(UpgradeKind.ATK).Available);
+            Assert.Equal(newCost, restored.QueuedUpgradeBatch!.Costs[UpgradeKind.ATK]);
+            Assert.Equal(5 - existing, Assert.Single(restored.QueuedUpgradeBatch.Targets).Additions[UpgradeKind.ATK]);
+            Assert.Equal(2.5f, restored.QueuedUpgradeBatch.GraceRemaining);
+            Assert.Equal(legacy, File.ReadAllText(path));
+            SaveStore.Save(restored, path);
+            Assert.Equal(legacy, File.ReadAllText(path + ".v8.bak"));
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            reloaded!.Economy.GetProgress(UpgradeKind.ATK).PullCount += 10;
+            reloaded.Economy.GetProgress(UpgradeKind.ATK).Available += 10;
+            reloaded.Update(2.6f);
+            Assert.Null(reloaded.QueuedUpgradeBatch);
+            Assert.Equal(5, reloaded.Economy.GetAllocated(Assert.Single(reloaded.Turrets), UpgradeKind.ATK));
+            Assert.Equal(51 - existing - newCost, reloaded.Economy.GetProgress(UpgradeKind.ATK).Available);
+        });
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void VersionEightQueueIsCancelledWithoutChargeWhenAtomicPricingWouldIncreaseItsQuote(int existing)
+    {
+        WithSavePath(path =>
+        {
+            var game = new GameSession();
+            Assert.True(game.Deploy(PieceKind.Pawn, new Cell(8, 16, 8)));
+            SaveStore.Save(game, path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!;
+            document["Version"] = 8;
+            if (existing > 0) document["Turrets"]![0]!["UpgradePoints"]!["ATK"] = existing;
+            SetLegacyProgress(document, "ATK", existing > 0 ? 11 : 2, 1);
+            document["QueuedUpgradeBatch"] = new JsonObject
+            {
+                ["Targets"] = new JsonArray(new JsonObject
+                {
+                    ["TurretId"] = Assert.Single(game.Turrets).Id,
+                    ["Expected"] = new JsonObject { ["ATK"] = existing },
+                    ["Additions"] = new JsonObject { ["ATK"] = 1 }
+                }),
+                ["Costs"] = new JsonObject { ["ATK"] = 1 },
+                ["GraceRemaining"] = 2.5f
+            };
+            string legacy = document.ToJsonString();
+            File.WriteAllText(path, legacy);
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            Assert.Null(restored!.QueuedUpgradeBatch);
+            Assert.Equal(1, restored.Economy.GetProgress(UpgradeKind.ATK).Available);
+            Assert.Equal(existing, restored.Economy.GetAllocated(Assert.Single(restored.Turrets), UpgradeKind.ATK));
+            Assert.Contains("cancelled without charge", restored.MigrationNotice);
+            Assert.Equal(legacy, File.ReadAllText(path));
+            restored.Update(3.1f);
+            Assert.Equal(1, restored.Economy.GetProgress(UpgradeKind.ATK).Available);
+            Assert.Equal(existing, restored.Economy.GetAllocated(Assert.Single(restored.Turrets), UpgradeKind.ATK));
+        });
+    }
+
+    [Fact]
     public void CombatCannotOverwriteTheLastBuildCheckpoint()
     {
         WithSavePath(path =>
@@ -203,7 +349,7 @@ public class SaveStoreTests
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v1.bak"));
             var saved = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-            Assert.Equal(8, saved["Version"]!.GetValue<int>());
+            Assert.Equal(9, saved["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
             Assert.Equal(901, reloaded.Economy.Currency);
@@ -397,7 +543,7 @@ public class SaveStoreTests
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v3.bak"));
             var upgraded = JsonNode.Parse(File.ReadAllText(path))!;
-            Assert.Equal(8, upgraded["Version"]!.GetValue<int>());
+            Assert.Equal(9, upgraded["Version"]!.GetValue<int>());
             Assert.Empty(upgraded["DamagedTerrain"]!.AsArray());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
@@ -445,7 +591,7 @@ public class SaveStoreTests
 
             SaveStore.Save(restored, path);
             Assert.Equal(legacy, File.ReadAllText(path + ".v4.bak"));
-            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
             Assert.Equal(7, reloaded.Inventory.DirtCount);
@@ -750,7 +896,7 @@ public class SaveStoreTests
             SaveStore.Save(restored, path);
 
             Assert.Equal(legacy, File.ReadAllText(path + $".v{version}.bak"));
-            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
             Assert.NotNull(reloaded);
             Assert.Equal(7, reloaded.Inventory.DirtCount);
@@ -1147,6 +1293,7 @@ public class SaveStoreTests
             File.Delete(path + ".v5.bak");
             File.Delete(path + ".v6.bak");
             File.Delete(path + ".v7.bak");
+            File.Delete(path + ".v8.bak");
         }
     }
 }

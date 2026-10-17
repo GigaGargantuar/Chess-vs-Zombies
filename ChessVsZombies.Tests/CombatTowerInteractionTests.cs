@@ -96,10 +96,10 @@ public class CombatTowerInteractionTests
 
         Assert.Equal(50, game.Economy.GetMaxHp(turret));
         Assert.Equal(37, turret.Hp);
-        Assert.Equal(2, game.Economy.GetAttack(turret));
+        Assert.Equal(1, game.Economy.GetAttack(turret));
         Assert.Equal(1, game.Economy.GetRange(turret, UpgradeKind.Orthogonal));
         Assert.Equal(0, game.Economy.GetProgress(UpgradeKind.HP).Available);
-        Assert.Equal(0, game.Economy.GetProgress(UpgradeKind.ATK).Available);
+        Assert.Equal(1, game.Economy.GetProgress(UpgradeKind.ATK).Available);
         Assert.Equal(999, game.Economy.Currency);
         Assert.Contains("skipped", game.Message);
         Assert.Equal(3, template.Points[UpgradeKind.HP]);
@@ -136,8 +136,8 @@ public class CombatTowerInteractionTests
         var middle = game.Turrets[1];
         var top = game.Turrets[2];
         foreach (var tower in game.Turrets) tower.Cooldown = 10000;
-        Seed(game, UpgradeKind.ATK, 1, 1);
-        Assert.True(game.ApplyUpgradeTemplate(new Cell(8, 16, 8), new UpgradeTemplate { Points = new() { [UpgradeKind.ATK] = 1 } }));
+        Seed(game, UpgradeKind.ATK, 2, 2);
+        Assert.True(game.ApplyUpgradeTemplate(new Cell(8, 16, 8), new UpgradeTemplate { Points = new() { [UpgradeKind.ATK] = 2 } }));
         Assert.True(game.StartLevel());
 
         Assert.True(game.Remove(new Cell(8, 16, 8)), game.Message);
@@ -219,11 +219,11 @@ public class CombatTowerInteractionTests
             var game = Battle();
             var originalCell = new Cell(2, 16, 2);
             Assert.True(game.Deploy(PieceKind.Pawn, originalCell));
-            Seed(game, UpgradeKind.ATK, 1, 1);
+            Seed(game, UpgradeKind.ATK, 2, 2);
             SaveStore.Save(game, path);
             var originalBytes = File.ReadAllBytes(path);
             Assert.True(game.StartLevel());
-            Assert.True(game.ApplyUpgradeTemplate(originalCell, new UpgradeTemplate { Points = new() { [UpgradeKind.ATK] = 1 } }));
+            Assert.True(game.ApplyUpgradeTemplate(originalCell, new UpgradeTemplate { Points = new() { [UpgradeKind.ATK] = 2 } }));
             Assert.True(game.Deploy(PieceKind.Rook, new Cell(3, 16, 2)));
             Assert.True(game.Remove(originalCell));
 
@@ -236,7 +236,7 @@ public class CombatTowerInteractionTests
             Assert.Equal(originalCell, tower.Cell);
             Assert.Empty(tower.UpgradePoints);
             Assert.Equal(999, restored.Economy.Currency);
-            Assert.Equal(1, restored.Economy.GetProgress(UpgradeKind.ATK).Available);
+            Assert.Equal(2, restored.Economy.GetProgress(UpgradeKind.ATK).Available);
             Assert.Equal(GamePhase.Building, restored.Phase);
             Assert.Equal(996, game.Economy.Currency);
             Assert.Equal(PieceKind.Rook, Assert.Single(game.Turrets).Kind);

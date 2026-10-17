@@ -152,8 +152,8 @@ public sealed class TowerBatchSelectionTests
         var selection = SelectThreeExceptMiddle(game);
         var health = game.Economy.GetProgress(UpgradeKind.HP);
         health.PullCount = 11;
-        health.Available = 2;
-        var template = new UpgradeTemplate { Points = { [UpgradeKind.HP] = 1 } };
+        health.Available = 4;
+        var template = new UpgradeTemplate { Points = { [UpgradeKind.HP] = 2 } };
         Assert.True(game.QueueUpgradeBatch(selection.SelectedIds, template), game.Message);
 
         selection.Clear();
@@ -162,9 +162,9 @@ public sealed class TowerBatchSelectionTests
 
         Assert.Null(game.QueuedUpgradeBatch);
         Assert.Equal(0, health.Available);
-        Assert.Equal(40, game.Turrets[0].Hp);
+        Assert.Equal(50, game.Turrets[0].Hp);
         Assert.Equal(30, game.Turrets[1].Hp);
-        Assert.Equal(40, game.Turrets[2].Hp);
+        Assert.Equal(50, game.Turrets[2].Hp);
     }
 
     private static Turret Tower(int id, Cell cell, float hp = Balance.TurretHp) =>

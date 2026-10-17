@@ -48,8 +48,8 @@ public sealed partial class GameSession
                 if (Enum.IsDefined(kind))
                 {
                     int requested = Economy.GetTemplatePointRequest(turret, template, kind);
-                    int added = Math.Min(requested, Economy.GetUpgradeCapacity(turret, kind));
-                    if (added > 0) costs[kind] = costs.GetValueOrDefault(kind) + added;
+                    var purchase = Economy.GetUpgradePurchase(turret, kind, requested);
+                    if (purchase.Cost > 0) costs[kind] = costs.GetValueOrDefault(kind) + purchase.Cost;
                 }
         }
         return costs;
@@ -109,13 +109,12 @@ public sealed partial class GameSession
             {
                 target.Expected[kind] = Economy.GetAllocated(turret, kind);
                 int requested = Economy.GetTemplatePointRequest(turret, template, kind);
-                int capacity = Economy.GetUpgradeCapacity(turret, kind);
                 int affordable = spendNow ? (int)Math.Min(int.MaxValue, remaining[kind]) : int.MaxValue;
-                int added = Math.Min(requested, Math.Min(capacity, affordable));
-                if (added <= 0) continue;
-                target.Additions[kind] = added;
-                planned.Costs[kind] = planned.Costs.GetValueOrDefault(kind) + added;
-                if (spendNow) remaining[kind] -= added;
+                var purchase = Economy.GetUpgradePurchase(turret, kind, Math.Min(requested, affordable));
+                if (purchase.Added <= 0) continue;
+                target.Additions[kind] = purchase.Added;
+                planned.Costs[kind] = planned.Costs.GetValueOrDefault(kind) + purchase.Cost;
+                if (spendNow) remaining[kind] -= purchase.Cost;
             }
             if (target.Additions.Count > 0) planned.Targets.Add(target);
         }

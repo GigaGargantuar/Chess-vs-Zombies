@@ -6,10 +6,10 @@ namespace ChessVsZombies.Tests;
 public sealed class JumpPatternOverchargeTests
 {
     [Theory]
-    [InlineData(10, 10)]
-    [InlineData(int.MaxValue, 10)]
-    [InlineData(71, 71)]
-    public void OversizedJumpRequestSpendsOnlyTheEditedFormationRadius(int requested, int available)
+    [InlineData(10, 10, 10)]
+    [InlineData(int.MaxValue, 10, 10)]
+    [InlineData(71, 71, 71)]
+    public void OversizedJumpRequestBuysTheCurrentCapWithTwoPoints(int requested, int available, int expectedLevel)
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
@@ -19,7 +19,7 @@ public sealed class JumpPatternOverchargeTests
 
         Assert.True(economy.TryApplyTemplate(knight, template, out var error), error);
 
-        Assert.Equal(2, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(expectedLevel, economy.GetAllocated(knight, UpgradeKind.Jump));
         Assert.Equal(available - 2, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(new Cell(2, 0, 0), Assert.Single(knight.JumpPattern));
         Assert.Equal(requested, template.Points[UpgradeKind.Jump]);
@@ -38,7 +38,7 @@ public sealed class JumpPatternOverchargeTests
         for (int attempt = 0; attempt < 3; attempt++)
             Assert.True(economy.TryApplyTemplate(knight, template, out error), error);
 
-        Assert.Equal(2, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(10, economy.GetAllocated(knight, UpgradeKind.Jump));
         Assert.Equal(8, economy.GetProgress(UpgradeKind.Jump).Available);
     }
 
@@ -58,10 +58,10 @@ public sealed class JumpPatternOverchargeTests
     }
 
     [Theory]
-    [InlineData(2, 2, 0)]
-    [InlineData(2, 3, 1)]
-    [InlineData(3, 2, 0)]
-    public void ChangedFormationPaysOnlyItsRadiusBeyondExistingAllocation(int initialRadius, int nextRadius, int extra)
+    [InlineData(2, 2)]
+    [InlineData(2, 3)]
+    [InlineData(3, 2)]
+    public void ChangedFormationWithinPurchasedJumpLevelsCostsNothing(int initialRadius, int nextRadius)
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
@@ -71,8 +71,8 @@ public sealed class JumpPatternOverchargeTests
 
         Assert.True(economy.TryApplyTemplate(knight, PatternTemplate(10, new Cell(-nextRadius, 0, 0)), out error), error);
 
-        Assert.Equal(initialRadius + extra, economy.GetAllocated(knight, UpgradeKind.Jump));
-        Assert.Equal(before - extra, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.Equal(10, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(before, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(new Cell(-nextRadius, 0, 0), Assert.Single(knight.JumpPattern));
     }
 
@@ -94,7 +94,7 @@ public sealed class JumpPatternOverchargeTests
         Assert.Equal(2, game.GetUpgradeBatchCosts(ids, template)[UpgradeKind.Jump]);
         CommitBatch(game, ids, template, queued, 2);
 
-        Assert.Equal(2, game.Economy.GetAllocated(selected, UpgradeKind.Jump));
+        Assert.Equal(Math.Max(10, requested), game.Economy.GetAllocated(selected, UpgradeKind.Jump));
         Assert.Equal(requested - 2, game.Economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(originalPattern, selected.JumpPattern);
         Assert.Empty(game.Turrets[0].UpgradePoints);
@@ -107,7 +107,7 @@ public sealed class JumpPatternOverchargeTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void MultipleSelectedTowersEachReceiveOnlyTheirOwnUnpaidRadius(bool queued)
+    public void MultiplePreviouslyUpgradedTowersEachCatchUpToCurrentJumpCapForTwoPoints(bool queued)
     {
         var game = ThreeKnights();
         var first = game.Turrets[0];
@@ -118,12 +118,12 @@ public sealed class JumpPatternOverchargeTests
         var template = PatternTemplate(10, new Cell(3, 0, 0));
         int[] ids = [second.Id, first.Id];
 
-        Assert.Equal(3, game.GetUpgradeBatchCosts(ids, template)[UpgradeKind.Jump]);
-        CommitBatch(game, ids, template, queued, 3);
+        Assert.Equal(4, game.GetUpgradeBatchCosts(ids, template)[UpgradeKind.Jump]);
+        CommitBatch(game, ids, template, queued, 4);
 
-        Assert.Equal(3, game.Economy.GetAllocated(first, UpgradeKind.Jump));
-        Assert.Equal(3, game.Economy.GetAllocated(second, UpgradeKind.Jump));
-        Assert.Equal(7, game.Economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.Equal(10, game.Economy.GetAllocated(first, UpgradeKind.Jump));
+        Assert.Equal(10, game.Economy.GetAllocated(second, UpgradeKind.Jump));
+        Assert.Equal(6, game.Economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Empty(game.Turrets[2].UpgradePoints);
     }
 
@@ -135,23 +135,23 @@ public sealed class JumpPatternOverchargeTests
         var game = ThreeKnights();
         var selected = game.Turrets[0];
         Seed(game.Economy, UpgradeKind.Jump, 10);
-        Seed(game.Economy, UpgradeKind.HP, 1);
+        Seed(game.Economy, UpgradeKind.HP, 2);
         var template = PatternTemplate(10, selected.JumpPattern.ToArray());
-        template.Points[UpgradeKind.HP] = 1;
+        template.Points[UpgradeKind.HP] = 2;
         int[] ids = [selected.Id];
 
         var quote = game.GetUpgradeBatchCosts(ids, template);
         Assert.False(quote.ContainsKey(UpgradeKind.Jump));
-        Assert.Equal(1, quote[UpgradeKind.HP]);
-        CommitBatch(game, ids, template, queued, 1);
+        Assert.Equal(2, quote[UpgradeKind.HP]);
+        CommitBatch(game, ids, template, queued, 2);
 
         Assert.Equal(10, game.Economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(0, game.Economy.GetAllocated(selected, UpgradeKind.Jump));
-        Assert.Equal(1, game.Economy.GetAllocated(selected, UpgradeKind.HP));
+        Assert.Equal(10, game.Economy.GetAllocated(selected, UpgradeKind.HP));
     }
 
     [Fact]
-    public void LimitingPatternJumpSpendingDoesNotLimitOtherRequestedStats()
+    public void FormationAndOtherRequestedStatsEachUseTheirOwnTwoPointCost()
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight, Hp = 17 };
@@ -166,13 +166,13 @@ public sealed class JumpPatternOverchargeTests
 
         Assert.Equal(8, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(2, economy.GetProgress(UpgradeKind.HP).Available);
-        Assert.Equal(1, economy.GetProgress(UpgradeKind.ATK).Available);
-        Assert.Equal(37, knight.Hp);
-        Assert.Equal(4, economy.GetAttack(knight));
+        Assert.Equal(2, economy.GetProgress(UpgradeKind.ATK).Available);
+        Assert.Equal(117, knight.Hp);
+        Assert.Equal(11, economy.GetAttack(knight));
     }
 
     [Fact]
-    public void WithPatternDisabledJumpPointsRemainAnAdditiveUpgrade()
+    public void WithPatternDisabledJumpStillBuysTheCurrentCapOnlyOnce()
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
@@ -182,49 +182,49 @@ public sealed class JumpPatternOverchargeTests
         var before = knight.JumpPattern.ToArray();
 
         Assert.True(economy.TryApplyTemplate(knight, template, out var error), error);
-        Assert.True(economy.TryApplyTemplate(knight, template, out error), error);
+        Assert.False(economy.TryApplyTemplate(knight, template, out error));
 
-        Assert.Equal(8, economy.GetAllocated(knight, UpgradeKind.Jump));
-        Assert.Equal(2, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.Equal(10, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(8, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(before, knight.JumpPattern);
     }
 
     [Fact]
-    public void InvalidPatternStillAllowsExplicitPartialUpgradesWithoutChangingDestinations()
+    public void InvalidPatternStillAllowsExplicitMaxStatPurchasesWithoutChangingDestinations()
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
         Seed(economy, UpgradeKind.Jump, 10);
-        Seed(economy, UpgradeKind.HP, 1);
+        Seed(economy, UpgradeKind.HP, 2);
         var before = knight.JumpPattern.ToArray();
         var template = PatternTemplate(3, new Cell(1, 0, 0));
-        template.Points[UpgradeKind.HP] = 1;
+        template.Points[UpgradeKind.HP] = 2;
 
         Assert.True(economy.TryApplyTemplate(knight, template, out var error), error);
 
-        Assert.Equal(3, economy.GetAllocated(knight, UpgradeKind.Jump));
-        Assert.Equal(7, economy.GetProgress(UpgradeKind.Jump).Available);
-        Assert.Equal(1, economy.GetAllocated(knight, UpgradeKind.HP));
+        Assert.Equal(10, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(8, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.Equal(10, economy.GetAllocated(knight, UpgradeKind.HP));
         Assert.Equal(before, knight.JumpPattern);
         Assert.Contains("Jump pattern skipped", economy.LastMessage);
     }
 
     [Fact]
-    public void UnaffordablePatternPreservesExistingPartialUpgradeBehavior()
+    public void UnaffordablePatternNeverPartiallyBuysJumpWhileOtherStatsCanApply()
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
         Seed(economy, UpgradeKind.Jump, 1);
-        Seed(economy, UpgradeKind.ATK, 1);
+        Seed(economy, UpgradeKind.ATK, 2);
         var before = knight.JumpPattern.ToArray();
         var template = PatternTemplate(10, new Cell(2, 0, 0));
-        template.Points[UpgradeKind.ATK] = 1;
+        template.Points[UpgradeKind.ATK] = 2;
 
         Assert.True(economy.TryApplyTemplate(knight, template, out var error), error);
 
-        Assert.Equal(1, economy.GetAllocated(knight, UpgradeKind.Jump));
-        Assert.Equal(0, economy.GetProgress(UpgradeKind.Jump).Available);
-        Assert.Equal(1, economy.GetAllocated(knight, UpgradeKind.ATK));
+        Assert.Equal(0, economy.GetAllocated(knight, UpgradeKind.Jump));
+        Assert.Equal(1, economy.GetProgress(UpgradeKind.Jump).Available);
+        Assert.Equal(10, economy.GetAllocated(knight, UpgradeKind.ATK));
         Assert.Equal(before, knight.JumpPattern);
         Assert.Contains("Jump pattern skipped", economy.LastMessage);
     }
@@ -233,7 +233,7 @@ public sealed class JumpPatternOverchargeTests
     [InlineData(PieceKind.Pawn)]
     [InlineData(PieceKind.Rook)]
     [InlineData(PieceKind.Bishop)]
-    public void MatchingLatentPatternStillBuysItsRadiusBeforeActivatingJump(PieceKind kind)
+    public void MatchingLatentPatternBuysTheCurrentCapForTwoPointsBeforeActivatingJump(PieceKind kind)
     {
         var economy = new Economy();
         var tower = new Turret { Kind = kind };
@@ -248,7 +248,7 @@ public sealed class JumpPatternOverchargeTests
         Assert.True(economy.TryApplyTemplate(tower, template, out var error), error);
 
         Assert.True(economy.HasJump(tower));
-        Assert.Equal(2, economy.GetAllocated(tower, UpgradeKind.Jump));
+        Assert.Equal(71, economy.GetAllocated(tower, UpgradeKind.Jump));
         Assert.Equal(69, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(latentPattern, tower.JumpPattern);
         Assert.True(economy.TryApplyTemplate(tower, template, out error), error);
@@ -259,7 +259,7 @@ public sealed class JumpPatternOverchargeTests
     [InlineData(PieceKind.Pawn)]
     [InlineData(PieceKind.Rook)]
     [InlineData(PieceKind.Bishop)]
-    public void PatternOnlyApplicationBuysLatentPatternRadiusToActivateJump(PieceKind kind)
+    public void PatternOnlyApplicationBuysCurrentCapToActivateLatentJump(PieceKind kind)
     {
         var economy = new Economy();
         var tower = new Turret { Kind = kind };
@@ -271,7 +271,7 @@ public sealed class JumpPatternOverchargeTests
         Assert.True(economy.TrySetJumpPattern(tower, latentPattern, out var error), error);
 
         Assert.True(economy.HasJump(tower));
-        Assert.Equal(2, economy.GetAllocated(tower, UpgradeKind.Jump));
+        Assert.Equal(71, economy.GetAllocated(tower, UpgradeKind.Jump));
         Assert.Equal(69, economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(latentPattern, tower.JumpPattern);
     }
@@ -283,7 +283,7 @@ public sealed class JumpPatternOverchargeTests
     [InlineData(PieceKind.Rook, true)]
     [InlineData(PieceKind.Bishop, false)]
     [InlineData(PieceKind.Bishop, true)]
-    public void BatchQuotesAndBuysLatentPatternRadiusWithoutDrainingJumpBank(PieceKind kind, bool queued)
+    public void BatchBuysCurrentCapToActivateLatentJumpWithoutDrainingJumpBank(PieceKind kind, bool queued)
     {
         var game = new GameSession();
         Assert.True(game.Deploy(kind, new Cell(8, 16, 8)));
@@ -299,7 +299,7 @@ public sealed class JumpPatternOverchargeTests
         CommitBatch(game, ids, template, queued, 2);
 
         Assert.True(game.Economy.HasJump(tower));
-        Assert.Equal(2, game.Economy.GetAllocated(tower, UpgradeKind.Jump));
+        Assert.Equal(71, game.Economy.GetAllocated(tower, UpgradeKind.Jump));
         Assert.Equal(69, game.Economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.Equal(latentPattern, tower.JumpPattern);
         Assert.False(game.GetUpgradeBatchCosts(ids, template).ContainsKey(UpgradeKind.Jump));

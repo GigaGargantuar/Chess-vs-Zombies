@@ -59,7 +59,7 @@ public sealed class GiantPersistenceIntegrationTests
             SaveStore.Save(game, path);
             Assert.True(SaveStore.TryLoad(path, out var restored, out var error, catalog), error);
             var queued = Assert.Single(restored!.ExportState().ReturningZombies!);
-            Assert.Equal(8, restored.ExportState().Version);
+            Assert.Equal(9, restored.ExportState().Version);
             Assert.Equal(ZombieSize.Mega, queued.Size);
             Assert.Equal(15, queued.OriginalBudgetCost);
             Assert.Equal(4, queued.HeldBlocks.Count);

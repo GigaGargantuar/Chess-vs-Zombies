@@ -127,11 +127,16 @@ public sealed partial class GameSession
         {
             var costs = new Dictionary<UpgradeKind, long>();
             foreach (var tower in MissingFormationTurrets)
-                foreach (var (kind, points) in tower.UpgradePoints)
-                    costs[kind] = costs.GetValueOrDefault(kind) + points;
+                foreach (var (kind, cost) in GetFormationUpgradeCosts(tower))
+                    costs[kind] = costs.GetValueOrDefault(kind) + cost;
             return costs;
         }
     }
+
+    // Every restored tower starts without upgrades. Quote its initial purchase even
+    // when the saved stat needs a future cap; feasibility is checked before building.
+    private static Dictionary<UpgradeKind, long> GetFormationUpgradeCosts(FormationTower tower) =>
+        tower.UpgradePoints.ToDictionary(pair => pair.Key, _ => 2L);
 
     public bool SaveFormation()
     {
@@ -214,6 +219,7 @@ public sealed partial class GameSession
         string? waitReason = null;
         foreach (var tower in missing)
         {
+            var upgradeCosts = GetFormationUpgradeCosts(tower);
             string? error = DeployPlacementError(tower.Kind, tower.Cell, prepareTerrain: true);
             if (error == null && _formationPlacementAllowed?.Invoke(tower.Cell) == false)
                 error = "Move away from this saved placement cell first.";
@@ -224,8 +230,9 @@ public sealed partial class GameSession
                 {
                     if (Economy.GetUpgradeCapacity(unupgraded, kind) < points)
                     { error = $"The saved {tower.Kind} needs a higher {kind} collection cap."; break; }
-                    if (Economy.GetProgress(kind).Available < points)
-                    { error = $"Need {points} {kind} component points for the saved {tower.Kind}."; break; }
+                    long cost = upgradeCosts[kind];
+                    if (Economy.GetProgress(kind).Available < cost)
+                    { error = $"Need {cost} {kind} component points for the saved {tower.Kind}."; break; }
                 }
             }
             if (error != null)
@@ -239,7 +246,7 @@ public sealed partial class GameSession
                 continue;
             }
             var restored = Turrets[^1];
-            if (!Economy.TrySpendUpgradeBatch(tower.UpgradePoints.ToDictionary(pair => pair.Key, pair => (long)pair.Value)))
+            if (!Economy.TrySpendUpgradeBatch(upgradeCosts))
                 throw new InvalidOperationException("Formation components changed after affordability was checked.");
             foreach (var (kind, points) in tower.UpgradePoints) restored.UpgradePoints.Add(kind, points);
             restored.JumpPattern.Clear();

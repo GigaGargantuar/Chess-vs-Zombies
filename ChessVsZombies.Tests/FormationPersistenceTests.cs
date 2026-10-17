@@ -33,7 +33,7 @@ public class FormationPersistenceTests
             Assert.Empty(restored.Turrets);
             Assert.Single(restored.MissingFormationTurrets);
             Assert.False(restored.IsAutoRestoringFormation);
-            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
         });
     }
 
@@ -66,7 +66,6 @@ public class FormationPersistenceTests
             game.Economy.GetProgress(UpgradeKind.HP).PullCount = 11;
             game.Economy.GetProgress(UpgradeKind.HP).Available = 2;
             var turret = Assert.Single(game.Turrets);
-            Assert.True(game.Economy.Apply(turret, UpgradeKind.HP));
             Assert.True(game.Economy.Apply(turret, UpgradeKind.HP));
             turret.Hp = 2;
             Assert.True(game.SaveFormation());

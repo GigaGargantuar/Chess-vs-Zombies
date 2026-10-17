@@ -56,23 +56,72 @@ public class EconomyTests
     }
 
     [Fact]
-    public void EachAllocationConsumesOnePointAndThePerTowerCapLimitsRepeatedAllocation()
+    public void InitialPurchaseIsAtomicAndTwoPointsFillTheCurrentCap()
     {
         var economy = new Economy();
         var turret = new Turret { Kind = PieceKind.Pawn };
         var progress = economy.GetProgress(UpgradeKind.ATK);
-        progress.PullCount = 11;
-        progress.Available = 3;
+        progress.PullCount = 191;
+        progress.Available = 1;
 
-        economy.Apply(turret, UpgradeKind.ATK);
-        Assert.Equal(1, economy.GetAllocated(turret, UpgradeKind.ATK));
-        Assert.Equal(2, progress.Available);
-        Assert.Equal(2, economy.GetAttack(turret));
+        Assert.False(economy.Apply(turret, UpgradeKind.ATK));
+        Assert.Equal(0, economy.GetAllocated(turret, UpgradeKind.ATK));
+        Assert.Equal(1, progress.Available);
+        progress.Available = 3;
         Assert.True(economy.Apply(turret, UpgradeKind.ATK));
         Assert.Equal(1, progress.Available);
-        Assert.Equal(3, economy.GetAttack(turret));
+        Assert.Equal(20, economy.GetAllocated(turret, UpgradeKind.ATK));
+        Assert.Equal(21, economy.GetAttack(turret));
         Assert.False(economy.Apply(turret, UpgradeKind.ATK));
         Assert.Equal(1, progress.Available);
+    }
+
+    [Theory]
+    [InlineData(UpgradeKind.HP)]
+    [InlineData(UpgradeKind.ATK)]
+    [InlineData(UpgradeKind.Orthogonal)]
+    [InlineData(UpgradeKind.PlaneDiagonal)]
+    [InlineData(UpgradeKind.SpaceDiagonal)]
+    [InlineData(UpgradeKind.Jump)]
+    public void EachLaterCatchUpCostsTwoPointsAndNeverFollowsTheCapAutomatically(UpgradeKind kind)
+    {
+        var economy = new Economy();
+        var turret = new Turret { Kind = PieceKind.Pawn, Hp = 17 };
+        var progress = economy.GetProgress(kind);
+        progress.PullCount = 91;
+        progress.Available = 6;
+        Assert.True(economy.Apply(turret, kind));
+        Assert.Equal(10, economy.GetAllocated(turret, kind));
+        Assert.Equal(4, progress.Available);
+        foreach (int pulls in new[] { 101, 291 })
+        {
+            int oldLevel = economy.GetAllocated(turret, kind);
+            progress.PullCount = pulls;
+            Assert.Equal(oldLevel, economy.GetAllocated(turret, kind));
+            int balance = progress.Available;
+            progress.Available = 1;
+            Assert.False(economy.Apply(turret, kind));
+            Assert.Equal(oldLevel, economy.GetAllocated(turret, kind));
+            Assert.Equal(1, progress.Available);
+            progress.Available = balance;
+            Assert.True(economy.Apply(turret, kind));
+            Assert.Equal(economy.GetAllocationCap(kind), economy.GetAllocated(turret, kind));
+            Assert.Equal(balance - 2, progress.Available);
+            if (kind == UpgradeKind.HP) Assert.Equal(13, economy.GetMaxHp(turret) - turret.Hp);
+        }
+    }
+
+    [Fact]
+    public void InitialPurchaseStillCostsTwoWhenTheCapIsOne()
+    {
+        var economy = new Economy();
+        var progress = economy.GetProgress(UpgradeKind.HP);
+        progress.PullCount = 2;
+        progress.Available = 2;
+        var turret = new Turret();
+        Assert.True(economy.Apply(turret, UpgradeKind.HP));
+        Assert.Equal(1, economy.GetAllocated(turret, UpgradeKind.HP));
+        Assert.Equal(0, progress.Available);
     }
 
     [Fact]
@@ -127,7 +176,7 @@ public class EconomyTests
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(2, 0, 1), new Cell(0, 2, -1)], out _));
         var accepted = knight.JumpPattern.ToArray();
         Assert.False(economy.TrySetJumpPattern(knight, [new Cell(1, 0, 0)], out _));
-        Assert.False(economy.TrySetJumpPattern(knight, [new Cell(4, 0, 0)], out _));
+        Assert.False(economy.TrySetJumpPattern(knight, [new Cell(6, 0, 0)], out _));
         Assert.False(economy.TrySetJumpPattern(knight, [], out _));
         Assert.Equal(accepted, knight.JumpPattern);
         Assert.True(economy.TrySetJumpPattern(knight,
@@ -139,7 +188,7 @@ public class EconomyTests
 
         Assert.True(economy.TrySetJumpPattern(knight, [new Cell(3, 1, 0)], out _));
         Assert.Contains(new Cell(3, 1, 0), economy.GetAttackPattern(knight));
-        Assert.Equal(1, progress.Available);
+        Assert.Equal(2, progress.Available);
     }
 
     [Fact]
@@ -161,8 +210,8 @@ public class EconomyTests
     {
         var economy = new Economy();
         var knight = new Turret { Kind = PieceKind.Knight };
-        economy.GetProgress(UpgradeKind.Orthogonal).PullCount = 1;
-        economy.GetProgress(UpgradeKind.Orthogonal).Available = 1;
+        economy.GetProgress(UpgradeKind.Orthogonal).PullCount = 2;
+        economy.GetProgress(UpgradeKind.Orthogonal).Available = 2;
         economy.Apply(knight, UpgradeKind.Orthogonal);
 
         Assert.True(economy.IsDirectionalOffset(knight, new Cell(1, 0, 0)));

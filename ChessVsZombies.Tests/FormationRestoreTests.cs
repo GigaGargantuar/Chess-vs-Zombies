@@ -80,8 +80,8 @@ public class FormationRestoreTests
         Assert.Equal(1, game.Economy.GetProgress(UpgradeKind.HP).Available);
         Assert.Equal(2, game.MissingFormationUpgradeCosts[UpgradeKind.HP]);
         game.Economy.GetProgress(UpgradeKind.HP).Available = 2;
-        game.Economy.GetProgress(UpgradeKind.ATK).Available = 1;
-        game.Economy.GetProgress(UpgradeKind.Jump).Available = 3;
+        game.Economy.GetProgress(UpgradeKind.ATK).Available = 2;
+        game.Economy.GetProgress(UpgradeKind.Jump).Available = 2;
         game.Update(.36f);
 
         var restored = Assert.Single(game.Turrets);
@@ -95,6 +95,37 @@ public class FormationRestoreTests
         Assert.Equal(0, game.Economy.GetProgress(UpgradeKind.ATK).Available);
         Assert.Equal(0, game.Economy.GetProgress(UpgradeKind.Jump).Available);
         Assert.False(game.IsAutoRestoringFormation);
+    }
+
+    [Fact]
+    public void RestoringAnOlderHighCapConfigurationCostsTwoAndKeepsItsExactSavedStats()
+    {
+        var game = new GameSession();
+        var cell = new Cell(8, 16, 8);
+        Assert.True(game.Deploy(PieceKind.Pawn, cell));
+        var hp = game.Economy.GetProgress(UpgradeKind.HP);
+        hp.PullCount = hp.Available = 191;
+        Assert.True(game.Economy.Apply(Assert.Single(game.Turrets), UpgradeKind.HP));
+        Assert.True(game.SaveFormation());
+        Assert.True(game.Remove(cell));
+        hp.PullCount += 100;
+        hp.Available += 100;
+        Assert.Equal(30, game.Economy.GetAllocationCap(UpgradeKind.HP));
+        Assert.Equal(2, game.MissingFormationUpgradeCosts[UpgradeKind.HP]);
+        int before = hp.Available;
+
+        Assert.True(game.StartAutoRestoreFormation());
+        game.Update(.36f);
+
+        var restored = Assert.Single(game.Turrets);
+        Assert.Equal(20, restored.UpgradePoints[UpgradeKind.HP]);
+        Assert.Equal(230, game.Economy.GetMaxHp(restored));
+        Assert.Equal(230, restored.Hp);
+        Assert.Equal(before - 2, hp.Available);
+        Assert.False(game.IsAutoRestoringFormation);
+        Assert.True(game.Economy.Apply(restored, UpgradeKind.HP));
+        Assert.Equal(30, restored.UpgradePoints[UpgradeKind.HP]);
+        Assert.Equal(before - 4, hp.Available);
     }
 
     [Fact]
@@ -217,13 +248,12 @@ public class FormationRestoreTests
         var game = new GameSession();
         Assert.True(game.Deploy(PieceKind.Knight, new Cell(8, 16, 8)));
         var turret = Assert.Single(game.Turrets);
-        foreach (var kind in new[] { UpgradeKind.HP, UpgradeKind.ATK, UpgradeKind.Jump })
+        foreach (var (kind, allocation) in new[] { (UpgradeKind.HP, 2), (UpgradeKind.ATK, 1), (UpgradeKind.Jump, 3) })
         {
-            game.Economy.GetProgress(kind).PullCount = 21;
-            game.Economy.GetProgress(kind).Available = 3;
+            game.Economy.GetProgress(kind).PullCount = Math.Max(2, 1 + (allocation - 1) * Balance.DuplicatesPerRank);
+            game.Economy.GetProgress(kind).Available = 2;
             Assert.True(game.Economy.Apply(turret, kind));
         }
-        Assert.True(game.Economy.Apply(turret, UpgradeKind.HP));
         Assert.True(game.Economy.TrySetJumpPattern(turret, [new Cell(3, 1, 0)], out _));
         turret.Hp -= 11;
         return game;

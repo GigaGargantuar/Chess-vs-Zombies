@@ -26,7 +26,7 @@ public class TurretLiquidPersistenceTests
 
             SaveStore.Save(original, path);
 
-            Assert.Equal(8, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
+            Assert.Equal(9, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>());
             Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
             Assert.NotNull(restored);
             var restoredTurret = Assert.Single(restored.Turrets);
