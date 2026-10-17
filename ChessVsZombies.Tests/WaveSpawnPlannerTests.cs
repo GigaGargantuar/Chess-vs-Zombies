@@ -6,6 +6,46 @@ namespace ChessVsZombies.Tests;
 public class WaveSpawnPlannerTests
 {
     [Fact]
+    public void GroupOrdinalInverseMatchesEveryInterleavedSlot()
+    {
+        var plan = WaveSpawnPlanner.Plan(new WaveDefinition { Groups =
+        [
+            new() { Kind = ZombieKind.Basic, Count = 17 },
+            new() { Kind = ZombieKind.Armed, Count = 7, Size = ZombieSize.Milli },
+            new() { Kind = ZombieKind.Armored, Count = 5, Tier = GearTier.Iron },
+            new() { Kind = ZombieKind.ArmedArmored, Count = 3, Tier = GearTier.Wood },
+            new() { Kind = ZombieKind.Basic, Count = 2, Size = ZombieSize.Kilo, IsBoss = true },
+            new() { Kind = ZombieKind.Armored, Count = 1, Size = ZombieSize.Mega, IsBoss = true }
+        ] });
+        for (int group = 0; group < plan.Groups.Count; group++)
+            for (int ordinal = 0; ordinal < plan.Groups[group].Count; ordinal++)
+            {
+                int slot = WaveSpawnPlanner.SlotForGroupOrdinal(plan, group, ordinal);
+                Assert.Same(plan.Groups[group], WaveSpawnPlanner.SelectGroup(plan, slot));
+                Assert.Equal(ordinal, Enumerable.Range(0, slot).Count(index =>
+                    ReferenceEquals(WaveSpawnPlanner.SelectGroup(plan, index), plan.Groups[group])));
+            }
+    }
+
+    [Fact]
+    public void GroupOrdinalInverseHandlesAnEighteenMillionSlotWaveWithoutExpansion()
+    {
+        var plan = WaveSpawnPlanner.Plan(new WaveDefinition { Groups =
+        [
+            new() { Count = 17_999_990 },
+            new() { Kind = ZombieKind.Armored, Tier = GearTier.Iron, Count = 8 },
+            new() { Kind = ZombieKind.Basic, Size = ZombieSize.Kilo, IsBoss = true, Count = 2 }
+        ] });
+        Assert.Equal(18_000_000, plan.SpawnCount);
+        foreach (int group in Enumerable.Range(0, plan.Groups.Count))
+            foreach (int ordinal in new[] { 0, plan.Groups[group].Count / 2, plan.Groups[group].Count - 1 }.Distinct())
+            {
+                int slot = WaveSpawnPlanner.SlotForGroupOrdinal(plan, group, ordinal);
+                Assert.Same(plan.Groups[group], WaveSpawnPlanner.SelectGroup(plan, slot));
+            }
+    }
+
+    [Fact]
     public void ActualWaveSpawnsArmorAlongsideFodderWithoutChangingItsHpBudget()
     {
         var catalog = new LevelCatalog();

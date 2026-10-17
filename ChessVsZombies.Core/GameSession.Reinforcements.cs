@@ -54,6 +54,8 @@ public sealed partial class GameSession
             var oldWave = Waves[zombie.WaveIndex];
             // Remaining life leaves this wave; it is neither damage nor a kill.
             oldWave.TotalHp = Math.Max(oldWave.DamageTaken, oldWave.TotalHp - zombie.Hp);
+            if (_largeStandbyWaves.Count > zombie.WaveIndex && _largeStandbyWaves[zombie.WaveIndex] is { } large)
+                large.ExactTotalHp = Math.Max(large.ExactDamageTaken, large.ExactTotalHp - zombie.Hp);
         }
         ClearZombieMovement(zombie);
         _kiloBlocks.Remove(zombie.Id);
@@ -73,10 +75,12 @@ public sealed partial class GameSession
 
     private static float ReinforcementHp(SavedReturningZombie zombie) => zombie.BodyHp + zombie.Armor.Sum(piece => piece.Hp);
 
-    private static void AddReinforcementBudget(WaveState wave, SavedReturningZombie zombie)
+    private void AddReinforcementBudget(WaveState wave, SavedReturningZombie zombie)
     {
         wave.TotalCount = checked(wave.TotalCount + 1);
         wave.TotalHp += ReinforcementHp(zombie);
+        if (_largeStandbyWaves.Count > wave.Index && _largeStandbyWaves[wave.Index] is { } large)
+            large.ExactTotalHp += ReinforcementHp(zombie);
         wave.HpBudget += zombie.OriginalBudgetCost;
         if (zombie.IsBoss) wave.BossBudget += zombie.OriginalBudgetCost;
         else wave.NormalBudget += zombie.OriginalBudgetCost;

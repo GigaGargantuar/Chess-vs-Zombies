@@ -4,15 +4,18 @@ namespace ChessVsZombies.Core;
 
 public sealed partial class GameSession
 {
-    // A slot keeps only combat state until activation. The FIFO at each exact
-    // position exposes one living slot; the cell index contains stacks, never
-    // every member of a large wave.
+    // A slot keeps only combat state until activation. The ordered set at each
+    // exact position exposes one living slot; the cell index contains stacks,
+    // never every member of a large wave.
     private sealed class StandbySpawn(ZombieGroup group, Cell? cell, int waveIndex, int slot)
     {
         public ZombieGroup Group { get; } = group;
         public Cell? Cell { get; set; } = cell;
         public int WaveIndex { get; } = waveIndex;
         public int Slot { get; } = slot;
+        public int GroupIndex { get; init; } = -1;
+        public int GroupOrdinal { get; init; } = -1;
+        public int PositionIndex { get; init; } = -1;
         public float BodyHp { get; set; } = Balance.ZombieHp * (group.Size switch
         {
             ZombieSize.Micro => .2f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 4f,
@@ -36,11 +39,19 @@ public sealed partial class GameSession
     {
         public Vector3 Position { get; } = position;
         public ZombieSize Size { get; } = size;
-        public Queue<StandbySpawn> Slots { get; } = new();
-        public StandbySpawn? Front => Slots.Count == 0 ? null : Slots.Peek();
+        public SortedSet<StandbySpawn> Slots { get; } = new(Comparer<StandbySpawn>.Create((left, right) =>
+        {
+            int wave = left.WaveIndex.CompareTo(right.WaveIndex);
+            return wave == 0 ? left.Slot.CompareTo(right.Slot) : wave;
+        }));
+        public StandbySpawn? Front => Slots.Min;
     }
 
+    // Keep existing position sequences for small waves. Larger waves use one
+    // materialized front per group and valid cell, regardless of roster size.
+    private const int EagerStandbyLimit = 4096;
     private readonly List<StandbySpawn[]> _standbyWaves = [];
+    private readonly List<LargeStandbyWave?> _largeStandbyWaves = [];
     private readonly Dictionary<Vector3, StandbyStack> _standbyStacks = [];
     private readonly Dictionary<Cell, List<StandbyStack>> _standbyByCell = [];
     private Random _spawnRandom;
@@ -60,6 +71,7 @@ public sealed partial class GameSession
     private void ClearStandbySpawns()
     {
         _standbyWaves.Clear();
+        _largeStandbyWaves.Clear();
         _standbyStacks.Clear();
         _standbyByCell.Clear();
         _livingStandbyCount = 0;
@@ -79,6 +91,14 @@ public sealed partial class GameSession
         for (int waveIndex = 0; waveIndex < plans.Count; waveIndex++)
         {
             _waitingStandby.Add([]);
+            if (plans[waveIndex].SpawnCount > EagerStandbyLimit)
+            {
+                _standbyWaves.Add([]);
+                _largeStandbyWaves.Add(PrepareLargeStandbyWave(plans[waveIndex], waveIndex, candidates, shapes));
+                _livingStandbyCount = checked(_livingStandbyCount + plans[waveIndex].SpawnCount);
+                continue;
+            }
+            _largeStandbyWaves.Add(null);
             var slots = new StandbySpawn[plans[waveIndex].SpawnCount];
             for (int index = 0; index < slots.Length; index++)
             {
@@ -118,6 +138,12 @@ public sealed partial class GameSession
         {
             int skipped = Waves[waveIndex].Spawned - _internalWaveSpawned[waveIndex];
             if (skipped <= 0) continue;
+            if (_largeStandbyWaves[waveIndex] is { } large)
+            {
+                ReconcileLargeSkippedSpawns(large, Waves[waveIndex], skipped);
+                _internalWaveSpawned[waveIndex] = Waves[waveIndex].Spawned;
+                continue;
+            }
             foreach (var slot in _standbyWaves[waveIndex])
             {
                 if (skipped == 0) break;
@@ -134,6 +160,14 @@ public sealed partial class GameSession
 
     private void AdvanceScheduledCursor(int waveIndex)
     {
+        if (_largeStandbyWaves[waveIndex] is { } large)
+        {
+            _scheduledNormalSlots[waveIndex] = Math.Max(_scheduledNormalSlots[waveIndex], large.Completed.Prefix);
+            while (_scheduledNormalSlots[waveIndex] < large.Plan.SpawnCount &&
+                   large.IsCompleted(_scheduledNormalSlots[waveIndex]))
+                _scheduledNormalSlots[waveIndex]++;
+            return;
+        }
         var slots = _standbyWaves[waveIndex];
         while (_scheduledNormalSlots[waveIndex] < slots.Length && slots[_scheduledNormalSlots[waveIndex]].Consumed)
             _scheduledNormalSlots[waveIndex]++;
@@ -145,12 +179,14 @@ public sealed partial class GameSession
         slot.Consumed = true;
         wave.Spawned++;
         _internalWaveSpawned[wave.Index]++;
-        _waitingStandby[wave.Index].Remove(slot);
+        if (_largeStandbyWaves[wave.Index] is { } large) large.Completed.Add(slot.Slot);
+        else _waitingStandby[wave.Index].Remove(slot);
         AdvanceStandby(slot);
     }
 
     private bool ScheduleNextStandby(WaveState wave)
     {
+        if (_largeStandbyWaves[wave.Index] is { } large) return ScheduleNextLargeStandby(large, wave);
         AdvanceScheduledCursor(wave.Index);
         var slots = _standbyWaves[wave.Index];
         if (_scheduledNormalSlots[wave.Index] >= slots.Length) return false;
@@ -163,6 +199,7 @@ public sealed partial class GameSession
 
     private void RetryWaitingStandby(WaveState wave)
     {
+        if (_largeStandbyWaves[wave.Index] is { } large) { RetryLargeStandby(large, wave); return; }
         var waiting = _waitingStandby[wave.Index];
         for (int index = 0; index < waiting.Count;)
         {
@@ -192,21 +229,21 @@ public sealed partial class GameSession
                         occupants.Add(stack);
                     }
         }
-        stack.Slots.Enqueue(slot);
+        stack.Slots.Add(slot);
     }
 
     private void AdvanceStandby(StandbySpawn slot)
     {
         if (!slot.Cell.HasValue) return;
-        var shape = new Zombie { Size = slot.Group.Size };
+        var large = _largeStandbyWaves[slot.WaveIndex];
+        var shape = large is null ? new Zombie { Size = slot.Group.Size } : large.Lanes[slot.GroupIndex].Shape;
         var position = shape.StandAt(slot.Cell.Value);
         var stack = _standbyStacks[position];
-        if (ReferenceEquals(stack.Front, slot))
-        {
-            do { stack.Slots.Dequeue(); }
-            while (stack.Front is { } next && (next.Consumed || next.BodyHp <= 0));
-            InvalidateProjectileColliders();
-        }
+        bool exposed = ReferenceEquals(stack.Front, slot);
+        stack.Slots.Remove(slot);
+        if (large is not null) AdvanceLargeStandby(large, slot);
+        while (stack.Front is { } next && (next.Consumed || next.BodyHp <= 0)) stack.Slots.Remove(next);
+        if (exposed) InvalidateProjectileColliders();
     }
 
     private bool TryFindStandbyImpact(Vector3 from, Vector3 to, ref float fraction, out StandbySpawn? slot)
@@ -266,10 +303,18 @@ public sealed partial class GameSession
         slot.BodyHp = zombie.BodyHp;
         slot.Armor = zombie.ArmorPieces.ToList();
         var wave = Waves[slot.WaveIndex];
-        wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + before - zombie.Hp);
+        float actual = before - zombie.Hp;
+        wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + actual);
+        if (_largeStandbyWaves[slot.WaveIndex] is { } damagedWave)
+            damagedWave.ExactDamageTaken = Math.Min(damagedWave.ExactTotalHp, damagedWave.ExactDamageTaken + actual);
         if (slot.BodyHp <= 0)
         {
             _livingStandbyCount--;
+            if (_largeStandbyWaves[slot.WaveIndex] is { } large)
+            {
+                large.LivingCount--;
+                large.Dead.Add(slot.Slot);
+            }
             if (slot.Due) CompleteStandbySlot(slot, wave);
             else AdvanceStandby(slot);
         }

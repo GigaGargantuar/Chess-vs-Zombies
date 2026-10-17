@@ -295,7 +295,7 @@ public sealed class StandbySpawnTests
     public void LargeQueueProjectileQueryVisitsPositionsRatherThanAllRecords()
     {
         var game = Battle(new ZombieGroup { Count = 10000 });
-        var first = Slots(game)[0];
+        var first = FrontSlots(game).First();
         Fire(game, first, 1);
         Assert.True(game.ProjectileDiagnostics!.StandbyStackQueries < 1000);
         Assert.Equal(10000, game.LivingStandbyCount);
@@ -348,6 +348,14 @@ public sealed class StandbySpawnTests
     {
         var waves = (IList)typeof(GameSession).GetField("_standbyWaves", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(game)!;
         return ((IEnumerable)waves[0]!).Cast<object>().ToArray();
+    }
+
+    private static object[] FrontSlots(GameSession game)
+    {
+        var stacks = (IDictionary)typeof(GameSession).GetField("_standbyStacks",
+            BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(game)!;
+        return stacks.Values.Cast<object>().Select(stack => stack.GetType().GetProperty("Front")!.GetValue(stack))
+            .Where(slot => slot != null).Cast<object>().ToArray();
     }
 
     private static T Get<T>(object slot, string name) => (T)slot.GetType().GetProperty(name)!.GetValue(slot)!;

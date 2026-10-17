@@ -423,6 +423,8 @@ public sealed partial class GameSession
             LevelCatalog.Validate(Level);
             nextEncounter = PrepareEncounter(checked(LevelNumber + LevelSpan), merged: false);
             plans = AllInOne ? [_allInOnePlan!] : Level.Waves.Select(WaveSpawnPlanner.Plan).ToArray();
+            if (plans.Sum(plan => (long)plan.SpawnCount) > int.MaxValue)
+                throw new InvalidDataException("The combined standby roster exceeds the supported integer range.");
             for (var i = 0; i < plans.Length; i++)
             {
                 var plan = plans[i];
@@ -548,6 +550,8 @@ public sealed partial class GameSession
         {
             var wave = Waves[zombie.WaveIndex];
             wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + actual);
+            if (_largeStandbyWaves.Count > zombie.WaveIndex && _largeStandbyWaves[zombie.WaveIndex] is { } large)
+                large.ExactDamageTaken = Math.Min(large.ExactTotalHp, large.ExactDamageTaken + actual);
         }
         zombie.DamageSinceLaneSwitch += actual;
         var threshold = zombie.MaxHp * Balance.LaneThreshold(GetSourceLevelNumber(zombie.WaveIndex));
@@ -563,7 +567,7 @@ public sealed partial class GameSession
     {
         ReconcileExternallySkippedSpawns();
         for (var i = 1; i < Waves.Count; i++)
-            if (!Waves[i].Started && Waves[i - 1].Started && (Waves[i - 1].DamageTaken >= Waves[i - 1].TotalHp * .5f ||
+            if (!Waves[i].Started && Waves[i - 1].Started && (WaveReachedHalfDamage(i - 1) ||
                 Waves[i - 1].Spawned >= Waves[i - 1].TotalCount && !Zombies.Any(zombie => zombie.BodyHp > 0 && zombie.WaveIndex == i - 1)))
             {
                 Waves[i].Started = true;
@@ -578,6 +582,10 @@ public sealed partial class GameSession
             wave.SpawnTimer -= dt;
             while (wave.SpawnTimer <= 0 && wave.Spawned < wave.TotalCount)
             {
+                if (_largeStandbyWaves[wave.Index] is { } large &&
+                    !_returningZombies.Any(zombie => zombie.TargetLevel == LevelNumber && zombie.TargetWaveIndex == wave.Index) &&
+                    ScheduleLargeDueBatch(large, wave, Level.Waves[wave.Index].SpawnInterval))
+                    continue;
                 if (TrySpawnReinforcement(wave, out bool reinforcementPending))
                     _internalWaveSpawned[wave.Index]++;
                 else if (reinforcementPending) { wave.SpawnTimer = .1f; break; }
@@ -672,6 +680,11 @@ public sealed partial class GameSession
         }
     }
 
+    private bool WaveReachedHalfDamage(int waveIndex) =>
+        _largeStandbyWaves[waveIndex] is { } large
+            ? large.ExactDamageTaken >= large.ExactTotalHp * .5
+            : Waves[waveIndex].DamageTaken >= Waves[waveIndex].TotalHp * .5f;
+
     private bool Spawn(WaveState wave)
     {
         ReconcileExternallySkippedSpawns();
@@ -683,6 +696,7 @@ public sealed partial class GameSession
             return true;
         }
         if (reinforcementPending) return false;
+        if (_largeStandbyWaves[wave.Index] is { } large) return SpawnLargeManually(large, wave);
         var waiting = _waitingStandby[wave.Index];
         if (waiting.Count > 0) return TryActivateStandby(waiting[0], wave);
         AdvanceScheduledCursor(wave.Index);
@@ -747,6 +761,7 @@ public sealed partial class GameSession
         }
         Zombies.Add(zombie);
         _livingStandbyCount--;
+        if (_largeStandbyWaves[wave.Index] is { } large) large.LivingCount--;
         CompleteStandbySlot(slot, wave);
         wave.BudgetSpent += WaveSpawnPlan.BudgetCost(group);
         return true;

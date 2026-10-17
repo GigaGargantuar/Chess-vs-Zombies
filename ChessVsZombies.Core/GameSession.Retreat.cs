@@ -246,7 +246,11 @@ public sealed partial class GameSession
             ? (GearTier)Math.Min((int)best, (int)zombie.Tier + 1) : GearTier.Wood;
         float addedHp = zombie.ReequipArmor(tier);
         if (zombie.WaveIndex >= 0 && zombie.WaveIndex < Waves.Count)
+        {
             Waves[zombie.WaveIndex].TotalHp += addedHp;
+            if (_largeStandbyWaves.Count > zombie.WaveIndex && _largeStandbyWaves[zombie.WaveIndex] is { } large)
+                large.ExactTotalHp += addedHp;
+        }
     }
 
     private bool AtSupplyBoundary(Zombie zombie, Vector3 position)

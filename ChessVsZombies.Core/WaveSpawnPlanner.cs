@@ -6,6 +6,7 @@ public sealed class WaveSpawnPlan
     public IReadOnlyList<ZombieGroup> Groups { get; }
     public int SpawnCount { get; }
     public float TotalHp { get; }
+    public double ExactTotalHp { get; }
     public long HpBudget { get; }
     public long NormalBudget { get; }
     public long BossBudget { get; }
@@ -16,6 +17,7 @@ public sealed class WaveSpawnPlan
         Groups = groups.AsReadOnly();
         SpawnCount = checked((int)groups.Sum(group => (long)group.Count));
         TotalHp = groups.Sum(group => (float)group.Count * LevelCatalog.ZombieMaxHp(group.Kind, group.Tier, group.Size));
+        ExactTotalHp = groups.Sum(group => (double)group.Count * LevelCatalog.ZombieMaxHp(group.Kind, group.Tier, group.Size));
         HpBudget = hpBudget;
         NormalBudget = normalBudget;
         BossBudget = bossBudget;
@@ -161,6 +163,79 @@ public static class WaveSpawnPlanner
         long categoryOrdinal = armorSlot ? armorBefore : ordinal - armorBefore;
         return SelectByQuota(normal.Where(group => Armored(group) == armorSlot).ToList(), categoryOrdinal);
     }
+
+    // Inverse of SelectGroup. A spatial lane can advance directly to its next
+    // roster member without walking the intervening slots of a large wave.
+    public static int SlotForGroupOrdinal(WaveSpawnPlan plan, int groupIndex, int groupOrdinal) =>
+        new GroupOrdinalIndex(plan, groupIndex).SlotForOrdinal(groupOrdinal);
+
+    internal sealed class GroupOrdinalIndex
+    {
+        private readonly int _count;
+        private readonly int[] _categoryCounts;
+        private readonly int _categoryIndex;
+        private readonly long _total;
+        private readonly long _bossCount;
+        private readonly long _normalCount;
+        private readonly long _armorCount;
+        private readonly bool _boss;
+        private readonly bool _armored;
+
+        public GroupOrdinalIndex(WaveSpawnPlan plan, int groupIndex)
+        {
+            if ((uint)groupIndex >= (uint)plan.Groups.Count) throw new ArgumentOutOfRangeException(nameof(groupIndex));
+            var target = plan.Groups[groupIndex];
+            _count = target.Count;
+            _total = plan.SpawnCount;
+            _boss = target.IsBoss;
+            _armored = IsArmored(target);
+            var counts = new List<int>();
+            for (int index = 0; index < plan.Groups.Count; index++)
+            {
+                var group = plan.Groups[index];
+                if (group.IsBoss) _bossCount += group.Count;
+                else if (IsArmored(group)) _armorCount += group.Count;
+                if (group.IsBoss != _boss || !_boss && IsArmored(group) != _armored) continue;
+                if (index == groupIndex) _categoryIndex = counts.Count;
+                counts.Add(group.Count);
+            }
+            _categoryCounts = counts.ToArray();
+            _normalCount = _total - _bossCount;
+        }
+
+        public int SlotForOrdinal(int groupOrdinal)
+        {
+            if ((uint)groupOrdinal >= (uint)_count) throw new ArgumentOutOfRangeException(nameof(groupOrdinal));
+            if (_categoryCounts.Length == 1 && _total == _count) return groupOrdinal;
+            long categoryOrdinal = 0;
+            for (int index = 0; index < _categoryCounts.Length; index++)
+            {
+                categoryOrdinal += Math.Min(groupOrdinal, _categoryCounts[index]);
+                if (index < _categoryIndex && _categoryCounts[index] > groupOrdinal) categoryOrdinal++;
+            }
+            if (_boss)
+                return checked((int)(CeilingDivide((categoryOrdinal + 1) * _total - _total / 2, _bossCount) - 1));
+
+            long normalOrdinal = _armored
+                ? CeilingDivide((categoryOrdinal + 1) * _normalCount, _armorCount) - 1
+                : categoryOrdinal * _normalCount / (_normalCount - _armorCount);
+            if (_bossCount == 0) return checked((int)normalOrdinal);
+            long low = 1, high = _total;
+            while (low < high)
+            {
+                long middle = low + (high - low) / 2;
+                long normals = middle - (middle * _bossCount + _total / 2) / _total;
+                if (normals > normalOrdinal) high = middle;
+                else low = middle + 1;
+            }
+            return checked((int)(low - 1));
+        }
+
+        private static long CeilingDivide(long numerator, long denominator) =>
+            (numerator + denominator - 1) / denominator;
+    }
+
+    private static bool IsArmored(ZombieGroup group) => group.Kind is ZombieKind.Armored or ZombieKind.ArmedArmored;
 
     private static ZombieGroup SelectByQuota(List<ZombieGroup> groups, long ordinal)
     {
