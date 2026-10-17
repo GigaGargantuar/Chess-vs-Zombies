@@ -14,10 +14,11 @@ static int Run(string[] arguments)
 {
     try
     {
+        if (arguments.Contains("--projectile-probe")) return ProjectileProbe.Run(arguments, Snapshot);
         var options = Options.Parse(arguments);
         if (options.Help)
         {
-            Console.WriteLine("Usage: dotnet run -c Release --project ChessVsZombies.Benchmarks -- [--scenario marching|defended|mixed|all] [--save-path checkpoint.json --turrets 409 --count 300] [--saved-wave [--instant-wave] [--base-attack]] [--warmup 60] [--ticks 180] [--max-wall-seconds 120] [--seed 12345] [--profile] [--output report.json] [--verify] [--verify-output trace.json]");
+            Console.WriteLine("Usage: dotnet run -c Release --project ChessVsZombies.Benchmarks -- [--scenario marching|defended|mixed|all] [--save-path checkpoint.json --turrets 409 --count 300] [--saved-wave [--instant-wave] [--base-attack]] [--warmup 60] [--ticks 180] [--max-wall-seconds 120] [--seed 12345] [--profile] [--output report.json] [--verify] [--verify-output trace.json]; or --projectile-probe [--count 1000 --warmup 5 --ticks 20 --work-counts --verify-output trace.json]");
             return 0;
         }
 
@@ -136,7 +137,11 @@ static object Measure(string scenario, Options options)
         }
         windowBegin = completed;
     }
-    if (options.Profile) game.Profile = new SimulationProfile();
+    if (options.Profile)
+    {
+        game.Profile = new SimulationProfile();
+        game.ProjectileDiagnostics = new();
+    }
     var measurementWall = Stopwatch.StartNew();
     for (int i = 0; i < options.Ticks; i++)
     {
@@ -180,6 +185,12 @@ static object Measure(string scenario, Options options)
     Console.WriteLine($"  finalSha256={finalHash}");
     var stages = game.Profile?.Report(completed);
     if (stages != null) Console.WriteLine($"  inclusiveStages={JsonSerializer.Serialize(stages)}");
+    if (options.Profile)
+    {
+        var d = game.ProjectileDiagnostics!;
+        Console.WriteLine("  projectileWork=" + JsonSerializer.Serialize(new { d.ForecastRequests, d.ForecastEvaluations,
+            d.PendingSorts, d.BodyQueries, d.CoverQueries, d.FlightQueries, d.Slices }));
+    }
     if (trace != null)
     {
         byte[] traceBytes = JsonSerializer.SerializeToUtf8Bytes(trace);

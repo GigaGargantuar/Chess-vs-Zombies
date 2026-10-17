@@ -526,6 +526,7 @@ public sealed partial class GameSession
         var sankInLava = zombie.SinksIn(LiquidKind.Lava);
         var sankInMercury = zombie.SinksIn(LiquidKind.Mercury);
         zombie.ApplyDamage(damage, kind, shot, incomingDirection);
+        if (bodyBefore > 0 && zombie.BodyHp <= 0) InvalidateProjectileColliders();
         var durabilityLost = (bodyBefore - zombie.BodyHp) + (armorBefore - zombie.ArmorPieces.Sum(piece => piece.Hp));
         Feedback.Record(zombie.Id, zombie.Position, durabilityLost, kind);
         if (durabilityLost > 0)

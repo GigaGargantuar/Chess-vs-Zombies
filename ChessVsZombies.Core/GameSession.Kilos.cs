@@ -52,7 +52,7 @@ public sealed partial class GameSession
 
     public bool IsZombieHurled(Zombie zombie) => zombie.Hp > 0 && _hurledAllies.ContainsKey(zombie.Id);
 
-    public bool IsKiloUsingBuckets(Zombie zombie) => zombie.Hp > 0 && zombie.IsGiant &&
+    public bool IsKiloUsingBuckets(Zombie zombie) => zombie.BodyHp > 0 && zombie.IsGiant &&
         zombie.KiloEquipmentMode == KiloEquipmentMode.Buckets;
 
     private static void BeginKiloBucketAction(Zombie zombie)
@@ -292,6 +292,7 @@ public sealed partial class GameSession
 
     private bool TryFindKiloCoverImpact(Vector3 from, Vector3 to, out float fraction, out int carrierId, out int blockIndex)
     {
+        if (ProjectileDiagnostics is { } diagnostics) diagnostics.CoverQueries++;
         fraction = float.PositiveInfinity;
         carrierId = 0;
         blockIndex = -1;
@@ -300,7 +301,9 @@ public sealed partial class GameSession
         // without allocating the renderer's public cover snapshots for every ray.
         foreach (var zombie in Zombies)
         {
-            if (zombie.Hp <= 0 || IsKiloUsingBuckets(zombie) || !_kiloBlocks.TryGetValue(zombie.Id, out var blocks)) continue;
+            // Body death is authoritative even while armor remains. A liveness
+            // query must not sum every armor piece for every predicted ray.
+            if (zombie.BodyHp <= 0 || IsKiloUsingBuckets(zombie) || !_kiloBlocks.TryGetValue(zombie.Id, out var blocks)) continue;
             foreach (var held in blocks)
             {
                 var center = zombie.Position + held.Offset;
@@ -320,6 +323,7 @@ public sealed partial class GameSession
         held.Hp -= damage;
         // Projectile-destroyed cover is material loss, just like ordinary shot terrain.
         if (held.Hp > 0) return;
+        InvalidateProjectileColliders();
         blocks.Remove(held);
         if (blocks.Count == 0) _kiloBlocks.Remove(carrierId);
     }

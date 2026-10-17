@@ -13,6 +13,7 @@ public sealed partial class GameSession
         {
             if (reorder)
             {
+                if (ProjectileDiagnostics is { } diagnostics) diagnostics.PendingSorts++;
                 // A later shot must not destroy a moving shield before an
                 // earlier shot reaches it, regardless of append order.
                 var pending = remaining == null ? Projectiles.AsEnumerable().Reverse() : remaining.Skip(cursor);
@@ -22,6 +23,7 @@ public sealed partial class GameSession
             }
             int removalIndex = remaining == null ? originalIndex-- : -1;
             var projectile = remaining == null ? Projectiles[removalIndex] : remaining[cursor++];
+            var sceneBeforeImpact = CurrentProjectileScene;
             var startAge = projectile.Age;
             projectile.Age += dt;
             if (projectile.Kind == ShotKind.Melee)
@@ -62,13 +64,24 @@ public sealed partial class GameSession
                 bool hitCover = TryFindKiloCoverImpact(from, to, out var coverFraction, out var carrierId, out var blockIndex);
                 if (hitThrown && thrownFraction <= fraction && (!hitCover || thrownFraction < coverFraction))
                 {
+                    float hpBefore = thrownBlock!.Hp;
                     DamageMegaFlightBlock(thrownFlight!, thrownBlock!, projectile.Damage);
+                    ProjectileDiagnostics?.Contact(projectile, startAge + sampleStart + (sampleEnd - sampleStart) * thrownFraction,
+                        "flight", thrownFlight!.OwnerId, thrownBlock.BlockIndex, null, null, hpBefore, thrownBlock.Hp);
                     stopped = true;
                 }
                 else if (hitCover && coverFraction <= fraction)
                 {
+                    float hpBefore = 0;
+                    if (ProjectileDiagnostics?.CaptureContacts == true)
+                        hpBefore = _kiloBlocks[carrierId].First(block => block.BlockIndex == blockIndex).Hp;
                     DamageKiloCover(carrierId, blockIndex, projectile.Damage);
-                    var carrier = Zombies.FirstOrDefault(candidate => candidate.Id == carrierId && candidate.Hp > 0);
+                    float hpAfter = 0;
+                    if (ProjectileDiagnostics?.CaptureContacts == true && _kiloBlocks.TryGetValue(carrierId, out var remainingBlocks))
+                        hpAfter = remainingBlocks.FirstOrDefault(block => block.BlockIndex == blockIndex)?.Hp ?? 0;
+                    ProjectileDiagnostics?.Contact(projectile, startAge + sampleStart + (sampleEnd - sampleStart) * coverFraction,
+                        "cover", carrierId, blockIndex, null, null, hpBefore, hpAfter);
+                    var carrier = Zombies.FirstOrDefault(candidate => candidate.Id == carrierId && candidate.BodyHp > 0);
                     if (carrier != null && projectile.Damage > 0 && float.IsFinite(projectile.Damage))
                     {
                         var previousAge = startAge + dt * (sample - 1) / steps;
@@ -79,12 +92,17 @@ public sealed partial class GameSession
                 }
                 else if (hitSomething)
                 {
+                    float hpBefore = ProjectileDiagnostics?.CaptureContacts == true ? zombie?.Hp ??
+                        ProjectileTerrainHp(terrain, crustFace) : 0;
                     var previousAge = startAge + dt * (sample - 1) / steps;
                     var hitAge = previousAge + (endAge - previousAge) * fraction;
                     if (zombie != null)
                         DamageZombie(zombie, projectile.Damage, projectile.DamageKind, projectile.Kind, projectile.GetTravelDirection(hitAge));
                     else if (terrain.HasValue)
                         DamageProjectileTerrain(terrain.Value, projectile.Damage, crustFace);
+                    ProjectileDiagnostics?.Contact(projectile, hitAge, zombie != null ? "body" : terrain.HasValue ? "terrain" : "boundary",
+                        zombie?.Id ?? -1, -1, terrain, crustFace, hpBefore,
+                        ProjectileDiagnostics.CaptureContacts ? zombie?.Hp ?? ProjectileTerrainHp(terrain, crustFace) : 0);
                     stopped = true;
                 }
                 from = to;
@@ -92,11 +110,21 @@ public sealed partial class GameSession
             if (stopped)
             {
                 RemoveResolvedProjectile(projectile, removalIndex);
-                // Removing terrain, cover, or a flying part can reveal a later
-                // contact for other shots, so recompute their event order.
-                reorder = _megaFlights.Count > 0;
+                // An HP-only impact leaves every pending contact time unchanged.
+                // Preserve the existing stable order until a body/part dies, a
+                // hand moves, or terrain/structure geometry actually changes.
+                reorder = _megaFlights.Count > 0 && CurrentProjectileScene != sceneBeforeImpact;
             }
         }
+    }
+
+    private float ProjectileTerrainHp(Cell? cell, CrustFace? face)
+    {
+        if (!cell.HasValue) return 0;
+        if (World.GetBarrier(cell.Value) is { } barrier) return barrier.Hp;
+        if (World.GetObsidian(cell.Value) is { } crust)
+            return face.HasValue ? crust.Parts.FirstOrDefault(part => part.Face == face.Value)?.Hp ?? 0 : crust.Hp;
+        return World.GetTerrainHp(cell.Value);
     }
 
     private void RemoveResolvedProjectile(Projectile projectile, int originalIndex)
@@ -107,6 +135,7 @@ public sealed partial class GameSession
 
     private bool FindProjectileImpact(Vector3 from, Vector3 to, out float fraction, out Cell? terrain, out Zombie? zombie, out CrustFace? crustFace)
     {
+        if (ProjectileDiagnostics is { } diagnostics) diagnostics.BodyQueries++;
         terrain = null;
         zombie = null;
         crustFace = null;

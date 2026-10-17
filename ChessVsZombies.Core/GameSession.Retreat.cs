@@ -27,7 +27,7 @@ public sealed partial class GameSession
 
     private void FaceKiloTowardShot(Zombie zombie, Vector3 incomingDirection)
     {
-        if (zombie.Hp <= 0 || !zombie.IsGiant) return;
+        if (zombie.BodyHp <= 0 || !zombie.IsGiant) return;
         zombie.SetGuardFacing(zombie.Size == ZombieSize.Mega
             ? ObserveMegaIncomingFire(zombie, incomingDirection) : -incomingDirection);
         _guardedKilos.Add(zombie);
