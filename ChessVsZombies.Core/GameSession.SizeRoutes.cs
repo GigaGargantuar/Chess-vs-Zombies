@@ -34,6 +34,13 @@ public sealed partial class GameSession
 
     private SizedNavigationField BuildSizedNavigationCore(ZombieSize size, SizedNavigationField? previousField)
     {
+        using var profile = Profile?.Measure(size switch
+        {
+            ZombieSize.Milli => "SizedNavigationRebuild.Milli",
+            ZombieSize.Kilo => "SizedNavigationRebuild.Kilo",
+            ZombieSize.Mega => "SizedNavigationRebuild.Mega",
+            _ => "SizedNavigationRebuild.Other"
+        });
         var shape = new Zombie { Size = size };
         const int edgesPerNode = 16;
         static int Index(Cell cell) => (cell.X * WorldGrid.Size + cell.Y) * WorldGrid.Size + cell.Z;

@@ -52,18 +52,27 @@ public sealed class DefenseGame : Game
     private readonly bool smokeFormationRestore;
     private readonly bool smokeHorde;
     private readonly bool smokeSaveHorde;
+    private readonly bool smokeSaveWave, instantWave, baseAttack;
+    private readonly int profileWarmupTicks;
     private readonly bool smokePerformanceRecovery;
     private readonly bool profileSmoke;
     private readonly bool uncachedTurrets;
     private readonly bool verifyRenderGeometry;
     private readonly List<WorldRenderProfile> hordeRenderProfiles = [];
     private int hordeInitialTurrets, hordeInitialEnemies, hordePeakProjectiles;
+    private int hordeMeasuredUpdateStart = int.MaxValue;
+    private int hordeStartingLevel, hordeInitialSpawned, hordeInitialQueued;
+    private int hordeSpawnedBeforePreRoll, hordeQueuedBeforePreRoll;
+    private int hordeInitialMinAttack, hordeInitialMaxAttack;
+    private WaveProfileInfo[] hordeWavePlans = [];
+    private readonly record struct WaveProfileInfo(int Index, int TotalCount, float SpawnInterval);
     private readonly bool smokeMegaGuard, smokeGiantDeaths, smokeThrownCover, smokeTowerPenetration, smokeTerrainImpact;
     private readonly string smokePanel;
     private readonly string? capturePath;
     private Zombie? smokeArmorDemo;
     private int frameCount;
     private List<double>? hordeUpdateTimes, hordeFrameTimes;
+    private readonly List<double> hordeDrawTimes = [], hordeHudTimes = [];
     private long previousHordeFrame;
     private readonly CombatOverlayPerformance overlayPerformance = new();
     private long previousOverlayFrame;
@@ -105,11 +114,14 @@ public sealed class DefenseGame : Game
         smokeTerrainImpact = args.Contains("--smoke-terrain-impact");
         smokeFormationRestore = args.Contains("--smoke-formation-restore");
         smokeSaveHorde = args.Contains("--smoke-save-horde");
+        smokeSaveWave = args.Contains("--smoke-save-wave");
+        instantWave = args.Contains("--instant-wave");
+        baseAttack = args.Contains("--base-attack");
         smokePerformanceRecovery = args.Contains("--smoke-performance-recovery");
         profileSmoke = args.Contains("--profile-smoke");
         uncachedTurrets = args.Contains("--uncached-turrets");
         verifyRenderGeometry = args.Contains("--verify-render-geometry");
-        smokeHorde = args.Contains("--smoke-horde") || smokeSaveHorde || smokePerformanceRecovery;
+        smokeHorde = args.Contains("--smoke-horde") || smokeSaveHorde || smokeSaveWave || smokePerformanceRecovery;
         smoke = args.Contains("--smoke") || args.Contains("--smoke-combat") || args.Contains("--smoke-gacha") || args.Contains("--smoke-jump") || args.Contains("--smoke-template") || args.Contains("--smoke-terrain") || args.Contains("--smoke-liquids") || args.Contains("--smoke-liquid-turrets") || args.Contains("--smoke-armor") || args.Contains("--smoke-falls") || args.Contains("--smoke-bridges") || args.Contains("--smoke-buckets") || args.Contains("--smoke-sizes") || args.Contains("--smoke-megas") || args.Contains("--smoke-merged") || args.Contains("--smoke-all-in-one");
         smoke = smoke || smokeMegaGuard || smokeGiantDeaths || smokeThrownCover || smokeTowerPenetration || smokeTerrainImpact || smokeHorde;
         smoke = smoke || args.Contains("--smoke-formation") || smokeFormationRestore;
@@ -151,7 +163,16 @@ public sealed class DefenseGame : Game
         if (smokePanel == "jump-cost") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 19, 28), MathF.PI, -MathF.Atan2(2.5f, 5.5f));
         int frameIndex = Array.IndexOf(args, "--capture-frame");
         if (frameIndex >= 0 && frameIndex + 1 < args.Length && int.TryParse(args[frameIndex + 1], out var requestedFrame))
-            captureFrame = Math.Clamp(requestedFrame, 1, 600);
+            captureFrame = Math.Clamp(requestedFrame, 1, 3600);
+        int warmupIndex = Array.IndexOf(args, "--profile-warmup-ticks");
+        if (warmupIndex >= 0)
+        {
+            if (warmupIndex + 1 >= args.Length || !int.TryParse(args[warmupIndex + 1], out var requestedWarmup) || requestedWarmup < 0)
+                throw new ArgumentException("--profile-warmup-ticks requires a nonnegative integer.");
+            profileWarmupTicks = requestedWarmup;
+        }
+        if (instantWave && !smokeSaveWave) throw new ArgumentException("--instant-wave requires --smoke-save-wave.");
+        if (baseAttack && !smokeSaveWave) throw new ArgumentException("--base-attack requires --smoke-save-wave.");
         int captureIndex = Array.IndexOf(args, "--capture");
         capturePath = captureIndex >= 0 && captureIndex + 1 < args.Length ? Path.GetFullPath(args[captureIndex + 1]) : null;
         int saveIndex = Array.IndexOf(args, "--save-path");
@@ -176,7 +197,8 @@ public sealed class DefenseGame : Game
         {
             PrepareHordeSmoke();
             if (profileSmoke) { session.Profile = new SimulationProfile(); renderer.ProfileEnabled = true; }
-            SetNotice(smokeSaveHorde ? "Checkpoint-based approximation / 409 towers versus 300 zombies / isolated simulation."
+            SetNotice(smokeSaveWave ? $"Checkpoint level {session.LevelNumber} / {session.Turrets.Count} towers / {(instantWave ? "simultaneous wave" : "normal spawn queue")} / isolated simulation."
+                : smokeSaveHorde ? "Checkpoint-based approximation / 409 towers versus 300 zombies / isolated simulation."
                 : "500 simultaneous zombies / 388 Standard, 97 Milli, 10 Kilo and 5 Mega / live rendered simulation.");
         }
         else if (smoke)
@@ -375,6 +397,7 @@ public sealed class DefenseGame : Game
     }
     private void PrepareHordeSmoke()
     {
+        if (smokeSaveWave) { PrepareSaveWaveSmoke(); return; }
         if (smokeSaveHorde) { PrepareSaveHordeSmoke(); return; }
         var levels = new LevelCatalog();
         levels.Set(new LevelDefinition
@@ -417,10 +440,51 @@ public sealed class DefenseGame : Game
         session = SaveHordeScenario.Create(savePath);
         InitializeHordeMetrics();
     }
+    private void PrepareSaveWaveSmoke()
+    {
+        if (!SaveStore.TryLoad(savePath, out var loaded, out var error))
+            throw new InvalidOperationException($"Cannot load checkpoint for isolated profiling: {error}");
+        session = loaded!;
+        if (baseAttack)
+            foreach (var turret in session.Turrets) turret.UpgradePoints.Remove(UpgradeKind.ATK);
+        if (!session.StartLevel()) throw new InvalidOperationException(session.Message);
+        if (instantWave)
+        {
+            var spawn = typeof(GameSession).GetMethod("Spawn", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .CreateDelegate<Func<WaveState, bool>>(session);
+            foreach (var wave in session.Waves)
+            {
+                wave.Started = true;
+                while (wave.Spawned < wave.TotalCount)
+                    if (!spawn(wave)) throw new InvalidOperationException($"Could not stage the full saved wave: {wave.Spawned}/{wave.TotalCount} enemies in wave {wave.Index + 1}.");
+            }
+        }
+        InitializeHordeMetrics();
+    }
     private void InitializeHordeMetrics()
     {
+        hordeStartingLevel = session.LevelNumber;
+        hordeWavePlans = session.Waves.Select(wave => new WaveProfileInfo(wave.Index, wave.TotalCount, session.Level.Waves[wave.Index].SpawnInterval)).ToArray();
+        hordeSpawnedBeforePreRoll = session.Waves.Sum(wave => wave.Spawned);
+        hordeQueuedBeforePreRoll = session.Waves.Sum(wave => wave.TotalCount - wave.Spawned);
+        // Optional production pre-roll reaches a later battle state without adding
+        // setup work to measured samples or touching the checkpoint on disk.
+        for (int tick = 0; tick < profileWarmupTicks; tick++)
+        {
+            if (session.Phase != GamePhase.Combat)
+                throw new InvalidOperationException($"Combat ended during profile pre-roll at tick {tick}/{profileWarmupTicks}.");
+            session.Update(1f / 60);
+        }
+        if (profileWarmupTicks > 0 && session.Phase != GamePhase.Combat)
+            throw new InvalidOperationException("Combat ended during profile pre-roll.");
         hordeInitialTurrets = session.Turrets.Count;
         hordeInitialEnemies = session.Zombies.Count;
+        hordeInitialSpawned = session.Waves.Sum(wave => wave.Spawned);
+        hordeInitialQueued = session.Waves.Sum(wave => wave.TotalCount - wave.Spawned);
+        var attacks = session.Turrets.Select(session.Economy.GetAttack).ToArray();
+        hordeInitialMinAttack = attacks.Length == 0 ? 0 : attacks.Min();
+        hordeInitialMaxAttack = attacks.Length == 0 ? 0 : attacks.Max();
+        hordePeakProjectiles = session.Projectiles.Count;
         hordeUpdateTimes = [];
         hordeFrameTimes = [];
         showZones = false;
@@ -443,21 +507,35 @@ public sealed class DefenseGame : Game
         {
             Frames = frameCount, SimulatedSeconds = hordeUpdateTimes!.Count / 60d,
             CheckpointApproximation = smokeSaveHorde,
+            ExactCheckpoint = smokeSaveWave && !baseAttack, InstantWave = instantWave, BaseAttack = baseAttack,
+            StartingLevel = hordeStartingLevel, WavePlans = hordeWavePlans,
+            PreRollTicks = profileWarmupTicks, PreRollSeconds = profileWarmupTicks / 60d,
+            SpawnedBeforePreRoll = hordeSpawnedBeforePreRoll, QueuedBeforePreRoll = hordeQueuedBeforePreRoll,
             InitialTurrets = hordeInitialTurrets, InitialEnemies = hordeInitialEnemies,
+            InitialMinTurretAttack = hordeInitialMinAttack, InitialMaxTurretAttack = hordeInitialMaxAttack,
+            InitialSpawned = hordeInitialSpawned, InitialQueued = hordeInitialQueued,
+            BackBufferWidth = GraphicsDevice.PresentationParameters.BackBufferWidth,
+            BackBufferHeight = GraphicsDevice.PresentationParameters.BackBufferHeight,
+            VerticalSync = graphics.SynchronizeWithVerticalRetrace,
             PeakProjectiles = hordePeakProjectiles,
             VerifiedGeometryChecks = renderer.VerifiedGeometryChecks,
             Spawned = session.Waves.Sum(w => w.Spawned), LiveZombies = session.Zombies.Count(z => z.Hp > 0),
+            Queued = session.Waves.Sum(wave => wave.TotalCount - wave.Spawned),
             LivingTowers = session.Turrets.Count(t => t.Hp > 0), session.CoreHp, session.Phase,
             WarmupFramesExcluded = warmup,
-            CoreUpdate = Statistics(hordeUpdateTimes.Skip(warmup)),
+            WarmupUpdatesExcluded = Math.Min(hordeMeasuredUpdateStart, hordeUpdateTimes.Count),
+            MeasuredUpdates = Math.Max(0, hordeUpdateTimes.Count - hordeMeasuredUpdateStart),
+            CoreUpdate = Statistics(hordeUpdateTimes.Skip(hordeMeasuredUpdateStart)),
             // Intervals between completed draws include presentation and any frame
             // limiting; they are native rendered-frame timings, not isolated GPU time.
-            RenderedFrame = Statistics(hordeFrameTimes!.Skip(warmup)),
+            RenderedFrame = Statistics(hordeFrameTimes!.Skip(warmup - 1)),
+            DrawCpu = Statistics(hordeDrawTimes.Skip(warmup)),
+            HudCpu = Statistics(hordeHudTimes.Skip(warmup)),
             ReducedOverlayFrames = reducedOverlayFrames,
             PerformanceMode = overlayPerformance.ReducedDetail,
             SyntheticFrameTimings = smokePerformanceRecovery,
             LaserVertices = renderer.LastProfile.LaserVertices,
-            SimulationStages = session.Profile?.Report(Math.Max(1, hordeUpdateTimes.Count - warmup - 1)),
+            SimulationStages = hordeUpdateTimes.Count > hordeMeasuredUpdateStart ? session.Profile?.Report(hordeUpdateTimes.Count - hordeMeasuredUpdateStart) : null,
             RenderStages = hordeRenderProfiles.Count == 0 ? null : new
             {
                 TotalMs = hordeRenderProfiles.Average(p => p.TotalMs),
@@ -1298,6 +1376,7 @@ public sealed class DefenseGame : Game
     }
     protected override void Draw(GameTime gameTime)
     {
+        long drawCpuStart = smokeHorde ? Stopwatch.GetTimestamp() : 0;
         long overlayFrame = Stopwatch.GetTimestamp();
         bool overlayFrameActive = (IsActive || smoke) && !paused && panel != 3;
         // Deterministic presentation-only smoke: exercise both transitions even
@@ -1327,6 +1406,7 @@ public sealed class DefenseGame : Game
                 batchSelectMode ? null : selected, showZones, elapsed,
                 batchAllTurrets ? null : batchSelection, batchCorner, batchSelectMode, reducedDetail: overlayPerformance.ReducedDetail);
         }
+        long hudCpuStart = smokeHorde ? Stopwatch.GetTimestamp() : 0;
         buttons.Clear();
         batch.Begin(SpriteSortMode.Deferred, BlendState.NonPremultiplied, SamplerState.LinearClamp, null, null, null, Matrix.CreateScale(uiScale));
         if (panel == 3) DrawJumpEditorHud();
@@ -1339,12 +1419,22 @@ public sealed class DefenseGame : Game
             DrawHud();
         }
         batch.End();
+        if (smokeHorde)
+        {
+            long drawCpuEnd = Stopwatch.GetTimestamp();
+            hordeDrawTimes.Add(Stopwatch.GetElapsedTime(drawCpuStart, drawCpuEnd).TotalMilliseconds);
+            hordeHudTimes.Add(Stopwatch.GetElapsedTime(hudCpuStart, drawCpuEnd).TotalMilliseconds);
+        }
         frameCount++;
         if (smokeHorde)
         {
             hordePeakProjectiles = Math.Max(hordePeakProjectiles, session.Projectiles.Count);
             if (profileSmoke && frameCount > 30) hordeRenderProfiles.Add(renderer.LastProfile);
-            if (profileSmoke && frameCount == 30) session.Profile!.Reset();
+            if (frameCount == 30)
+            {
+                hordeMeasuredUpdateStart = hordeUpdateTimes!.Count;
+                session.Profile?.Reset();
+            }
             long now = Stopwatch.GetTimestamp();
             if (previousHordeFrame != 0) hordeFrameTimes!.Add(Stopwatch.GetElapsedTime(previousHordeFrame, now).TotalMilliseconds);
             previousHordeFrame = now;

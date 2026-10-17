@@ -8,6 +8,47 @@ dotnet run -c Release --project ChessVsZombies.Benchmarks -- --scenario all --co
 
 The project references the production Core project and has no package dependencies. `--seed` defaults to `12345`; `--help` lists options. Use identical arguments, runtime, configuration and machine for comparisons. Run without a debugger or concurrent builds, and repeat runs to distinguish sustained improvements from timing noise.
 
+## Exact checkpoint replay and wave 95 profiling
+
+`--saved-wave --save-path <checkpoint>` loads the saved defense and starts its selected encounter through production `StartLevel`. Saved turret positions, types, HP, upgrades, jump patterns, terrain, liquids and encounter modes are retained. Enemies enter through the normal production spawn schedule. A queued enemy is not a live actor yet. This mode ignores the synthetic `--count` and `--turrets` settings and reports the actual saved level, tower mix, wave counts and spawn intervals. Checkpoints contain preparation state, so this restarts the encounter rather than restoring an in-progress battle.
+
+The wave 95 checkpoint copied to `artifacts/wave95-profile/checkpoint.json` has 180 turrets and 371 queued enemies. Its turret ATK allocations make each turret deal 1,000,001 damage. To observe a sustained fight in which enemies survive, add `--base-attack`: it removes only the copied session's turret ATK allocations before `StartLevel`, producing the ordinary base damage of 1. Other saved allocations and physical state stay intact. This is an altered combat stress scenario; the report labels the alteration and records removed ATK points and the original/resulting damage ranges. Omit the flag to replay the saved damage exactly.
+
+Build the projects once, then run the following commands sequentially from the repository root. Use the frozen checkpoint copy, and verify its hash before and after profiling:
+
+```powershell
+$checkpoint = (Resolve-Path -LiteralPath 'artifacts/wave95-profile/checkpoint.json').Path
+$checkpointHash = (Get-FileHash -LiteralPath $checkpoint -Algorithm SHA256).Hash
+
+dotnet run -c Release --no-build --project ChessVsZombies.Benchmarks -- --saved-wave --save-path $checkpoint --base-attack --warmup 60 --ticks 1800 --max-wall-seconds 120 --output artifacts/wave95-profile/natural-base-attack.json
+
+dotnet run -c Release --no-build --project ChessVsZombies.Benchmarks -- --saved-wave --save-path $checkpoint --base-attack --instant-wave --warmup 60 --ticks 600 --max-wall-seconds 120 --output artifacts/wave95-profile/instant-base-attack.json
+
+if ((Get-FileHash -LiteralPath $checkpoint -Algorithm SHA256).Hash -ne $checkpointHash) {
+    throw 'The profiling checkpoint changed.'
+}
+```
+
+`--instant-wave` production-spawns all queued enemies during setup, setting every wave to started without advancing AI or timers. It preserves the selected saved encounter and creates a simultaneous-horde stress case; it does not reproduce the natural arrival schedule. Both exact-save modes stop and report the completed tick count and final phase if combat ends before the requested duration. The existing synthetic scenarios still reject an early combat end.
+
+`--max-wall-seconds` optionally bounds the measurement loop's wall time, excluding setup, warmup and final reporting. It checks the limit between complete production updates, so a running update always finishes and can extend beyond the limit. No simulation time is skipped. Reports include `TimeLimitReached`, `MeasuredWallSeconds` and any final partial window. Saved-wave runs also print and flush progress every 60 measured ticks, including population counts and the window's mean/maximum update time.
+
+Add `--profile` and use a separate output file to collect simulation stage timings. The profiler is attached after warmup. Stages are inclusive elapsed times: a sized-route rebuild inside zombie movement appears in both its nested route stage and `ZombieMovement`, and standard navigation can also run inside movement. Do not add nested rows together or treat their sum as exclusive CPU time. Run without profiling for representative update timings, and keep verification hashing in separate runs.
+
+`--output <report.json>` writes options, runtime information, saved encounter metadata, setup/measurement/final populations and live rosters, mean/median/p95/maximum update time, managed allocation bytes, collection counts, state hashes and optional stage timings. Its `Windows` entries record live, spawned and queued enemies, surviving turrets, projectiles, core HP and phase after each 60 measured updates, with mean/maximum update time for that second; the final partial window is included. Simulation ticks include warmup. State collection, hashing and JSON output run outside measured updates. Collection counts cover the measurement loop, including its small window records; allocation byte deltas cover only the production update calls.
+
+Use the exact checkpoint in the native renderer with `--smoke-save-wave`:
+
+```powershell
+dotnet run -c Release --no-build --project ChessVsZombies -- --smoke-save-wave --save-path artifacts/wave95-profile/checkpoint.json --base-attack --profile-smoke --profile-warmup-ticks 600 --capture-frame 240 --capture artifacts/wave95-profile/natural-base-attack.png
+
+dotnet run -c Release --no-build --project ChessVsZombies -- --smoke-save-wave --save-path artifacts/wave95-profile/checkpoint.json --base-attack --instant-wave --profile-smoke --profile-warmup-ticks 60 --capture-frame 240 --capture artifacts/wave95-profile/instant-base-attack.png
+```
+
+These smoke modes load an isolated session and suppress checkpoint saving. Always point them at the copied checkpoint as an additional guard. `--profile-warmup-ticks` advances production simulation before captured frames begin, allowing inspection later in the battle; pre-roll aborts if combat has already ended. `--capture-frame` selects the deterministic captured frame (one 1/60-second simulation update per frame). The adjacent `.metrics.json` reports simulation, renderer, HUD and rendered-frame timings, with the first 30 captured startup frames excluded. Pre-roll and startup exclusions are separate. Headless update time and rendered-frame interval measure different work; renderer CPU submission is not an isolated GPU timing.
+
+## Approximate reconstructed horde
+
 To reproduce the checkpoint-based 409-turret / 300-zombie rendered smoke scenario headlessly:
 
 ```powershell
@@ -18,7 +59,7 @@ Both frontends use `SaveHordeScenario.Create`. The checkpoint is loaded without 
 
 For an exact trace comparison between two assemblies, run the same command separately with `--verify --verify-output artifacts/perf409/baseline-trace.json` (and a distinct optimized path). This hashes setup and every warmup/measured tick. Equal trace hashes establish equal captured state at every observed tick. Hashing is excluded from update timings, but its allocations and collections affect process GC totals and may influence subsequent updates; use verification runs only for behavior comparison and separate ordinary runs for timing.
 
-Each scenario starts a real authored wave, then binds the production private `Spawn` method once to spawn the complete roster during setup. This removes gradual spawn ramp-up from the measurement without replacing navigation, combat, physics, equipment, timers or spawning rules. The benchmark fails if the roster cannot spawn or combat ends before all requested ticks run.
+Each synthetic scenario below starts a real authored wave, then binds the production private `Spawn` method once to spawn the complete roster during setup. This removes gradual spawn ramp-up from the measurement without replacing navigation, combat, physics, equipment, timers or spawning rules. These scenarios fail if the roster cannot spawn or combat ends before all requested ticks run.
 
 - `marching`: 500 durable Standard/Milli armored zombies approaching an undefended core.
 - `defended`: the same horde against 24 legally placed Rooks/Knights and 16 physical dirt cover blocks.
