@@ -18,7 +18,7 @@ public enum ToolKind { Shovel, Pickaxe }
 public enum PieceKind { Pawn, Knight, Bishop, Rook }
 public enum UpgradeKind { HP, ATK, Orthogonal, PlaneDiagonal, SpaceDiagonal, Jump }
 public enum ZombieKind { Basic, Armed, Armored, ArmedArmored }
-public enum ZombieSize { Standard, Milli, Kilo, Mega }
+public enum ZombieSize { Standard, Milli, Kilo, Mega, Micro }
 public enum KiloEquipmentMode { Covers, Buckets }
 public enum GearTier { Wood, Stone, Copper, Iron, Gold, Diamond, Osmium }
 public enum GamePhase { Building, Combat, Defeat }
@@ -168,15 +168,18 @@ public sealed class Zombie
     }
     public bool IsBoss { get; init; }
     public bool IsGiant => Size is ZombieSize.Kilo or ZombieSize.Mega;
-    public float BodyScale => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
-    public float HealthMultiplier => Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
+    public float BodyScale => Size switch { ZombieSize.Micro => .25f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
+    public float HealthMultiplier => Size switch { ZombieSize.Micro => .2f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
+    public float ArmorDurabilityMultiplier => Size == ZombieSize.Micro ? .25f : HealthMultiplier;
     public float MaxBodyHp => Balance.ZombieHp * HealthMultiplier;
     public Vector3 BodyHalfExtents => IsGiant ? new Vector3(BodyScale * .5f) : new Vector3(.2f, .39f, .2f) * BodyScale;
     public int GridFootprint => Size switch { ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
     public float StandingHeight => .5f * BodyScale;
     public bool HasWeapon => Kind is ZombieKind.Armed or ZombieKind.ArmedArmored;
+    public float MicroDashRemaining { get; internal set; }
     public float MovementSpeed => NavigationCosts.WalkTilesPerSecond * (HasWeapon ? 1 : 1.5f) *
-        (Size switch { ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, ZombieSize.Mega => .5f, _ => 1 });
+        (Size switch { ZombieSize.Micro => 3, ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, ZombieSize.Mega => .5f, _ => 1 }) *
+        (Size == ZombieSize.Micro && MicroDashRemaining > 0 ? 2 : 1);
     public Vector3 StandAt(Cell cell) => cell.Center + new Vector3((GridFootprint - 1) * .5f, StandingHeight - .5f, (GridFootprint - 1) * .5f);
     public Vector3 Position { get; set; }
     public Vector3 Facing { get; private set; } = Vector3.UnitZ;
@@ -234,7 +237,7 @@ public sealed class Zombie
             }
         }
     }
-    public float MaxHp { get => _maximumHp ?? (Balance.ZombieHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(Tier) : 0)) * HealthMultiplier; init => _maximumHp = value; }
+    public float MaxHp { get => _maximumHp ?? MaxBodyHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(Tier) * ArmorDurabilityMultiplier : 0); init => _maximumHp = value; }
     public float AirRemaining { get; internal set; } = Balance.AirSeconds;
     public bool SinksIn(LiquidKind liquid) => liquid switch
     {
@@ -283,8 +286,8 @@ public sealed class Zombie
         foreach (var slot in Enum.GetValues<ArmorSlot>())
             _armor.Add(new ArmorPiece
             {
-                Slot = slot, Tier = Tier, Hp = Balance.GearHp(Tier) * HealthMultiplier,
-                DurabilityMultiplier = HealthMultiplier,
+                Slot = slot, Tier = Tier, Hp = Balance.GearHp(Tier) * ArmorDurabilityMultiplier,
+                DurabilityMultiplier = ArmorDurabilityMultiplier,
                 HeatProtectionRemaining = Tier == GearTier.Osmium ? Balance.HeatProtectionSecondsPerPiece : 0
             });
     }

@@ -112,12 +112,15 @@ public class SpentBuilderYieldTests
         });
         var game = new GameSession(12345, levels);
         var dig = Dig(game.World);
-        // A full-depth moat leaves no complete core route. Two lower columns
+        // A moat and suspended far bank leave no complete core route. Two lower columns
         // give the spent blocker real footing and exactly one flat place to yield.
         for (int x = 9; x <= 12; x++)
             for (int y = 0; y < 16; y++)
                 for (int z = 0; z < WorldGrid.Size; z++)
                     if (!(x == 9 && y <= 14 && z is 14 or 15)) Assert.True(dig(new Cell(x, y, z)));
+        for (int x = 13; x < WorldGrid.Size; x++)
+            for (int y = 0; y < 15; y++)
+                for (int z = 0; z < WorldGrid.Size; z++) Assert.True(dig(new Cell(x, y, z)));
         // The far bank is one block higher. The carrier therefore needs the
         // upper bridge: descending onto the blocker's lower shelf would leave
         // a two-block climb at the far bank and is not its selected route.

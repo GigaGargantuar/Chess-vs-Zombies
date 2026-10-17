@@ -258,6 +258,7 @@ public sealed class WorldRenderer : IDisposable
             dynamic.Outline(new Vector3(12, 16.015f, 12), new Vector3(20, 16.04f, 20), Teal, .025f);
             dynamic.Outline(new Vector3(1, 16.01f, 1), new Vector3(31, 16.03f, 31), new Color(91, 138, 163), .024f);
             dynamic.Outline(new Vector3(0, 16.01f, 0), new Vector3(32, 16.03f, 32), new Color(200, 94, 86), .035f);
+            dynamic.Outline(new Vector3(1, .01f, 1), new Vector3(31, 32, 31), new Color(91, 138, 163), .012f);
             // Short pillars communicate the upper build boundary without obscuring the field.
             foreach (int x in new[] { 12, 20 }) foreach (int z in new[] { 12, 20 })
                     dynamic.Line(new Vector3(x, 16, z), new Vector3(x, 20, z), .012f, new Color(59, 115, 108));
@@ -617,8 +618,10 @@ public sealed class WorldRenderer : IDisposable
     {
         int firstVertex = dynamic.Vertices.Count;
         var p = ZombieFeet(zombie);
-        var skin = new Color(115, 144, 99); var dark = new Color(43, 63, 53);
-        float stride = MathF.Sin((float)time * 7 + zombie.Id) * .08f;
+        bool micro = zombie.Size == ZombieSize.Micro;
+        var skin = micro ? new Color(159, 188, 114) : new Color(115, 144, 99);
+        var dark = new Color(43, 63, 53);
+        float stride = MathF.Sin((float)time * (micro ? 21 : 7) + zombie.Id) * .08f;
         float sole = zombie.IsGiant ? .09f : .04f;
         dynamic.Box(p + new Vector3(-.21f, sole + stride, -.14f), p + new Vector3(-.045f, .39f + stride, .14f), dark);
         dynamic.Box(p + new Vector3(.045f, sole - stride, -.14f), p + new Vector3(.21f, .39f - stride, .14f), dark);
@@ -628,7 +631,8 @@ public sealed class WorldRenderer : IDisposable
         dynamic.Box(p + new Vector3(-.20f, .84f, -.19f), p + new Vector3(.20f, 1.21f, .19f), skin);
         dynamic.Box(p + new Vector3(-.39f, .42f, -.11f), p + new Vector3(-.25f, .87f, .14f), skin);
         dynamic.Box(p + new Vector3(.25f, .42f, -.11f), p + new Vector3(.39f, .87f, .14f), skin);
-        dynamic.Box(p + new Vector3(-.15f, 1.02f, .195f), p + new Vector3(.15f, 1.07f, .21f), new Color(240, 122, 91));
+        dynamic.Box(p + new Vector3(-.15f, 1.02f, .195f), p + new Vector3(.15f, 1.07f, .21f),
+            micro ? new Color(105, 225, 191) : new Color(240, 122, 91));
         var tier = ArmorColor(zombie.Tier);
         foreach (var piece in zombie.ArmorPieces)
         {

@@ -51,6 +51,8 @@ public class WaveBudgetTests
             [
                 new() { Kind = ZombieKind.Basic, Count = 3 },
                 new() { Kind = ZombieKind.Basic, Size = ZombieSize.Milli, Count = 2 },
+                new() { Kind = ZombieKind.Basic, Size = ZombieSize.Micro },
+                new() { Kind = ZombieKind.ArmedArmored, Tier = GearTier.Iron, Size = ZombieSize.Micro },
                 new() { Kind = ZombieKind.ArmedArmored, Tier = GearTier.Copper, Size = ZombieSize.Milli },
                 new() { Kind = ZombieKind.Armored, Tier = GearTier.Stone, Size = ZombieSize.Kilo }
             ]

@@ -30,19 +30,19 @@ public sealed class WorldGrid
     public static bool IsInside(Cell cell) => cell.X is >= 0 and < Size && cell.Y is >= 0 and < Size && cell.Z is >= 0 and < Size;
     public static bool IsCore(Cell cell) => cell.X is >= 15 and <= 16 && cell.Y is >= 15 and <= 16 && cell.Z is >= 15 and <= 16;
     public static bool IsBuildZone(Cell cell) => cell.X is >= 12 and <= 19 && cell.Y is >= 12 and <= 19 && cell.Z is >= 12 and <= 19;
-    public static bool IsTurretZone(Cell cell) => cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30 && !IsBuildZone(cell);
-    public static bool IsFortificationZone(Cell cell) => cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30 && !IsCore(cell);
-    public static bool IsSpawnZone(Cell cell) => IsInside(cell) &&
-        (cell.X is 0 or 31 || cell.Y is 0 or 31 || cell.Z is 0 or 31);
+    public static bool IsTurretZone(Cell cell) => IsConstructionArea(cell) && !IsBuildZone(cell);
+    public static bool IsFortificationZone(Cell cell) => IsConstructionArea(cell) && !IsCore(cell);
+    private static bool IsConstructionArea(Cell cell) => cell.X is >= 1 and <= 30 && cell.Y is >= 0 and < Size && cell.Z is >= 1 and <= 30;
+    public static bool IsSpawnZone(Cell cell) => IsInside(cell) && (cell.X is 0 or 31 || cell.Z is 0 or 31);
     public Material GetMaterial(Cell cell) => !IsInside(cell) ? Material.Air :
         _barriers.ContainsKey(cell) ? Material.Barrier : _obsidian.ContainsKey(cell) ? Material.Obsidian : _terrain[cell.X, cell.Y, cell.Z];
     public static Material InitialMaterial(Cell cell) => !IsInside(cell) ? Material.Air : IsCore(cell) ? Material.Core :
         cell.Y < 12 ? Material.Stone : cell.Y < 16 ? Material.Dirt : Material.Air;
     public Material GetNaturalMaterial(Cell cell) => IsInside(cell) ? _terrain[cell.X, cell.Y, cell.Z] : Material.Air;
-    public bool HasSupport(Cell cell) => cell.Y > 0 && IsInside(cell) && IsSolidAt(cell.Center - new Vector3(0, .501f, 0));
-    /// <summary>Block attachment follows the six neighboring grid cells, including partial obsidian cells.</summary>
+    public bool HasSupport(Cell cell) => IsInside(cell) && (cell.Y == 0 || IsSolidAt(cell.Center - new Vector3(0, .501f, 0)));
+    /// <summary>Blocks rest on the bottom boundary or attach to any of six neighboring cells, including partial obsidian.</summary>
     public bool HasOrthogonalBlockSupport(Cell cell) => IsInside(cell) &&
-        Orthogonal.Any(direction => GetMaterial(cell + direction) != Material.Air);
+        (cell.Y == 0 || Orthogonal.Any(direction => GetMaterial(cell + direction) != Material.Air));
 
     internal IEnumerable<Cell> MovableBlocks()
     {

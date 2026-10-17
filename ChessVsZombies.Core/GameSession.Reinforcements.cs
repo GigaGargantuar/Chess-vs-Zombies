@@ -60,6 +60,8 @@ public sealed partial class GameSession
         _kiloActionCooldowns.Remove(zombie.Id);
         _megaActionCooldowns.Remove(zombie.Id);
         _megaGuardMemory.Remove(zombie.Id);
+        _microStates.Remove(zombie.Id);
+        zombie.MicroDashRemaining = 0;
         _hurledAllies.Remove(zombie.Id);
         _fallStartHeights.Remove(zombie.Id);
         _coverWaiting.Remove(zombie.Id);
@@ -102,7 +104,7 @@ public sealed partial class GameSession
         zombie.RestoreBodyAndArmor(saved.BodyHp, saved.Armor.Select(piece => new ArmorPiece
         {
             Slot = piece.Slot, Tier = piece.Tier, Hp = piece.Hp, HeatProtectionRemaining = piece.HeatProtectionRemaining,
-            DurabilityMultiplier = zombie.HealthMultiplier
+            DurabilityMultiplier = zombie.ArmorDurabilityMultiplier
         }));
         for (int i = 0; i < saved.Buckets.Count; i++)
         {

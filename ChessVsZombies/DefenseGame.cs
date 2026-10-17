@@ -128,6 +128,8 @@ public sealed class DefenseGame : Game
         smoke = smoke || args.Contains("--smoke-batch-select") || args.Contains("--smoke-batch-spend");
         smoke = smoke || args.Contains("--smoke-camera-up") || args.Contains("--smoke-camera-down");
         smoke = smoke || args.Contains("--smoke-jump-cost");
+        smoke = smoke || args.Contains("--smoke-micro");
+        smoke = smoke || args.Contains("--smoke-bottom-layer");
         smokeCombat = args.Contains("--smoke-combat");
         smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : args.Contains("--smoke-megas") ? "megas" : args.Contains("--smoke-merged") ? "merged" : "";
         if (args.Contains("--smoke-all-in-one")) smokePanel = "all-in-one";
@@ -141,6 +143,8 @@ public sealed class DefenseGame : Game
         if (args.Contains("--smoke-batch-select") || args.Contains("--smoke-batch-spend")) smokePanel = args.Contains("--smoke-batch-spend") ? "batch-spend" : "batch-select";
         if (args.Contains("--smoke-camera-up") || args.Contains("--smoke-camera-down")) smokePanel = args.Contains("--smoke-camera-up") ? "camera-up" : "camera-down";
         if (args.Contains("--smoke-jump-cost")) smokePanel = "jump-cost";
+        if (args.Contains("--smoke-micro")) smokePanel = "micro";
+        if (args.Contains("--smoke-bottom-layer")) smokePanel = "bottom-layer";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
         if (smoke) IsFixedTimeStep = false;
@@ -151,6 +155,7 @@ public sealed class DefenseGame : Game
         if (smokePanel == "bridges") cameraControl = new FlyCamera(new System.Numerics.Vector3(20.5f, 21, 31), MathF.PI, -.39f);
         if (smokePanel == "buckets") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 20.5f, 12), .26f, -.35f);
         if (smokePanel == "sizes") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 31), MathF.PI, -.35f);
+        if (smokePanel == "micro") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 33), MathF.PI, -.38f);
         if (smokePanel == "megas") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 26, 42), MathF.PI, -.34f);
         if (smokeThrownCover) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 25, 32), MathF.PI, -.3f);
         if (smokeTowerPenetration) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 34), MathF.PI, -.54f);
@@ -161,6 +166,7 @@ public sealed class DefenseGame : Game
         if (smokePanel == "camera-up") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 19, 22.5f), .7f, MathF.PI / 2);
         if (smokePanel == "camera-down") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 30, 22.5f), .7f, -MathF.PI / 2);
         if (smokePanel == "jump-cost") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 19, 28), MathF.PI, -MathF.Atan2(2.5f, 5.5f));
+        if (smokePanel == "bottom-layer") cameraControl = new FlyCamera(new System.Numerics.Vector3(8.5f, 4.5f, 14.5f), MathF.PI, -MathF.Atan2(4.5f, 6));
         int frameIndex = Array.IndexOf(args, "--capture-frame");
         if (frameIndex >= 0 && frameIndex + 1 < args.Length && int.TryParse(args[frameIndex + 1], out var requestedFrame))
             captureFrame = Math.Clamp(requestedFrame, 1, 3600);
@@ -255,6 +261,7 @@ public sealed class DefenseGame : Game
             if (smokePanel == "liquid-turrets") PrepareLiquidTurretSmoke();
             if (smokePanel == "buckets") PrepareBucketSmoke();
             if (smokePanel == "sizes") PrepareSizeSmoke();
+            if (smokePanel == "micro") PrepareMicroSmoke();
             if (smokePanel == "megas") PrepareMegaSmoke();
             if (smokeThrownCover) PrepareThrownCoverSmoke();
             if (smokeTowerPenetration) PrepareTowerPenetrationSmoke();
@@ -263,6 +270,7 @@ public sealed class DefenseGame : Game
             if (smokePanel is "batch-select" or "batch-spend") PrepareBatchSelectionSmoke();
             if (smokePanel is "camera-up" or "camera-down") PrepareVerticalCameraSmoke();
             if (smokePanel == "jump-cost") PrepareJumpCostSmoke();
+            if (smokePanel == "bottom-layer") PrepareBottomLayerSmoke();
             if (smokePanel is "merged" or "all-in-one")
             {
                 if (smokePanel == "all-in-one") session.SetAllInOne(true);
@@ -279,11 +287,13 @@ public sealed class DefenseGame : Game
                 smokePanel == "merged" ? "Five levels in one battle. Every surviving tower pays 25 currency on victory." :
                 smokePanel == "megas" ? "Mega / 3 x 3 x 3. Two hands, two real blocks per hand. Stick left / chunky throw right." :
                 smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
+                smokePanel == "micro" ? "Micro flankers / quarter size / 2 HP / 3x speed / incoming-fire dodges and moving turret attacks." :
                 smokePanel == "liquid-turrets" ? "Liquid sharing / wet tower left / obsidian shell at crosshair / one unit of room for pouring." :
                 smokePanel == "formation" ? "Saved formation / ghost towers mark missing positions / auto restore constructs one tower at a time." :
                 smokePanel is "batch-select" or "batch-spend" ? "Batch selection / two 3D corners, one added tower and one excluded tower / upgrade only the cyan group." :
                 smokePanel is "camera-up" or "camera-down" ? "Quaternion camera / exact vertical view / traditional mouse panning and level movement." :
                 smokePanel == "jump-cost" ? "Jump request 71 / radius 2 / spent 2 / 69 banked / identical reapplication spends 0." :
+                smokePanel == "bottom-layer" ? "Bottom layer Y 0 / tower and fortification on the void floor / crosshair can deploy into empty space." :
                 smokeCombat ? "Live simulation / rendered validation" : "Crosshair placement / rendered validation");
         }
         else LoadCheckpoint();
@@ -394,6 +404,29 @@ public sealed class DefenseGame : Game
             throw new InvalidOperationException("A radius-2 jump pattern must spend two points once, leaving 69 banked.");
         panel = 2;
         Capture(false);
+    }
+    private void PrepareBottomLayerSmoke()
+    {
+        session = new GameSession();
+        var dig = typeof(WorldGrid).GetMethod("Dig", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .CreateDelegate<Func<Cell, bool>>(session.World);
+        for (int x = 3; x <= 13; x++)
+            for (int z = 3; z <= 15; z++)
+                for (int y = 0; y < 16; y++)
+                    if (!dig(new Cell(x, y, z))) throw new InvalidOperationException("Could not clear the bottom-layer demonstration.");
+        if (!session.Deploy(PieceKind.Rook, new Cell(6, 0, 8))) throw new InvalidOperationException(session.Message);
+        session.Inventory.Add(Material.Stone);
+        if (!session.BuildBarrier(new Cell(10, 0, 8), Material.Stone)) throw new InvalidOperationException(session.Message);
+        var zombie = new Zombie { Id = -100, WaveIndex = -1, Kind = ZombieKind.Basic };
+        zombie.Position = zombie.StandAt(new Cell(8, 0, 5));
+        zombie.FaceToward(System.Numerics.Vector3.UnitZ);
+        session.Zombies.Add(zombie);
+        selected = null;
+        tool = panel = 0;
+        paused = true;
+        Aim();
+        if (placement is not { } target || target != new Cell(8, 0, 8) || !session.CanDeploy(PieceKind.Pawn, target))
+            throw new InvalidOperationException("The crosshair must allow deployment onto the empty bottom layer.");
     }
     private void PrepareHordeSmoke()
     {
@@ -750,6 +783,59 @@ public sealed class DefenseGame : Game
         selected = null;
         paused = true;
     }
+    private void PrepareMicroSmoke()
+    {
+        var levels = new LevelCatalog();
+        levels.Set(new LevelDefinition
+        {
+            Number = 1, Name = "Micro flanker demonstration",
+            Waves = [new WaveDefinition { SpawnInterval = 1000, Groups = [new ZombieGroup { Kind = ZombieKind.Basic }] }]
+        });
+        session = new GameSession(levels: levels);
+        foreach (int x in new[] { 17, 20, 23 })
+            if (!session.Deploy(PieceKind.Pawn, new Cell(x, 16, 21)))
+                throw new InvalidOperationException("Could not prepare the Micro demonstration targets.");
+        session.StartLevel();
+        session.Waves[0].Spawned = session.Waves[0].TotalCount;
+        for (int index = 0; index < 4; index++)
+        {
+            var kind = index % 2 == 0 ? ZombieKind.Basic : ZombieKind.Armored;
+            var micro = new Zombie
+            {
+                Id = 100 + index, WaveIndex = -1, Size = ZombieSize.Micro,
+                Kind = kind, Tier = GearTier.Wood,
+                Attack = LevelCatalog.ZombieAttack(kind, GearTier.Wood, ZombieSize.Micro)
+            };
+            micro.Position = micro.StandAt(new Cell(17 + index * 2, 16, 24));
+            micro.FaceToward(-System.Numerics.Vector3.UnitZ);
+            session.Zombies.Add(micro);
+        }
+        // Adjacent sizes make the quarter-size silhouette inspectable while the
+        // actual combat update controls all flanking, dodging, and dash motion.
+        foreach (var (size, x) in new[] { (ZombieSize.Milli, 24), (ZombieSize.Standard, 26) })
+        {
+            var comparison = new Zombie { Id = 200 + x, WaveIndex = -1, Size = size, Kind = ZombieKind.Basic };
+            comparison.Position = comparison.StandAt(new Cell(x, 16, 24));
+            session.Zombies.Add(comparison);
+        }
+        QueueMicroSmokeVolley();
+        selected = null;
+        showZones = false;
+        paused = false;
+    }
+    private void QueueMicroSmokeVolley()
+    {
+        foreach (var micro in session.Zombies.Where(zombie => zombie.Size == ZombieSize.Micro && zombie.BodyHp > 0))
+        {
+            var aim = micro.Position;
+            session.Projectiles.Add(new Projectile
+            {
+                Origin = aim + System.Numerics.Vector3.UnitZ * 4,
+                Target = aim - System.Numerics.Vector3.UnitZ * 2,
+                TargetId = micro.Id, Kind = ShotKind.Pellet, Damage = .1f, Duration = .7f
+            });
+        }
+    }
     private void PrepareLiquidTurretSmoke()
     {
         session = new GameSession();
@@ -960,6 +1046,7 @@ public sealed class DefenseGame : Game
         }
         var oldPhase = session.Phase;
         if (smokeMegaGuard && frameCount > 0 && frameCount % 15 == 0) QueueMegaGuardSmokeVolley();
+        if (smokePanel == "micro" && frameCount > 0 && frameCount % 20 == 0) QueueMicroSmokeVolley();
         if (smokeThrownCover && frameCount is 15 or 30) QueueThrownCoverSmokeShot(25);
         var queuedBeforeUpdate = session.QueuedUpgradeBatch;
         bool restoringFormation = session.IsAutoRestoringFormation;
@@ -1020,7 +1107,8 @@ public sealed class DefenseGame : Game
     }
     private void Aim()
     {
-        var aim = WorldPicker.Pick(session, cameraControl.Position, cameraControl.Forward, includeLiquids: !batchSelectMode);
+        var aim = WorldPicker.Pick(session, cameraControl.Position, cameraControl.Forward,
+            includeLiquids: !batchSelectMode, includeVoidFloor: !batchSelectMode);
         hit = aim?.Hit;
         placement = aim?.Placement;
         highlight = aim?.Highlight;
@@ -1051,6 +1139,8 @@ public sealed class DefenseGame : Game
                     CrustFace[] faces = [CrustFace.Bottom, CrustFace.West, CrustFace.East, CrustFace.North, CrustFace.South, CrustFace.Top];
                     obsidianPlacementFace = faces.FirstOrDefault(face => session.CanBuildObsidian(target, face), CrustFace.Bottom);
                 }
+                else if (target.Y == 0 && hit == target && session.World.GetMaterial(target) == Material.Air)
+                    obsidianPlacementFace = CrustFace.Bottom;
             }
         }
         SelectTarget();

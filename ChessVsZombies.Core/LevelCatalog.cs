@@ -85,6 +85,7 @@ public sealed class LevelCatalog
             (kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(tier) : 0);
         return size switch
         {
+            ZombieSize.Micro => 2 + (kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? Balance.GearHp(tier) : 0),
             ZombieSize.Milli => standard / 2,
             ZombieSize.Standard => standard,
             ZombieSize.Kilo => standard * 4,
@@ -111,13 +112,20 @@ public sealed class LevelCatalog
         float gearedShare = number < 5 ? 0 : number < 10 ? .2f + (number - 5) * .15f : .85f;
         int geared = (int)Math.Round(total * gearedShare);
         var groups = new List<ZombieGroup>();
+        int microCompositionRemainder = 0;
         void AddSizedGroups(ZombieKind kind, GearTier gear, int count)
         {
             int millis = count / 5;
-            if (count - millis > 0)
-                groups.Add(new ZombieGroup { Kind = kind, Tier = gear, Count = count - millis });
+            // Carry the tenth-spawn quota across gear groups so small groups
+            // do not make Micros disappear as the campaign unlocks more tiers.
+            int micros = (count + microCompositionRemainder) / 10;
+            microCompositionRemainder = (count + microCompositionRemainder) % 10;
+            if (count - millis - micros > 0)
+                groups.Add(new ZombieGroup { Kind = kind, Tier = gear, Count = count - millis - micros });
             if (millis > 0)
                 groups.Add(new ZombieGroup { Kind = kind, Tier = gear, Count = millis, Size = ZombieSize.Milli });
+            if (micros > 0)
+                groups.Add(new ZombieGroup { Kind = kind, Tier = gear, Count = micros, Size = ZombieSize.Micro });
         }
         AddSizedGroups(ZombieKind.Basic, GearTier.Wood, total - geared);
         if (geared > 0)

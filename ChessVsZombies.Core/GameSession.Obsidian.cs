@@ -33,7 +33,7 @@ public sealed partial class GameSession
     {
         if (Phase != GamePhase.Building) return "Obsidian layers can be placed between levels.";
         if (!Enum.IsDefined(face)) return "Choose a valid supporting face for the obsidian layer.";
-        if (!WorldGrid.IsFortificationZone(cell)) return "Place obsidian outside the core and spawn shell.";
+        if (!WorldGrid.IsFortificationZone(cell)) return "Place obsidian in the 30-wide, 32-tall area, outside the core.";
         if (Inventory.GetCount(Material.Obsidian) == 0) return "No recovered obsidian layers remain.";
         var existing = World.GetObsidian(cell);
         if (World.GetMaterial(cell) is not (Material.Air or Material.Obsidian) || TrySelectTurret(cell) != null)
@@ -47,7 +47,8 @@ public sealed partial class GameSession
         var proposed = selected is null
             ? new ObsidianCell(cell, 1, face, LiquidSystem.ObsidianHpPerUnit)
             : selected with { Units = selected.Units + 1, Hp = selected.Hp + LiquidSystem.ObsidianHpPerUnit };
-        if (existing is null && !TouchesNeighborBlock(proposed.Min, proposed.Max, cell + CrustDirection(face)))
+        if (existing is null && !(cell.Y == 0 && face == CrustFace.Bottom) &&
+            !TouchesNeighborBlock(proposed.Min, proposed.Max, cell + CrustDirection(face)))
             return "The first layer needs a solid block touching its supporting face.";
         if (Zombies.Any(zombie => zombie.Hp > 0 && BoundsOverlap(proposed.Min, proposed.Max,
                 zombie.Position - zombie.BodyHalfExtents, zombie.Position + zombie.BodyHalfExtents)))

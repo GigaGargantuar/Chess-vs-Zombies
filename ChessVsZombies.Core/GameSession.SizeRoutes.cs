@@ -36,12 +36,14 @@ public sealed partial class GameSession
     {
         using var profile = Profile?.Measure(size switch
         {
+            ZombieSize.Micro => "SizedNavigationRebuild.Micro",
             ZombieSize.Milli => "SizedNavigationRebuild.Milli",
             ZombieSize.Kilo => "SizedNavigationRebuild.Kilo",
             ZombieSize.Mega => "SizedNavigationRebuild.Mega",
             _ => "SizedNavigationRebuild.Other"
         });
         var shape = new Zombie { Size = size };
+        bool small = size is ZombieSize.Micro or ZombieSize.Milli;
         const int edgesPerNode = 16;
         static int Index(Cell cell) => (cell.X * WorldGrid.Size + cell.Y) * WorldGrid.Size + cell.Z;
         var workspace = _sizedNavigationWorkspace ??= new SizedNavigationWorkspace();
@@ -59,7 +61,7 @@ public sealed partial class GameSession
         // axis-aligned step sweeps therefore cover whole cells, including any
         // partial obsidian in them; there is no need to allocate collision
         // iterators and test the same slab geometry for every incoming edge.
-        var occupied = shape.IsGiant || size == ZombieSize.Milli ? workspace.Occupied : null;
+        var occupied = shape.IsGiant || small ? workspace.Occupied : null;
         var occupiedZRows = occupied != null ? workspace.OccupiedZRows : null;
         if (occupied != null)
             for (int x = 0; x < WorldGrid.Size; x++)
@@ -71,7 +73,7 @@ public sealed partial class GameSession
                         var cell = new Cell(x, y, z);
                         var material = World.GetMaterial(cell);
                         byte solid = material == Material.Core ? (byte)2 :
-                            size == ZombieSize.Milli && material == Material.Obsidian ? (byte)3 :
+                            small && material == Material.Obsidian ? (byte)3 :
                             material != Material.Air || HasLiveIndexedTurret(cell) ? (byte)1 : (byte)0;
                         occupied[Index(cell)] = solid;
                         if (solid != 0) row |= 1u << z;
@@ -84,7 +86,7 @@ public sealed partial class GameSession
         bool Clear(Cell cell)
         {
             if (occupied == null) return IsBodyClear(shape.StandAt(cell), shape);
-            if (size == ZombieSize.Milli)
+            if (small)
             {
                 byte solid = occupied[Index(cell)];
                 return solid == 0 || solid == 3 && IsBodyClear(shape.StandAt(cell), shape);
@@ -96,12 +98,12 @@ public sealed partial class GameSession
             return true;
         }
         for (int x = 0; x < WorldGrid.Size; x++)
-            for (int y = 1; y < WorldGrid.Size; y++)
+            for (int y = 0; y < WorldGrid.Size; y++)
                 for (int z = 0; z < WorldGrid.Size; z++)
                 {
                     var cell = new Cell(x, y, z);
                     if (!HasZombieSupport(cell, shape) ||
-                        !(size == ZombieSize.Milli ? occupied![Index(cell)] != 2 :
+                        !(small ? occupied![Index(cell)] != 2 :
                             shape.IsGiant ? x + shape.GridFootprint <= WorldGrid.Size &&
                                 y + shape.GridFootprint <= WorldGrid.Size && z + shape.GridFootprint <= WorldGrid.Size &&
                                 !SizedAnchorOverlapsCore(cell, shape.GridFootprint) :
@@ -169,7 +171,7 @@ public sealed partial class GameSession
                     {
                         bool valid = shape.IsGiant
                             ? TryGiantGridStepCostWithRows(from, destination, shape.GridFootprint, occupied, occupiedZRows, gridCosts!, referenceAttack, out float cost)
-                            : TryMilliGridStepCost(from, destination, occupied, gridCosts!, referenceAttack, out cost);
+                            : TrySmallGridStepCost(from, destination, occupied, gridCosts!, referenceAttack, shape, out cost);
                         if (valid) edges[slot] = cost;
                     }
                     else if (Step(from, destination))
@@ -345,6 +347,9 @@ public sealed partial class GameSession
         IsGridPoint(point - new Vector3(shape.BodyScale * .5f));
 
     private bool TryMilliGridStepCost(Cell from, Cell to, byte[] occupied, float[] costs, int attack, out float cost)
+        => TrySmallGridStepCost(from, to, occupied, costs, attack, new Zombie { Size = ZombieSize.Milli }, out cost);
+
+    private bool TrySmallGridStepCost(Cell from, Cell to, byte[] occupied, float[] costs, int attack, Zombie shape, out float cost)
     {
         Span<int> breached = stackalloc int[6];
         int count = 0;
@@ -368,8 +373,8 @@ public sealed partial class GameSession
             if (second != first && occupied[second] != 0) breached[count++] = second;
             if (toIndex != first && toIndex != second && toSolid != 0) breached[count++] = toIndex;
         }
-        else if (!AppendMilliGridSweep(from, waypoint, occupied, breached, ref count) ||
-                 waypoint != to && !AppendMilliGridSweep(waypoint, to, occupied, breached, ref count))
+        else if (!AppendSmallGridSweep(from, waypoint, occupied, breached, ref count, shape) ||
+                 waypoint != to && !AppendSmallGridSweep(waypoint, to, occupied, breached, ref count, shape))
         {
             cost = 0;
             return false;
@@ -388,6 +393,9 @@ public sealed partial class GameSession
     }
 
     private bool AppendMilliGridSweep(Cell from, Cell to, byte[] occupied, Span<int> breached, ref int count)
+        => AppendSmallGridSweep(from, to, occupied, breached, ref count, new Zombie { Size = ZombieSize.Milli });
+
+    private bool AppendSmallGridSweep(Cell from, Cell to, byte[] occupied, Span<int> breached, ref int count, Zombie shape)
     {
         // The canonical small body stays inside its anchor cell on each axis.
         // Whole cubes along an axis sweep are therefore exact contacts. Crusts
@@ -402,10 +410,10 @@ public sealed partial class GameSession
                     if (solid == 0 || breached[..count].Contains(index)) continue;
                     if (solid == 3)
                     {
-                        var start = from.Center - Vector3.UnitY * .25f;
-                        var end = to.Center - Vector3.UnitY * .25f;
+                        var start = shape.StandAt(from);
+                        var end = shape.StandAt(to);
                         var movement = end - start;
-                        var body = new Vector3(.1f, .195f, .1f);
+                        var body = shape.BodyHalfExtents;
                         bool contact = false;
                         foreach (var bounds in SolidCollisionBounds(new Cell(x, y, z)))
                         {

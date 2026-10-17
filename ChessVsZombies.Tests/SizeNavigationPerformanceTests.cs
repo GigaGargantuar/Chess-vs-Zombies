@@ -9,8 +9,8 @@ namespace ChessVsZombies.Tests;
 public sealed class SizeNavigationPerformanceTests
 {
     // Captured from the original full slab-sweep navigation builder. Hash both
-    // complete fields, including all underground breach paths and tie choices,
-    // rather than checking only the visibly clear route on the ground surface.
+    // historical fields above Y=0, including all underground breach paths and
+    // tie choices. Bottom-layer routes have separate behavioral coverage.
     [Theory]
     [InlineData(0, 15358, "DDBAE052CE224AC8CD403E02EAAB58C00F6FF47918E6080BE474A5CAD606EE31", "1A3B71F37D9A0E2B0305DE7C8AB9B89984E20849C6C111C2E319A067FC9D8DB5")]
     [InlineData(1, 15426, "A47F58564F8F7F9A85136FC8DF03DB7A876A34BA076964A7D3B34D29F26BA3E1", "BD5528B282B12FF1D1A58F05D38936D4638208AE35621C2074F0B66C410F88D6")]
@@ -53,7 +53,7 @@ public sealed class SizeNavigationPerformanceTests
     // Captured from the pre-500-zombie-optimization Core assembly. The three
     // scenarios cover untouched terrain, trenches/offset and paired crusts,
     // and indexed towers with a larger excavation. Every Mega goal, breach,
-    // fallback destination, and equal-cost next-step choice is included.
+    // fallback destination, and equal-cost next-step choice above Y=0 is included.
     [Theory]
     [InlineData(0, 14352, "57EDD852CC9ACD9A1C6FCE8CCB6637905A33DEAADAFE51743E337DB428827F49", "50ABF54CCBB6D55C8B390B67B60EE07F7B415077A6611E7D496208C28A1AECAD")]
     [InlineData(1, 14472, "983690BF6FF4CE0115ABA150C9C31B8C2A39808A47B2385C07B6710B93367A71", "30F50BFE35C8DEEB9FCE07769145D059FACB56B19E4388F30BB6DBC47BC54FFF")]
@@ -117,10 +117,13 @@ public sealed class SizeNavigationPerformanceTests
     private static void AssertField(object field, string property, int count, string expectedHash)
     {
         var routes = (IDictionary<Cell, Cell>)field.GetType().GetProperty(property)!.GetValue(field)!;
-        Assert.Equal(count, routes.Count);
+        // The original graph excluded Y=0. Preserve its exact above-bottom
+        // mapping hashes while allowing the newly supported bottom layer.
+        var originalRoutes = routes.Where(pair => pair.Key.Y > 0).ToArray();
+        Assert.Equal(count, originalRoutes.Length);
         using var bytes = new MemoryStream();
         using (var writer = new BinaryWriter(bytes, System.Text.Encoding.UTF8, true))
-            foreach (var pair in routes.OrderBy(pair => pair.Key.X).ThenBy(pair => pair.Key.Y).ThenBy(pair => pair.Key.Z))
+            foreach (var pair in originalRoutes.OrderBy(pair => pair.Key.X).ThenBy(pair => pair.Key.Y).ThenBy(pair => pair.Key.Z))
             {
                 writer.Write(pair.Key.X); writer.Write(pair.Key.Y); writer.Write(pair.Key.Z);
                 writer.Write(pair.Value.X); writer.Write(pair.Value.Y); writer.Write(pair.Value.Z);

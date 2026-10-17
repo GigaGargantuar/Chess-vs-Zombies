@@ -10,7 +10,8 @@ public readonly record struct AimResult(Cell Hit, Cell? Placement, bool IsLiquid
 /// <summary>Shared crosshair picking for every tool, using solid and liquid geometry.</summary>
 public static class WorldPicker
 {
-    public static AimResult? Pick(GameSession session, Vector3 origin, Vector3 direction, float maxDistance = 64, bool includeLiquids = true)
+    public static AimResult? Pick(GameSession session, Vector3 origin, Vector3 direction, float maxDistance = 64,
+        bool includeLiquids = true, bool includeVoidFloor = false)
     {
         ArgumentNullException.ThrowIfNull(session);
         if (!Finite(origin) || !Finite(direction) || !float.IsFinite(maxDistance) || maxDistance <= 0) return null;
@@ -68,6 +69,18 @@ public static class WorldPicker
                 nearest = near;
                 liquid = isLiquid;
                 obsidianFace = face;
+            }
+        }
+        // Placement can target the resting plane even after every block above it
+        // has been excavated. Visibility queries still use only actual geometry.
+        if (includeVoidFloor && dy < 0 && origin.Y >= 0)
+        {
+            double distance = -origin.Y / dy;
+            if (distance <= exit)
+            {
+                var floor = new Cell((int)Math.Floor(origin.X + dx * distance), 0,
+                    (int)Math.Floor(origin.Z + dz * distance));
+                if (WorldGrid.IsInside(floor)) return new AimResult(floor, floor, false);
             }
         }
         return null;

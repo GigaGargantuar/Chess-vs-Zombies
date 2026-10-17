@@ -102,7 +102,7 @@ public class NavigationEquivalenceTests
         var breach = Bind<Func<Cell, int, float>>(game, "BreachCost");
         var nodes = new HashSet<Cell>();
         for (int x = 0; x < WorldGrid.Size; x++)
-            for (int y = 1; y < WorldGrid.Size; y++)
+            for (int y = 0; y < WorldGrid.Size; y++)
                 for (int z = 0; z < WorldGrid.Size; z++)
                 {
                     var cell = new Cell(x, y, z);

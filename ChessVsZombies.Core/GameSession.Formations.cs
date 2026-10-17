@@ -39,7 +39,7 @@ public sealed class FormationTemplate
 
     internal static FormationTemplate FromSaved(SavedFormationTemplate saved)
     {
-        if (saved.Towers == null || saved.Towers.Count == 0 || saved.Towers.Count > 30 * 31 * 30)
+        if (saved.Towers == null || saved.Towers.Count == 0 || saved.Towers.Count > 30 * WorldGrid.Size * 30)
             throw new InvalidDataException("A saved formation needs towers within the battlefield's capacity.");
         var cells = new HashSet<Cell>();
         var economy = new Economy();
@@ -47,7 +47,7 @@ public sealed class FormationTemplate
         foreach (var tower in saved.Towers)
         {
             if (tower == null || !Enum.IsDefined(tower.Kind) || tower.Cell.X is < 1 or > 30 ||
-                tower.Cell.Y is < 0 or > 30 || tower.Cell.Z is < 1 or > 30 || WorldGrid.IsCore(tower.Cell) ||
+                tower.Cell.Y is < 0 or >= WorldGrid.Size || tower.Cell.Z is < 1 or > 30 || WorldGrid.IsCore(tower.Cell) ||
                 !cells.Add(tower.Cell) || tower.UpgradePoints == null || tower.JumpPattern == null ||
                 tower.UpgradePoints.Any(pair => !Enum.IsDefined(pair.Key) || pair.Value <= 0 ||
                     tower.Kind == PieceKind.Rook && pair.Key == UpgradeKind.Orthogonal ||

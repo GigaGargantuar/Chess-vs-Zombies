@@ -383,7 +383,17 @@ public sealed class RetreatResupplyTests
         return zombie;
     }
 
-    private static void ExcavateMoat(GameSession game) => ExcavateColumns(game, 9, 12);
+    private static void ExcavateMoat(GameSession game)
+    {
+        ExcavateColumns(game, 9, 12);
+        var dig = typeof(WorldGrid).GetMethod("Dig", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .CreateDelegate<Func<Cell, bool>>(game.World);
+        // The core anchors the far bank's surface slab. Its underside is too
+        // high to reach from the bottom plane without constructing a bridge.
+        for (int x = 13; x < WorldGrid.Size; x++)
+            for (int y = 0; y < 15; y++)
+                for (int z = 0; z < WorldGrid.Size; z++) Assert.True(dig(new Cell(x, y, z)));
+    }
 
     private static void ExcavateColumns(GameSession game, int minX, int maxX)
     {

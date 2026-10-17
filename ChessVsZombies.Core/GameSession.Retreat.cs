@@ -253,10 +253,12 @@ public sealed partial class GameSession
     {
         var min = position - zombie.BodyHalfExtents;
         var max = position + zombie.BodyHalfExtents;
-        // Standard/Milli spawn anchors sit half a tile from the outside face;
-        // the exact two-cube Kilo touches that face at its first fitting anchor.
+        // Small spawn anchors sit half a tile from the outside face; giant
+        // bodies touch that face at their first fitting anchor. Micro feet sit
+        // farther inward than the old .4-block supply band.
         if (min.X < -.001f || min.Z < -.001f || max.X > WorldGrid.Size + .001f || max.Z > WorldGrid.Size + .001f) return false;
-        return min.X <= .401f || min.Z <= .401f || max.X >= WorldGrid.Size - .401f || max.Z >= WorldGrid.Size - .401f;
+        float inset = Math.Max(.4f, .5f - zombie.BodyHalfExtents.X) + .001f;
+        return min.X <= inset || min.Z <= inset || max.X >= WorldGrid.Size - inset || max.Z >= WorldGrid.Size - inset;
     }
 
     private bool TryGetRetreatStep(Zombie zombie, Cell current, out Cell next)
@@ -283,7 +285,7 @@ public sealed partial class GameSession
         var costs = new Dictionary<Cell, float>();
         var frontier = new PriorityQueue<Cell, float>();
         for (int x = 0; x < WorldGrid.Size; x++)
-            for (int y = 1; y < WorldGrid.Size; y++)
+            for (int y = 0; y < WorldGrid.Size; y++)
                 for (int z = 0; z < WorldGrid.Size; z++)
                 {
                     var cell = new Cell(x, y, z);

@@ -8,7 +8,8 @@ public sealed partial class GameSession
 
     private bool HasMilliGridSupport(Cell anchor)
     {
-        if (!WorldGrid.IsInside(anchor) || anchor.Y <= 0) return false;
+        if (!WorldGrid.IsInside(anchor)) return false;
+        if (anchor.Y == 0) return true;
         var floor = anchor + new Cell(0, -1, 0);
         if (World.GetObsidian(floor) == null)
             return World.GetMaterial(floor) != Material.Air || HasLiveIndexedTurret(floor);
@@ -26,7 +27,8 @@ public sealed partial class GameSession
 
     private bool HasGiantGridSupport(Cell anchor, int footprint)
     {
-        if (!WorldGrid.IsInside(anchor) || anchor.Y <= 0) return false;
+        if (!WorldGrid.IsInside(anchor)) return false;
+        if (anchor.Y == 0) return true;
         // A canonical Kilo occupies four entire floor cells. Its grid support
         // query needs only their upper faces; free falls still scan real floors.
         for (int x = 0; x < footprint; x++)
@@ -65,12 +67,12 @@ public sealed partial class GameSession
             cached.WorldRevision == World.Revision && cached.TopologyRevision == _topologyRevision) return cached.Cells;
         var cells = new List<Cell>();
         for (int x = 0; x <= WorldGrid.Size - shape.GridFootprint; x++)
-            for (int y = 1; y <= WorldGrid.Size - shape.GridFootprint; y++)
+            for (int y = 0; y <= WorldGrid.Size - shape.GridFootprint; y++)
                 for (int z = 0; z <= WorldGrid.Size - shape.GridFootprint; z++)
                 {
                     var cell = new Cell(x, y, z);
                     bool boundary = x == 0 || z == 0 || x + shape.GridFootprint == WorldGrid.Size ||
-                        z + shape.GridFootprint == WorldGrid.Size || y + shape.GridFootprint == WorldGrid.Size;
+                        z + shape.GridFootprint == WorldGrid.Size;
                     if (boundary && HasZombieSupport(cell, shape) && IsBodyClear(shape.StandAt(cell), shape)) cells.Add(cell);
                 }
         _sizedSpawnCells[shape.Size] = (World.Revision, _topologyRevision, cells);

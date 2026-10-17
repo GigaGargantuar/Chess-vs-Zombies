@@ -24,11 +24,11 @@ public class FortificationPlacementTests
     [Theory]
     [InlineData(0,16,8)]
     [InlineData(31,16,8)]
-    [InlineData(8,31,8)]
-    [InlineData(8,0,8)]
+    [InlineData(8,16,0)]
+    [InlineData(8,16,31)]
     [InlineData(15,16,15)]
     [InlineData(-1,16,8)]
-    public void CoreAndSpawnShellRemainUnavailableForNewFortifications(int x, int y, int z)
+    public void CoreAndHorizontalSpawnBordersRemainUnavailableForNewFortifications(int x, int y, int z)
     {
         var game = new GameSession();
         Assert.True(game.Inventory.Add(Material.Stone));

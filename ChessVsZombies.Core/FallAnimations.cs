@@ -143,6 +143,12 @@ public sealed class FallAnimations
 
     internal void CancelZombie(Zombie zombie) => _zombies.Remove(zombie.Id);
 
+    // Air steering changes the falling column without restarting its clock.
+    internal void TranslateZombieFall(Zombie zombie, Vector3 offset)
+    {
+        if (_zombies.TryGetValue(zombie.Id, out var motion)) motion.Translate(offset);
+    }
+
     private sealed class BlockTrack(Motion motion, Material material, Material? content, ObsidianCell? crust)
     {
         public Motion Motion { get; } = motion;
@@ -162,6 +168,7 @@ public sealed class FallAnimations
         public bool Complete => Travel >= Length - .00001f;
         public Vector3 Position => Complete ? End : Vector3.Lerp(_start, End, Math.Clamp(Travel / Length, 0, 1));
         public void Advance(float dt) => _elapsed += dt;
+        public void Translate(Vector3 offset) { _start += offset; End += offset; }
         public void Retarget(Vector3 current, Vector3 destination)
         {
             _start = current;

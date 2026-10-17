@@ -6,16 +6,24 @@ namespace ChessVsZombies.Tests;
 public class WorldGridTests
 {
     [Fact]
-    public void ZoneVolumesMatchTheCenteredCubesAndTheOuterSpawnShell()
+    public void BuildableAreaUsesAllLayersWhileSpawnsUseOnlyTheOutermostHorizontalRing()
     {
         var cells = AllCells().ToArray();
         Assert.Equal(32 * 32 * 32, cells.Length);
         Assert.Equal(8, cells.Count(WorldGrid.IsCore));
         Assert.Equal(512, cells.Count(WorldGrid.IsBuildZone));
-        Assert.Equal(26488, cells.Count(WorldGrid.IsTurretZone));
-        Assert.Equal(5768, cells.Count(WorldGrid.IsSpawnZone));
-        Assert.All(cells, cell => Assert.Equal(1,
-            (WorldGrid.IsTurretZone(cell) ? 1 : 0) + (WorldGrid.IsSpawnZone(cell) ? 1 : 0) + (WorldGrid.IsBuildZone(cell) ? 1 : 0)));
+        Assert.Equal(30 * 32 * 30 - 512, cells.Count(WorldGrid.IsTurretZone));
+        Assert.Equal(30 * 32 * 30 - 8, cells.Count(WorldGrid.IsFortificationZone));
+        Assert.Equal((32 * 32 - 30 * 30) * 32, cells.Count(WorldGrid.IsSpawnZone));
+        Assert.DoesNotContain(cells, cell => WorldGrid.IsTurretZone(cell) && WorldGrid.IsSpawnZone(cell));
+        Assert.All(cells, cell => Assert.True(WorldGrid.IsTurretZone(cell) || WorldGrid.IsSpawnZone(cell) || WorldGrid.IsBuildZone(cell)));
+        foreach (int y in new[] { 0, 31 })
+        {
+            Assert.Equal(32 * 32 - 30 * 30, cells.Count(cell => cell.Y == y && WorldGrid.IsSpawnZone(cell)));
+            Assert.False(WorldGrid.IsSpawnZone(new Cell(8, y, 8)));
+            Assert.True(WorldGrid.IsSpawnZone(new Cell(0, y, 8)));
+            Assert.True(WorldGrid.IsSpawnZone(new Cell(8, y, 31)));
+        }
         Assert.All(cells.Where(WorldGrid.IsCore), cell =>
         {
             Assert.InRange(cell.X, 15, 16);

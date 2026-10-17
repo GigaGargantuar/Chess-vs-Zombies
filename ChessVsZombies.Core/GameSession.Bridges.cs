@@ -22,7 +22,8 @@ public sealed partial class GameSession
 
     private void RefreshSpawnCells()
     {
-        // Spawning needs a real empty supported cell, but never a complete route.
+        // Spawning needs an empty cell supported by terrain or the bottom plane,
+        // but never a complete route.
         _spawnCells = FindSpawnCells();
         _spawnWorldRevision = World.Revision;
         _spawnTopologyRevision = _topologyRevision;
@@ -52,7 +53,7 @@ public sealed partial class GameSession
         var frontier = new PriorityQueue<Cell, float>();
         _bridgeRoutes.Clear();
         for (int x = 0; x < WorldGrid.Size; x++)
-            for (int y = 1; y < WorldGrid.Size; y++)
+            for (int y = 0; y < WorldGrid.Size; y++)
                 for (int z = 0; z < WorldGrid.Size; z++)
                 {
                     var cell = new Cell(x, y, z);

@@ -184,6 +184,7 @@ public sealed class ReturningZombieValidationTests
     }
 
     [Theory]
+    [InlineData(ZombieSize.Micro, 2, 52.5f)]
     [InlineData(ZombieSize.Milli, 5, 105)]
     [InlineData(ZombieSize.Standard, 10, 210)]
     [InlineData(ZombieSize.Kilo, 40, 840)]
@@ -213,6 +214,46 @@ public sealed class ReturningZombieValidationTests
             zombie["Armor"]![0]!["Hp"] = armorHp + .01f;
             File.WriteAllText(path, document.ToJsonString());
             Assert.False(SaveStore.TryLoad(path, out _, out _));
+        });
+    }
+
+    [Fact]
+    public void ReturningMicroRestoresItsSizeAndIndependentArmorDurabilityAfterSaving()
+    {
+        WithSavePath(path =>
+        {
+            SaveStore.Save(new GameSession(), path);
+            var document = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            var saved = ValidKilo();
+            saved.Size = ZombieSize.Micro;
+            saved.IsBoss = false;
+            saved.BodyHp = 1.25f;
+            saved.OriginalBudgetCost = 212;
+            saved.CarriesBucket = false;
+            saved.Buckets.Clear();
+            saved.HeldBlocks.Clear();
+            foreach (var armor in saved.Armor) armor.Hp = 30.25f;
+            document["ReturningZombies"] = new JsonArray(JsonSerializer.SerializeToNode(saved, JsonOptions));
+            File.WriteAllText(path, document.ToJsonString());
+
+            Assert.True(SaveStore.TryLoad(path, out var restored, out var error), error);
+            SaveStore.Save(restored!, path);
+            Assert.True(SaveStore.TryLoad(path, out var reloaded, out error), error);
+            Assert.True(reloaded!.StartLevel());
+            Assert.True((bool)typeof(GameSession).GetMethod("Spawn", System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic)!.Invoke(reloaded, [reloaded.Waves[0]])!);
+
+            var micro = Assert.Single(reloaded.Zombies);
+            Assert.Equal(ZombieSize.Micro, micro.Size);
+            Assert.Equal(1.25f, micro.BodyHp);
+            Assert.Equal(2, micro.MaxBodyHp);
+            Assert.Equal(212, micro.MaxHp);
+            Assert.All(micro.ArmorPieces, armor =>
+            {
+                Assert.Equal(30.25f, armor.Hp);
+                Assert.Equal(52.5f, armor.MaxHp);
+            });
+            Assert.Equal(.25f, micro.BodyScale);
         });
     }
 

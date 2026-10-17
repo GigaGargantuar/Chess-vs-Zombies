@@ -382,8 +382,8 @@ public static class SaveStore
         if (state.Excavated.Count > 16 * WorldGrid.Size * WorldGrid.Size ||
             state.DamagedTerrain?.Count > (state.Version >= 8 ? WorldGrid.Size : 16) * WorldGrid.Size * WorldGrid.Size ||
             state.TerrainPlacements?.Count > WorldGrid.Size * WorldGrid.Size * WorldGrid.Size ||
-            state.Barriers.Count > (state.Version >= 7 ? 30 * 31 * 30 : state.Version >= 6 ? 8 * 20 * 8 : 8 * 8 * 8) ||
-            state.Turrets.Count > (state.Version >= 6 ? 30 * 31 * 30 : 30 * 30 * 30))
+            state.Barriers.Count > (state.Version >= 7 ? 30 * WorldGrid.Size * 30 : state.Version >= 6 ? 8 * 20 * 8 : 8 * 8 * 8) ||
+            state.Turrets.Count > (state.Version >= 6 ? 30 * WorldGrid.Size * 30 : 30 * 30 * 30))
             throw new InvalidDataException("A saved collection exceeds the battlefield's capacity.");
 
         var economy = new Economy();
@@ -541,15 +541,15 @@ public static class SaveStore
             bool giant = zombie.Size is ZombieSize.Kilo or ZombieSize.Mega;
             int blockCapacity = zombie.Size == ZombieSize.Mega ? 4 : zombie.Size == ZombieSize.Kilo ? 2 : 1;
             float offsetLimit = zombie.Size == ZombieSize.Mega ? 1 : .5f;
-            float multiplier = zombie.Size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
-            if (!float.IsFinite(zombie.BodyHp) || zombie.BodyHp <= 0 || zombie.BodyHp > Balance.ZombieHp * multiplier)
+            var shape = new Zombie { Size = zombie.Size };
+            if (!float.IsFinite(zombie.BodyHp) || zombie.BodyHp <= 0 || zombie.BodyHp > shape.MaxBodyHp)
                 throw new InvalidDataException("A returning zombie has invalid body HP.");
 
             var slots = new HashSet<ArmorSlot>();
             if (zombie.Armor.Count > 4) throw new InvalidDataException("A returning zombie has too many armor pieces.");
             foreach (var armor in zombie.Armor)
                 if (armor is null || !Enum.IsDefined(armor.Slot) || !Enum.IsDefined(armor.Tier) || !slots.Add(armor.Slot) ||
-                    !float.IsFinite(armor.Hp) || armor.Hp <= 0 || armor.Hp > Balance.GearHp(armor.Tier) * multiplier ||
+                    !float.IsFinite(armor.Hp) || armor.Hp <= 0 || armor.Hp > Balance.GearHp(armor.Tier) * shape.ArmorDurabilityMultiplier ||
                     !float.IsFinite(armor.HeatProtectionRemaining) || armor.HeatProtectionRemaining < 0 ||
                     armor.HeatProtectionRemaining > (armor.Tier == GearTier.Osmium ? 10 : 0))
                     throw new InvalidDataException("A returning zombie has invalid armor durability or heat protection.");
@@ -588,13 +588,13 @@ public static class SaveStore
     }
 
     private static bool IsValidTurretCell(Cell cell, int version) => version >= 6
-        ? cell.X is >= 1 and <= 30 && cell.Y is >= 0 and <= 30 && cell.Z is >= 1 and <= 30
+        ? cell.X is >= 1 and <= 30 && cell.Y is >= 0 and < WorldGrid.Size && cell.Z is >= 1 and <= 30
         : version == 1
             ? cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30
-            : WorldGrid.IsTurretZone(cell);
+            : cell.X is >= 1 and <= 30 && cell.Y is >= 1 and <= 30 && cell.Z is >= 1 and <= 30 && !WorldGrid.IsBuildZone(cell);
 
     private static bool IsValidBarrierCell(Cell cell, int version) => version >= 7
-        ? cell.X is >= 1 and <= 30 && cell.Y is >= 0 and <= 30 && cell.Z is >= 1 and <= 30
+        ? cell.X is >= 1 and <= 30 && cell.Y is >= 0 and < WorldGrid.Size && cell.Z is >= 1 and <= 30
         : version >= 6
             ? cell.X is >= 12 and <= 19 && cell.Y is >= 0 and <= 19 && cell.Z is >= 12 and <= 19
             : WorldGrid.IsBuildZone(cell);

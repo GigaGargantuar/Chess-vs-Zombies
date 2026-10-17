@@ -94,6 +94,7 @@ public class ZombieBridgeTests
         // the core island and is too wide for the existing one-cell gap jump.
         Excavate(game, cell => cell.Y < 16 && cell.X is >= 10 and <= 21 && cell.Z is >= 10 and <= 21 &&
             (cell.X is < 13 or > 18 || cell.Z is < 13 or > 18));
+        Excavate(game, cell => cell.Y < 15 && cell.X is >= 13 and <= 18 && cell.Z is >= 13 and <= 18);
 
         Assert.True(game.StartLevel(), game.Message);
         game.Update(.05f);
@@ -105,15 +106,18 @@ public class ZombieBridgeTests
         {
             Assert.True(zombie.Hp > 0);
             Assert.Equal(1, zombie.CarriedBlocks);
-            Assert.True(zombie.Cell.X < 10 || zombie.Cell.X > 21 || zombie.Cell.Z < 10 || zombie.Cell.Z > 21);
+            Assert.True(WorldGrid.IsSpawnZone(zombie.Cell));
+            Assert.Equal(Material.Air, game.World.GetMaterial(zombie.Cell));
+            Assert.True(game.World.HasSupport(zombie.Cell));
         });
     }
 
     [Fact]
-    public void AnEmptySpawnShellWaitsWithoutUsingItsQuotaAndRefreshesWhenSupportAppears()
+    public void AnOccupiedSpawnShellWaitsWithoutUsingItsQuotaAndRefreshesWhenACellOpens()
     {
         var game = NewSession();
-        Excavate(game, cell => cell.Y < 16 && (cell.X is 0 or 31 || cell.Z is 0 or 31));
+        foreach (var cell in AllCells().Where(cell => cell.Y >= 16 && WorldGrid.IsSpawnZone(cell)))
+            Assert.True(PlaceNatural(game.World)(cell, Material.Dirt));
 
         Assert.True(game.StartLevel(), game.Message);
         game.Update(.5f);
@@ -123,14 +127,14 @@ public class ZombieBridgeTests
         Assert.Equal(0, Assert.Single(game.Waves).Spawned);
         Assert.Equal(1, game.LevelNumber);
 
-        var support = new Cell(0, 15, 8);
-        Assert.True(PlaceNatural(game.World)(support, Material.Dirt));
+        var opening = new Cell(0, 16, 8);
+        Excavate(game, cell => cell == opening);
         game.Update(.2f);
 
         Assert.Equal(1, Assert.Single(game.Waves).Spawned);
         var spawned = Assert.Single(game.Zombies);
         Assert.True(spawned.Hp > 0);
-        Assert.Equal(new Cell(0, 16, 8), spawned.Cell);
+        Assert.Equal(opening, spawned.Cell);
         Assert.Equal(1, spawned.CarriedBlocks);
     }
 
@@ -312,8 +316,13 @@ public class ZombieBridgeTests
         }
     }
 
-    private static void ExcavateMoat(GameSession game, int firstX, int lastX) =>
+    private static void ExcavateMoat(GameSession game, int firstX, int lastX)
+    {
         Excavate(game, cell => cell.X >= firstX && cell.X <= lastX && cell.Y < 16);
+        // Suspend the far bank from the core, leaving no climb from the usable
+        // bottom plane. A real bridge is still necessary at the surface.
+        Excavate(game, cell => cell.X > lastX && cell.Y < 15);
+    }
 
     private static void Excavate(GameSession game, Func<Cell, bool> include)
     {

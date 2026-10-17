@@ -68,6 +68,10 @@ public class SpentBuilderNavigationTests
         Assert.Equal(ownFloor, Assert.Single(ChangedTerrain(game.World, initialTerrain)));
         AdvanceUntil(game, 10, () => At(builder, ownStand));
         Assert.True(At(builder, ownStand), $"Builder never walked onto its own block: {builder.Position}.");
+        // A real carrier is preparing the next placement, so the army has
+        // useful work and the spent unit need not begin a resupply journey.
+        var firstCarrier = AddCarrier(game, bank, -1);
+        firstCarrier.Cooldown = 100;
         bool steppedDown = false;
 
         // The optimistic bridge route wants another unsupported floor straight
@@ -95,7 +99,7 @@ public class SpentBuilderNavigationTests
 
         // Actual later carriers extend the upper bridge. Their new support must
         // invalidate the waiting builder's decision and make the real route usable.
-        var firstCarrier = AddCarrier(game, bank, -1);
+        firstCarrier.Cooldown = 0;
         AdvanceUntil(game, 15, () => firstCarrier.CarriedBlocks == 0);
         Assert.Equal(0, firstCarrier.CarriedBlocks);
         Assert.Equal(2, ChangedTerrain(game.World, initialTerrain).Length);
@@ -134,9 +138,21 @@ public class SpentBuilderNavigationTests
             for (int y = 0; y < 16; y++)
                 for (int z = 0; z < WorldGrid.Size; z++)
                 {
-                    bool shelfColumn = y <= 14 && (x == 9 && z is 16 or 17 || x == 10 && z == 17);
-                    if (!shelfColumn) Assert.True(dig(new Cell(x, y, z)));
+                    bool shelfFloor = y == 14 && (x == 9 && z is 16 or 17 || x == 10 && z == 17);
+                    if (!shelfFloor) Assert.True(dig(new Cell(x, y, z)));
                 }
+        // A single pillar grounds the outer slab without forming a walkable
+        // staircase to the bottom plane. The shelf hangs from its one side stub.
+        for (int x = 0; x <= 8; x++)
+            for (int y = 0; y < 15; y++)
+                for (int z = 0; z < WorldGrid.Size; z++)
+                    if (!(x == 0 && z == 0 || x == 8 && y == 14 && z == 16))
+                        Assert.True(dig(new Cell(x, y, z)));
+        // Keep the core-connected far bank suspended above the usable bottom
+        // plane, so its surface still requires the later carriers' bridge.
+        for (int x = 13; x < WorldGrid.Size; x++)
+            for (int y = 0; y < 15; y++)
+                for (int z = 0; z < WorldGrid.Size; z++) Assert.True(dig(new Cell(x, y, z)));
 
         // This bank wall makes the first bridge block the shortest initial
         // approach, while leaving the lower side shelf accessible from that block.

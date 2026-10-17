@@ -111,6 +111,7 @@ public sealed partial class GameSession
         ResetBridges();
         ResetSpentRoutes();
         ResetCoverBehavior();
+        ResetMicroBehavior();
         ResetBucketBehavior();
         ResetKilos();
         ResetMegas();
@@ -161,8 +162,8 @@ public sealed partial class GameSession
         foreach (var turret in Turrets)
             if (turret.Hp > 0) _simulationTurretsByCell.TryAdd(turret.Cell, turret);
     }
-    public bool HasTowerSupport(Cell cell) => WorldGrid.IsInside(cell) && cell.Y > 0 &&
-        (World.GetMaterial(cell + new Cell(0, -1, 0)) != Material.Air || TrySelectTurret(cell + new Cell(0, -1, 0)) != null);
+    public bool HasTowerSupport(Cell cell) => WorldGrid.IsInside(cell) && (cell.Y == 0 ||
+        World.GetMaterial(cell + new Cell(0, -1, 0)) != Material.Air || TrySelectTurret(cell + new Cell(0, -1, 0)) != null);
 
     public bool IsOccupiedByZombie(Cell cell)
     {
@@ -578,6 +579,19 @@ public sealed partial class GameSession
 
         if (_navigationRevision != _topologyRevision || _navigationWorldRevision != World.Revision) RebuildNavigation();
         using (Profile?.Measure("Turrets")) UpdateTurrets(dt);
+        // Micros see newly launched bullets before those bullets advance. Other
+        // zombies retain the existing projectile-before-movement ordering.
+        using (Profile?.Measure("MicroMovement"))
+            foreach (var zombie in Zombies.Where(static zombie => zombie.BodyHp > 0 && zombie.Size == ZombieSize.Micro).ToArray())
+            {
+                UpdateLiquidExposure(zombie, dt);
+                if (zombie.BodyHp > 0)
+                {
+                    var origin = zombie.Position;
+                    UpdateZombie(zombie, dt);
+                    if (zombie.BodyHp > 0 && zombie.Position != origin) MicroPassingAttack(zombie, origin, zombie.Position);
+                }
+            }
         using (Profile?.Measure("Projectiles")) UpdateProjectiles(dt);
         using (Profile?.Measure("Retreat")) UpdateRetreatBehavior(dt);
         using (Profile?.Measure("CoverGroups")) UpdateCoverGroups(dt);
@@ -585,12 +599,12 @@ public sealed partial class GameSession
         // grab material or launch an ally earlier in this same simulation slice.
         using (Profile?.Measure("LiquidExposure"))
             foreach (var zombie in Zombies)
-                if (zombie.BodyHp > 0) UpdateLiquidExposure(zombie, dt);
+                if (zombie.BodyHp > 0 && zombie.Size != ZombieSize.Micro) UpdateLiquidExposure(zombie, dt);
         using (Profile?.Measure("Kilos")) UpdateKilos(dt);
         using (Profile?.Measure("Megas")) UpdateMegas(dt);
         using (Profile?.Measure("ZombieMovement"))
             foreach (var zombie in Zombies.ToArray())
-                if (zombie.BodyHp > 0) UpdateZombie(zombie, dt);
+                if (zombie.BodyHp > 0 && zombie.Size != ZombieSize.Micro) UpdateZombie(zombie, dt);
         foreach (var zombie in Zombies)
             if (zombie.BodyHp <= 0)
             {
@@ -604,6 +618,7 @@ public sealed partial class GameSession
                 _jumpHeights.Remove(zombie.Id);
                 _liquidDestinations.Remove(zombie.Id);
                 _liquidOrigins.Remove(zombie.Id);
+                _microStates.Remove(zombie.Id);
             }
         Zombies.RemoveAll(zombie => zombie.BodyHp <= 0);
         ResolveBlockDrops();
@@ -725,6 +740,7 @@ public sealed partial class GameSession
         // Another zombie may have destroyed a support or obstruction earlier in
         // this same simulation slice. Do not select a new step from that old field.
         if (_navigationRevision != _topologyRevision || _navigationWorldRevision != World.Revision) RebuildNavigation();
+        AdvanceMicroTimers(zombie, dt);
         zombie.Cooldown = Math.Max(0, zombie.Cooldown - dt);
         UpdateKiloEquipment(zombie, dt);
         if (TryUpdateKiloFlight(zombie, dt)) return;
@@ -741,6 +757,11 @@ public sealed partial class GameSession
         if (!IsZombieRetreating(zombie) && zombie.CarriesBucket && TryBucketAction(zombie)) return;
         if (UpdateBuoyancy(zombie, dt))
         {
+            if (_microStates.TryGetValue(zombie.Id, out var micro))
+            {
+                micro.Jumping = false;
+                micro.VerticalSpeed = 0;
+            }
             Falls.CancelZombie(zombie);
             _fallStartHeights.Remove(zombie.Id);
             _pillarDepartures.Remove(zombie.Id);
@@ -748,6 +769,7 @@ public sealed partial class GameSession
         }
         if (TryUpdatePillarDeparture(zombie, dt)) return;
         if (IsZombieRetreating(zombie) && TryCompleteRetreat(zombie, dt)) return;
+        if (zombie.Size == ZombieSize.Micro && TryUpdateMicro(zombie, dt)) return;
         if (zombie.NextCell is { } movingTo)
         {
             if (!_stepOrigins.TryGetValue(zombie.Id, out var movingFrom))
@@ -1247,9 +1269,13 @@ public sealed partial class GameSession
     {
         // A body can land on a bank while its center is over the hole. Inspect
         // the whole footprint so the descent target agrees with body collision.
-        height = float.NegativeInfinity;
         var body = zombie?.BodyHalfExtents ?? new Vector3(.2f, .39f, .2f);
         float standing = zombie?.StandingHeight ?? .5f;
+        // The bottom of the battlefield is the same resting plane used by
+        // falling defenses. Empty Y=0 cells remain traversable after excavation.
+        height = position.X + body.X > 0 && position.X - body.X < WorldGrid.Size &&
+            position.Z + body.Z > 0 && position.Z - body.Z < WorldGrid.Size &&
+            position.Y - body.Y >= -.00001f ? standing : float.NegativeInfinity;
         for (var x = Math.Max(0, (int)MathF.Floor(position.X - body.X)); x <= Math.Min(WorldGrid.Size - 1, (int)MathF.Ceiling(position.X + body.X) - 1); x++)
             for (var z = Math.Max(0, (int)MathF.Floor(position.Z - body.Z)); z <= Math.Min(WorldGrid.Size - 1, (int)MathF.Ceiling(position.Z + body.Z) - 1); z++)
                 for (var y = Math.Min((int)MathF.Floor(position.Y), WorldGrid.Size - 1); y >= 0; y--)
@@ -1617,7 +1643,7 @@ public sealed partial class GameSession
         static int Index(Cell cell) => (cell.X * WorldGrid.Size + cell.Y) * WorldGrid.Size + cell.Z;
         bool IsNode(Cell cell) => WorldGrid.IsInside(cell) && nodeRows[Index(cell)] != 0;
         for (var x = 0; x < WorldGrid.Size; x++)
-            for (var y = 1; y < WorldGrid.Size; y++)
+            for (var y = 0; y < WorldGrid.Size; y++)
                 for (var z = 0; z < WorldGrid.Size; z++)
                 {
                     var cell = new Cell(x, y, z);
@@ -1831,7 +1857,7 @@ public sealed partial class GameSession
         var cells = new List<Cell>();
         for (var x = 0; x < WorldGrid.Size; x++)
             for (var z = 0; z < WorldGrid.Size; z++)
-                for (var y = 1; y < WorldGrid.Size; y++)
+                for (var y = 0; y < WorldGrid.Size; y++)
                 {
                     var cell = new Cell(x, y, z);
                     if (WorldGrid.IsSpawnZone(cell) && World.HasSupport(cell) && IsEmpty(cell)) cells.Add(cell);
@@ -1858,7 +1884,7 @@ public sealed partial class GameSession
         ? HasGiantGridSupport(cell, zombie.GridFootprint) : zombie?.Size == ZombieSize.Milli
         ? HasMilliGridSupport(cell) : zombie != null
         ? WorldGrid.IsInside(cell) && TrySolidFloor(zombie.StandAt(cell), out var height, zombie) && Math.Abs(height - zombie.StandAt(cell).Y) <= .011f
-        : WorldGrid.IsInside(cell) && (World.IsSolidAt(cell.Center - new Vector3(0, .51f, 0)) ||
+        : WorldGrid.IsInside(cell) && (cell.Y == 0 || World.IsSolidAt(cell.Center - new Vector3(0, .51f, 0)) ||
             cell.Y > 0 && HasLiveIndexedTurret(cell + new Cell(0, -1, 0)));
     private bool IsEmpty(Cell cell) => World.GetMaterial(cell) == Material.Air && TrySelectTurret(cell) == null && Liquids.GetTotalUnits(cell) == 0;
     private bool CanUseTowers() => CanInteractWithTowers || Reject("Retry the level before interacting with towers.");

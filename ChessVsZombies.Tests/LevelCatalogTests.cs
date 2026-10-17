@@ -45,6 +45,43 @@ public class LevelCatalogTests
         Assert.Equal(Enum.GetValues<GearTier>().Length, seenTiers.Count);
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(10)]
+    [InlineData(40)]
+    public void GeneratedRostersIncludeMicrosWithoutAddingFreeSpawns(int level)
+    {
+        var wave = Assert.Single(new LevelCatalog().Get(level).Waves);
+        var normal = wave.Groups.Where(group => !group.IsBoss).ToArray();
+        Assert.Equal(6 + level * 2, normal.Sum(group => group.Count));
+        Assert.Contains(normal, group => group.Size == ZombieSize.Micro);
+        var plan = WaveSpawnPlanner.Plan(wave);
+        Assert.Contains(plan.Groups, group => group.Size == ZombieSize.Micro && !group.IsBoss);
+        Assert.InRange(plan.BudgetSpent, 0, plan.HpBudget);
+        Assert.All(normal.Where(group => group.Size == ZombieSize.Micro), group =>
+            Assert.Equal(2 + (group.Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? Balance.GearHp(group.Tier) : 0),
+                WaveSpawnPlan.BudgetCost(group)));
+    }
+
+    [Theory]
+    [InlineData(GearTier.Wood)]
+    [InlineData(GearTier.Stone)]
+    [InlineData(GearTier.Copper)]
+    [InlineData(GearTier.Iron)]
+    [InlineData(GearTier.Gold)]
+    [InlineData(GearTier.Diamond)]
+    [InlineData(GearTier.Osmium)]
+    public void MicroArmorUsesOneQuarterDurabilityIndependentlyOfItsTwoBodyHp(GearTier tier)
+    {
+        foreach (var kind in Enum.GetValues<ZombieKind>())
+        {
+            var zombie = new Zombie { Kind = kind, Tier = tier, Size = ZombieSize.Micro };
+            Assert.Equal(2, zombie.BodyHp);
+            Assert.All(zombie.ArmorPieces, piece => Assert.Equal(Balance.GearHp(tier) * .25f, piece.Hp));
+            Assert.Equal(zombie.Hp, LevelCatalog.ZombieMaxHp(kind, tier, ZombieSize.Micro));
+        }
+    }
+
     [Fact]
     public void AuthoredMultiwaveLevelsRemainStableWhenAuthoringOrReturnedObjectsChange()
     {

@@ -12,7 +12,7 @@ public sealed partial class GameSession
     {
         if (!CanInteractWithTowers) return "Retry the level before interacting with towers.";
         if (!Enum.IsDefined(kind)) return "Choose a valid piece.";
-        if (!WorldGrid.IsTurretZone(cell)) return "Pieces belong inside the 30-cube zone, outside the entire 8-cube block enclosure.";
+        if (!WorldGrid.IsTurretZone(cell)) return "Pieces belong in the 30-wide, 32-tall area, outside the entire 8-cube block enclosure.";
         if ((!prepareTerrain && World.GetMaterial(cell) != Material.Air) || TrySelectTurret(cell) != null) return "That cell is occupied.";
         if (IsOccupiedByZombie(cell)) return "A zombie is occupying that cell.";
         if (!prepareTerrain && !HasTowerSupport(cell)) return "Pieces need a solid block or another living tower directly below them.";
@@ -30,7 +30,7 @@ public sealed partial class GameSession
     {
         if (Phase != GamePhase.Building) return "Terrain changes and supply purchases are available between levels.";
         if (!Balance.IsTerrainMaterial(material)) return "Choose a terrain material from inventory.";
-        if (!WorldGrid.IsFortificationZone(cell)) return "Blocks can be built in the core enclosure and turret area, outside the core and spawn shell.";
+        if (!WorldGrid.IsFortificationZone(cell)) return "Blocks belong in the 30-wide, 32-tall area, outside the core.";
         if (World.GetMaterial(cell) != Material.Air || TrySelectTurret(cell) != null) return "That cell is occupied.";
         if (!World.HasOrthogonalBlockSupport(cell)) return "Blocks need a supporting block on one of their six faces.";
         if (Inventory.GetCount(material) == 0) return $"No {material.ToString().ToLowerInvariant()} blocks available. Excavate some first.";

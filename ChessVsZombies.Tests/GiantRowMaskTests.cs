@@ -50,14 +50,14 @@ public sealed class GiantRowMaskTests
         Span<int> masked = stackalloc int[128];
         int edge = WorldGrid.Size - footprint;
         foreach (int x in new[] { 0, 1, 14, edge - 1, edge })
-            foreach (int y in new[] { 1, 16, edge })
+            foreach (int y in new[] { 0, 1, 16, edge })
                 foreach (int z in new[] { 0, 1, 14, edge - 1, edge })
                     foreach (var direction in directions)
                         for (int dy = -1; dy <= 1; dy++)
                         {
                             var from = new Cell(x, y, z);
                             var to = from + direction + new Cell(0, dy, 0);
-                            if (to.X < 0 || to.Y < 1 || to.Z < 0 || to.X > edge || to.Y > edge || to.Z > edge) continue;
+                            if (to.X < 0 || to.Y < 0 || to.Z < 0 || to.X > edge || to.Y > edge || to.Z > edge) continue;
                             var waypoint = dy > 0 ? from + new Cell(0, 1, 0) : dy < 0 ? to + new Cell(0, 1, 0) : to;
                             var firstMin = new Cell(Math.Min(from.X, waypoint.X), Math.Min(from.Y, waypoint.Y), Math.Min(from.Z, waypoint.Z));
                             var firstMax = new Cell(Math.Max(from.X, waypoint.X) + footprint,

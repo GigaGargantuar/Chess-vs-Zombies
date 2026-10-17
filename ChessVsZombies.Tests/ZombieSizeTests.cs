@@ -18,16 +18,18 @@ public sealed class ZombieSizeTests
     public void SizesScaleActualBodyAndEveryGearPieceWithoutChangingWeaponStatus(ZombieSize size, ZombieKind kind)
     {
         var zombie = new Zombie { Size = size, Kind = kind, Tier = GearTier.Osmium };
-        var healthMultiplier = size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
-        var bodyScale = size switch { ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
+        var healthMultiplier = size switch { ZombieSize.Micro => .2f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
+        var armorMultiplier = size == ZombieSize.Micro ? .25f : healthMultiplier;
+        var bodyScale = size switch { ZombieSize.Micro => .25f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
         bool armored = kind is ZombieKind.Armored or ZombieKind.ArmedArmored;
 
         Assert.Equal(10 * healthMultiplier, zombie.BodyHp);
         Assert.Equal(zombie.IsGiant ? new Vector3(bodyScale * .5f) : new Vector3(.2f, .39f, .2f) * bodyScale, zombie.BodyHalfExtents);
         Assert.Equal(.5f * bodyScale, zombie.StandingHeight);
         Assert.Equal(armored ? 4 : 0, zombie.ArmorPieces.Count);
-        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(210 * healthMultiplier, piece.Hp));
-        Assert.Equal((10 + (armored ? 840 : 0)) * healthMultiplier, zombie.Hp);
+        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(210 * armorMultiplier, piece.Hp));
+        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(piece.Hp, piece.MaxHp));
+        Assert.Equal(10 * healthMultiplier + (armored ? 840 * armorMultiplier : 0), zombie.Hp);
         Assert.Equal(zombie.Hp, zombie.MaxHp);
         Assert.Equal(zombie.MaxHp, LevelCatalog.ZombieMaxHp(kind, GearTier.Osmium, size));
         Assert.Equal(kind is ZombieKind.Armed or ZombieKind.ArmedArmored, zombie.HasWeapon);
@@ -37,7 +39,7 @@ public sealed class ZombieSizeTests
         zombie.Hp -= 1;
         zombie.Hp = zombie.MaxHp;
         Assert.Equal(10 * healthMultiplier, zombie.BodyHp);
-        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(210 * healthMultiplier, piece.Hp));
+        Assert.All(zombie.ArmorPieces, piece => Assert.Equal(210 * armorMultiplier, piece.Hp));
     }
 
     [Theory]
@@ -49,7 +51,7 @@ public sealed class ZombieSizeTests
         zombie.NextCell = new Cell(6, 16, 5);
         var start = zombie.Position;
         float weaponSpeed = kind is ZombieKind.Armed or ZombieKind.ArmedArmored ? .85f : 1.275f;
-        float sizeSpeed = size switch { ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, ZombieSize.Mega => .5f, _ => 1 };
+        float sizeSpeed = size switch { ZombieSize.Micro => 3, ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, ZombieSize.Mega => .5f, _ => 1 };
 
         // Keep this interval within one real walking step, avoiding the separate
         // grid decision slice at a completed tile boundary.
@@ -62,6 +64,7 @@ public sealed class ZombieSizeTests
     }
 
     [Theory]
+    [InlineData(ZombieSize.Micro, 16.125f)]
     [InlineData(ZombieSize.Milli, 16.25f)]
     [InlineData(ZombieSize.Standard, 16.5f)]
     [InlineData(ZombieSize.Kilo, 17f)]
@@ -96,6 +99,33 @@ public sealed class ZombieSizeTests
         else Assert.Equal(spawnCell, zombie.Cell);
         Assert.True(game.World.IsSolidAt(zombie.Position - Vector3.UnitY * (zombie.StandingHeight + .01f)));
         Assert.False(game.World.IsSolidAt(zombie.Position - zombie.BodyHalfExtents));
+    }
+
+    [Fact]
+    public void NewSizePreservesThePersistedNumericValuesOfExistingSizes()
+    {
+        Assert.Equal(0, (int)ZombieSize.Standard);
+        Assert.Equal(1, (int)ZombieSize.Milli);
+        Assert.Equal(2, (int)ZombieSize.Kilo);
+        Assert.Equal(3, (int)ZombieSize.Mega);
+        Assert.Equal(4, (int)ZombieSize.Micro);
+    }
+
+    [Theory]
+    [InlineData(ZombieKind.Basic)]
+    [InlineData(ZombieKind.ArmedArmored)]
+    public void OnlyMicroDashStateDoublesTheMatchingSizedMovementSpeed(ZombieKind kind)
+    {
+        var micro = new Zombie { Kind = kind, Size = ZombieSize.Micro };
+        var regular = new Zombie { Kind = kind };
+        Assert.Equal(regular.MovementSpeed * 3, micro.MovementSpeed, 5);
+
+        typeof(Zombie).GetProperty(nameof(Zombie.MicroDashRemaining))!.SetValue(micro, 1f);
+        typeof(Zombie).GetProperty(nameof(Zombie.MicroDashRemaining))!.SetValue(regular, 1f);
+
+        Assert.Equal(regular.MovementSpeed * 6, micro.MovementSpeed, 5);
+        typeof(Zombie).GetProperty(nameof(Zombie.MicroDashRemaining))!.SetValue(micro, 0f);
+        Assert.Equal(regular.MovementSpeed * 3, micro.MovementSpeed, 5);
     }
 
     [Theory]

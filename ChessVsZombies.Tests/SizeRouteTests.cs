@@ -84,6 +84,7 @@ public class SizeRouteTests
     }
 
     [Theory]
+    [InlineData(ZombieSize.Micro)]
     [InlineData(ZombieSize.Milli)]
     [InlineData(ZombieSize.Kilo)]
     public void ASizeSpecificFieldReachesTheCoreWithoutPuttingTheBodyInsideIt(ZombieSize size)
@@ -105,6 +106,31 @@ public class SizeRouteTests
         }
         AssertAtCore(zombie, current);
         Assert.True(moves > 0);
+    }
+
+    [Fact]
+    public void MicroRoutesPriceAnOverheadCrustUsingItsOwnShorterBody()
+    {
+        var game = new GameSession();
+        var from = new Cell(9, 16, 8);
+        var to = new Cell(10, 16, 8);
+        var add = typeof(WorldGrid).GetMethod("AddObsidian", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .CreateDelegate<Func<Cell, int, CrustFace, int, bool>>(game.World);
+        Assert.True(add(to, 7, CrustFace.Top, 0));
+        var occupied = new byte[WorldGrid.Size * WorldGrid.Size * WorldGrid.Size];
+        occupied[(to.X * WorldGrid.Size + to.Y) * WorldGrid.Size + to.Z] = 3;
+        var cost = typeof(GameSession).GetMethod("TrySmallGridStepCost", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        foreach (var size in new[] { ZombieSize.Micro, ZombieSize.Milli })
+        {
+            var cachedCosts = new float[occupied.Length];
+            Array.Fill(cachedCosts, float.NaN);
+            object?[] arguments = [from, to, occupied, cachedCosts, 1, new Zombie { Size = size }, 0f];
+
+            Assert.True((bool)cost.Invoke(game, arguments)!);
+
+            if (size == ZombieSize.Micro) Assert.Equal(1f, (float)arguments[^1]!);
+            else Assert.True((float)arguments[^1]! > 1);
+        }
     }
 
     [Fact]
