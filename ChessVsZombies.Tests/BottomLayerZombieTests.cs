@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Collections;
 using System.Reflection;
 using ChessVsZombies.Core;
 using Xunit;
@@ -25,9 +26,13 @@ public sealed class BottomLayerZombieTests
         PrepareTopAnchors(game, shape);
         Assert.True(game.StartLevel());
         var anchor = new Cell(0, 0, 8);
-        // Inspect every real candidate before selecting a known valid side
-        // anchor, including supported top anchors and an excavated void floor.
+        // Inspect every real candidate, including supported top anchors and an
+        // excavated void floor. Ordinary slots already hold their chosen cell;
+        // returning zombies still use the live candidate list.
         var candidates = (List<Cell>)Invoke(game, "FindSizedSpawnCells", shape)!;
+        var planned = (Array)((IList)typeof(GameSession).GetField("_standbyWaves",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(game)!)[0]!;
+        var plannedCell = (Cell)planned.GetValue(0)!.GetType().GetProperty("Cell")!.GetValue(planned.GetValue(0)!)!;
         Assert.Contains(anchor, candidates);
         Assert.DoesNotContain(new Cell(8, 0, 8), candidates);
         Assert.Contains(new Cell(0, 0, 6), candidates);
@@ -48,9 +53,10 @@ public sealed class BottomLayerZombieTests
         var zombie = Assert.Single(game.Zombies);
         Assert.Equal(returning ? 500 : 1, zombie.Id);
         Assert.Equal(size, zombie.Size);
-        Assert.Equal(anchor, zombie.Cell);
-        Assert.Equal(zombie.StandAt(anchor), zombie.Position);
-        Assert.Equal(0, zombie.Position.Y - zombie.StandingHeight, 5);
+        var expectedCell = returning ? anchor : plannedCell;
+        Assert.Equal(expectedCell, zombie.Cell);
+        Assert.Equal(zombie.StandAt(expectedCell), zombie.Position);
+        if (returning) Assert.Equal(0, zombie.Position.Y - zombie.StandingHeight, 5);
         Assert.True((bool)Invoke(game, "IsBodyClear", zombie.Position, zombie)!);
         Assert.True((bool)Invoke(game, "HasSolidFooting", zombie.Position, zombie)!);
         Assert.Equal(0, game.PendingReinforcementCount);

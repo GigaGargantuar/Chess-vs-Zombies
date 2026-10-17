@@ -174,7 +174,7 @@ public class LiquidCombatTests
             Waves = [new() { Groups = [new() { Kind = ZombieKind.Armored, Tier = GearTier.Osmium }] },
                 new() { Groups = [new() { Kind = ZombieKind.Basic }] }]
         });
-        var game = new GameSession(levels: levels);
+        var game = new GameSession(1, levels);
         Assert.True(game.StartLevel());
         game.Update(.01f);
         var zombie = Assert.Single(game.Zombies);

@@ -256,6 +256,11 @@ public sealed class MergedLevelPersistenceTests
             game.Update(.01f);
             foreach (var zombie in game.Zombies.ToArray()) game.DamageZombie(zombie, 10000);
         }
+        if (game.Phase == GamePhase.Combat)
+        {
+            StandbyTestSupport.FinishQueuedSlots(game);
+            game.Update(.01f);
+        }
         Assert.Equal(GamePhase.Building, game.Phase);
     }
 

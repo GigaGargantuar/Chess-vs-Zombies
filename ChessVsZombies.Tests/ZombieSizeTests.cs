@@ -80,6 +80,7 @@ public sealed class ZombieSizeTests
         var game = new GameSession(123, levels);
         Assert.True(game.StartLevel());
         var spawnCell = new Cell(0, 16, 8);
+        // Changing the old candidate cache after planning must not move the slot.
         typeof(GameSession).GetField("_spawnCells", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(game, new List<Cell> { spawnCell });
 
         game.Update(.001f);
@@ -96,7 +97,11 @@ public sealed class ZombieSizeTests
             Assert.InRange(max.X, zombie.GridFootprint, WorldGrid.Size);
             Assert.InRange(max.Z, zombie.GridFootprint, WorldGrid.Size);
         }
-        else Assert.Equal(spawnCell, zombie.Cell);
+        else
+        {
+            Assert.True(WorldGrid.IsSpawnZone(zombie.Cell));
+            Assert.True(Vector3.Distance(zombie.StandAt(zombie.Cell), zombie.Position) < .01f);
+        }
         Assert.True(game.World.IsSolidAt(zombie.Position - Vector3.UnitY * (zombie.StandingHeight + .01f)));
         Assert.False(game.World.IsSolidAt(zombie.Position - zombie.BodyHalfExtents));
     }

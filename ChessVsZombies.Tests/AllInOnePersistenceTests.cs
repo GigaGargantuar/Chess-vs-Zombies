@@ -211,6 +211,11 @@ public sealed class AllInOnePersistenceTests
             game.Update(.01f);
             foreach (var zombie in game.Zombies.ToArray()) game.DamageZombie(zombie, 1_000_000, DamageKind.Chemical);
         }
+        if (game.Phase == GamePhase.Combat)
+        {
+            StandbyTestSupport.FinishQueuedSlots(game);
+            game.Update(.01f);
+        }
         Assert.Equal(GamePhase.Building, game.Phase);
     }
 

@@ -55,7 +55,8 @@ public sealed partial class GameSession
                 var endAge = startAge + dt * sample / steps;
                 var to = projectile.GetPositionAt(endAge);
                 if (!ProjectilePointIsFinite(from) || !ProjectilePointIsFinite(to)) { stopped = true; break; }
-                bool hitSomething = FindProjectileImpact(from, to, out var fraction, out var terrain, out var zombie, out var crustFace);
+                bool hitSomething = FindProjectileImpactWithStandby(from, to, out var fraction, out var terrain, out var zombie, out var crustFace,
+                    out var standby);
                 var sampleStart = dt * (sample - 1) / steps;
                 var sampleEnd = dt * sample / steps;
                 bool hitThrown = TryFindMegaFlightImpact(from, to, sampleStart, sampleEnd,
@@ -92,17 +93,23 @@ public sealed partial class GameSession
                 }
                 else if (hitSomething)
                 {
-                    float hpBefore = ProjectileDiagnostics?.CaptureContacts == true ? zombie?.Hp ??
+                    float hpBefore = ProjectileDiagnostics?.CaptureContacts == true ? zombie?.Hp ?? standby?.Hp ??
                         ProjectileTerrainHp(terrain, crustFace) : 0;
+                    float coverBefore = standby?.CoverHp ?? 0;
                     var previousAge = startAge + dt * (sample - 1) / steps;
                     var hitAge = previousAge + (endAge - previousAge) * fraction;
                     if (zombie != null)
                         DamageZombie(zombie, projectile.Damage, projectile.DamageKind, projectile.Kind, projectile.GetTravelDirection(hitAge));
+                    else if (standby != null)
+                        DamageStandby(standby, projectile.Damage, projectile.DamageKind, projectile.Kind,
+                            projectile.GetTravelDirection(hitAge));
                     else if (terrain.HasValue)
                         DamageProjectileTerrain(terrain.Value, projectile.Damage, crustFace);
-                    ProjectileDiagnostics?.Contact(projectile, hitAge, zombie != null ? "body" : terrain.HasValue ? "terrain" : "boundary",
-                        zombie?.Id ?? -1, -1, terrain, crustFace, hpBefore,
-                        ProjectileDiagnostics.CaptureContacts ? zombie?.Hp ?? ProjectileTerrainHp(terrain, crustFace) : 0);
+                    ProjectileDiagnostics?.Contact(projectile, hitAge, zombie != null ? "body" : standby != null
+                        ? coverBefore > 0 ? "standby-cover" : "standby-body" : terrain.HasValue ? "terrain" : "boundary",
+                        zombie?.Id ?? -1, standby?.Slot ?? -1, terrain, crustFace, coverBefore > 0 ? coverBefore : hpBefore,
+                        ProjectileDiagnostics.CaptureContacts ? zombie?.Hp ?? (standby != null
+                            ? coverBefore > 0 ? standby.CoverHp ?? 0 : standby.Hp : ProjectileTerrainHp(terrain, crustFace)) : 0);
                     stopped = true;
                 }
                 from = to;
@@ -134,11 +141,16 @@ public sealed partial class GameSession
     }
 
     private bool FindProjectileImpact(Vector3 from, Vector3 to, out float fraction, out Cell? terrain, out Zombie? zombie, out CrustFace? crustFace)
+        => FindProjectileImpactWithStandby(from, to, out fraction, out terrain, out zombie, out crustFace, out _);
+
+    private bool FindProjectileImpactWithStandby(Vector3 from, Vector3 to, out float fraction, out Cell? terrain, out Zombie? zombie,
+        out CrustFace? crustFace, out StandbySpawn? standby)
     {
         if (ProjectileDiagnostics is { } diagnostics) diagnostics.BodyQueries++;
         terrain = null;
         zombie = null;
         crustFace = null;
+        standby = null;
         fraction = float.PositiveInfinity;
         if (!ProjectilePointIsInside(from)) { fraction = 0; return true; }
         var delta = to - from;
@@ -203,6 +215,12 @@ public sealed partial class GameSession
             if (!intersects || hit >= fraction) continue;
             fraction = hit;
             zombie = candidate;
+            terrain = null;
+            crustFace = null;
+        }
+        if (TryFindStandbyImpact(from, to, ref fraction, out standby))
+        {
+            zombie = null;
             terrain = null;
             crustFace = null;
         }

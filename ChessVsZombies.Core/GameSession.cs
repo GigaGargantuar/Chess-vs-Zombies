@@ -73,6 +73,7 @@ public sealed partial class GameSession
     {
         _seed = seed;
         _random = new Random(seed);
+        _spawnRandom = new Random(seed);
         _levels = levels ?? new LevelCatalog(Path.Combine(AppContext.BaseDirectory, "Levels"));
         Economy = new Economy(seed);
         Liquids = new LiquidSystem(World) { IsTurretCell = cell => TrySelectTurret(cell) != null };
@@ -119,6 +120,7 @@ public sealed partial class GameSession
         ResetRetreatBehavior();
         _returningZombies.Clear();
         _wavePlans.Clear();
+        ResetStandbySpawns();
         _random = new Random(_seed);
         _nextId = 1;
         _topologyRevision++;
@@ -452,6 +454,7 @@ public sealed partial class GameSession
         _previewLevel = Level;
         _nextEncounter = nextEncounter.Level;
         _nextSourceLevelNumbers = nextEncounter.SourceLevels;
+        PrepareStandbySpawns(plans);
         Phase = GamePhase.Combat;
         Message = MergeFiveLevels
             ? $"Levels {LevelNumber}–{EndLevelNumber}: {Level.Name}. Defend the core!"
@@ -558,6 +561,7 @@ public sealed partial class GameSession
 
     private void Step(float dt)
     {
+        ReconcileExternallySkippedSpawns();
         for (var i = 1; i < Waves.Count; i++)
             if (!Waves[i].Started && Waves[i - 1].Started && (Waves[i - 1].DamageTaken >= Waves[i - 1].TotalHp * .5f ||
                 Waves[i - 1].Spawned >= Waves[i - 1].TotalCount && !Zombies.Any(zombie => zombie.BodyHp > 0 && zombie.WaveIndex == i - 1)))
@@ -639,10 +643,12 @@ public sealed partial class GameSession
                 _nextSourceLevelNumbers = [];
             }
             Phase = GamePhase.Defeat;
+            ClearStandbySpawns();
             Message = $"The core fell on level {LevelNumber}. Start a new defense to try again.";
             return;
         }
-        if (Zombies.Count == 0 && Waves.All(wave => wave.Started && wave.Spawned >= wave.TotalCount))
+        if (Zombies.Count == 0 && _livingStandbyCount == 0 &&
+            !_returningZombies.Any(zombie => zombie.TargetLevel == LevelNumber))
         {
             var reward = checked(SurvivorRewardPerTower * Turrets.Count(turret => turret.Hp > 0));
             Economy.Credit(reward);
@@ -656,21 +662,39 @@ public sealed partial class GameSession
             _nextSourceLevelNumbers = [];
             _previewLevel = null;
             Phase = GamePhase.Building;
+            ClearStandbySpawns();
             Message = $"Level complete! {reward} currency from surviving pieces. Prepare level {LevelNumber}.";
         }
     }
 
     private bool Spawn(WaveState wave)
     {
+        ReconcileExternallySkippedSpawns();
         if (_spawnWorldRevision != World.Revision || _spawnTopologyRevision != _topologyRevision || _spawnLiquidRevision != Liquids.Revision)
             RefreshSpawnCells();
         if (TrySpawnReinforcement(wave, out bool reinforcementPending)) return true;
         if (reinforcementPending) return false;
-        var group = WaveSpawnPlanner.SelectGroup(_wavePlans[wave.Index], wave.Spawned - wave.ReinforcementsSpawned);
+        var slot = _standbyWaves[wave.Index][wave.Spawned - wave.ReinforcementsSpawned];
+        var group = slot.Group;
+        if (slot.BodyHp <= 0)
+        {
+            slot.Consumed = true;
+            wave.Spawned++;
+            _processedNormalSlots[wave.Index]++;
+            return true;
+        }
         var shape = new Zombie { Size = group.Size };
-        var available = FindSizedSpawnCells(shape).Where(cell => IsEmpty(cell) && HasZombieSupport(cell, shape) && IsBodyClear(shape.StandAt(cell), shape)).ToArray();
-        if (available.Length == 0) return false;
-        var cell = available[_random.Next(available.Length)];
+        if (!slot.Cell.HasValue)
+        {
+            var available = FindSizedSpawnCells(shape).Where(cell => IsEmpty(cell) && HasZombieSupport(cell, shape) &&
+                IsBodyClear(shape.StandAt(cell), shape)).ToArray();
+            if (available.Length == 0) return false;
+            slot.Cell = available[_spawnRandom.Next(available.Length)];
+            IndexStandby(slot, shape.StandAt(slot.Cell.Value), shape);
+            InvalidateProjectileColliders();
+        }
+        var cell = slot.Cell.Value;
+        if (!IsEmpty(cell) || !HasZombieSupport(cell, shape) || !IsBodyClear(shape.StandAt(cell), shape)) return false;
         var hp = LevelCatalog.ZombieMaxHp(group.Kind, group.Tier, group.Size);
         var zombie = new Zombie
         {
@@ -688,9 +712,24 @@ public sealed partial class GameSession
             OriginalBudgetCost = WaveSpawnPlan.BudgetCost(group),
             Lane = cell.X == 0 ? 0 : cell.X + shape.GridFootprint == WorldGrid.Size ? 1 : cell.Z == 0 ? 2 : 3
         };
+        if (slot.Armor != null || slot.BodyHp < zombie.BodyHp)
+            zombie.RestoreBodyAndArmor(slot.BodyHp, slot.Armor ?? zombie.ArmorPieces);
         zombie.FaceToward(new Vector3(16, zombie.Position.Y, 16) - zombie.Position);
+        if (shape.IsGiant && slot.CoverWasHit)
+        {
+            zombie.CarriedBlocks = 0;
+            if (slot.CoverHp is > 0)
+            {
+                var material = zombie.CarriedBlockMaterial;
+                _kiloBlocks[zombie.Id] = [CreateHeldKiloBlock(zombie, 0, material, slot.CoverHp.Value, false)];
+            }
+        }
         Zombies.Add(zombie);
+        slot.Consumed = true;
+        _livingStandbyCount--;
+        AdvanceStandby(slot);
         wave.Spawned++;
+        _processedNormalSlots[wave.Index]++;
         wave.BudgetSpent += WaveSpawnPlan.BudgetCost(group);
         return true;
     }

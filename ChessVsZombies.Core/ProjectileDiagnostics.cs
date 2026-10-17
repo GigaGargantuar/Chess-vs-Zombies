@@ -5,7 +5,8 @@ public sealed class ProjectileDiagnostics
 {
     private readonly Dictionary<Projectile, int> shotIds = [];
     public bool CaptureContacts { get; init; }
-    public long ForecastRequests, ForecastEvaluations, PendingSorts, BodyQueries, CoverQueries, FlightQueries, Slices;
+    public long ForecastRequests, ForecastEvaluations, PendingSorts, BodyQueries, CoverQueries, FlightQueries,
+        StandbyStackQueries, Slices;
     public int Frame { get; private set; }
     public List<ProjectileContact> Contacts { get; } = [];
 

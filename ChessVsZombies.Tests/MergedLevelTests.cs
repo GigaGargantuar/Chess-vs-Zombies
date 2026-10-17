@@ -503,7 +503,9 @@ public sealed class MergedLevelTests
                 Number = number, Name = $"Small {number}",
                 Waves = [new() { SpawnInterval = spawnInterval, Groups = [new() { Count = zombiesPerWave }] }]
             });
-        return new GameSession(levels: catalog);
+        // Keep this reward/merge fixture free of repeated boundary cells that
+        // can be sealed by the preceding zombie's dropped block.
+        return new GameSession(1, catalog);
     }
 
     private static string PlanSnapshot(WaveSpawnPlan plan) => JsonSerializer.Serialize(new

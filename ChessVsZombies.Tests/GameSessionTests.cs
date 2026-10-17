@@ -40,7 +40,9 @@ public class GameSessionTests
     [Fact]
     public void WaveOverlapUsesTheFullRosterHpBudgetAndStartsTheNextWaveOnce()
     {
-        var game = NewSession(
+        // Use a seed with distinct early boundary positions so this test
+        // isolates wave overlap from a shared cell blocked by a death drop.
+        var game = NewSession(1,
             new WaveDefinition { SpawnInterval = 1, Groups = [new() { Count = 4 }] },
             new WaveDefinition { SpawnInterval = 1, Groups = [new() { Count = 1, Kind = ZombieKind.Armored }] });
         Assert.True(game.StartLevel());
@@ -269,10 +271,13 @@ public class GameSessionTests
     }
 
     private static GameSession NewSession(params WaveDefinition[] waves)
+        => NewSession(12345, waves);
+
+    private static GameSession NewSession(int seed, params WaveDefinition[] waves)
     {
         var levels = new LevelCatalog();
         levels.Set(new LevelDefinition { Number = 1, Name = "Test encounter", Waves = [.. waves] });
-        var game = new GameSession(12345, levels);
+        var game = new GameSession(seed, levels);
         game.Inventory.Add(Material.Dirt, 100); // Isolate combat scenarios from excavation setup.
         return game;
     }
