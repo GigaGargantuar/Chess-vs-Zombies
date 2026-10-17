@@ -73,6 +73,97 @@ public sealed class StandbySpawnTests
     }
 
     [Fact]
+    public void BlockedFirstSlotDoesNotDelayTheNextPositionOrResetItsDeadline()
+    {
+        var game = Battle(new ZombieGroup { Count = 3 }, interval: 1, seed: 1);
+        var slots = Slots(game);
+        Assert.NotEqual(Position(slots[0]), Position(slots[1]));
+        var blocked = Get<Cell?>(slots[0], "Cell")!.Value;
+        Assert.True((bool)Invoke(game.World, "RestoreTerrainPlacement", blocked, Material.Dirt)!);
+        game.Waves[0].SpawnTimer = 1;
+
+        game.Update(1.01f);
+        Assert.Equal(0, game.Waves[0].Spawned);
+        game.Update(.9f);
+        Assert.Equal(0, game.Waves[0].Spawned);
+        game.Update(.11f);
+        Assert.Equal(1, game.Waves[0].Spawned);
+        Assert.Single(game.Zombies);
+        Assert.Equal(Get<Cell?>(slots[1], "Cell"), game.Zombies[0].Cell);
+        float nextDeadline = game.Waves[0].SpawnTimer;
+
+        Assert.True((bool)Invoke(game.World, "Dig", blocked)!);
+        game.Update(.01f);
+        Assert.Equal(2, game.Waves[0].Spawned);
+        Assert.Contains(game.Zombies, zombie => zombie.Cell == blocked);
+        Assert.InRange(game.Waves[0].SpawnTimer, nextDeadline - .011f, nextDeadline - .009f);
+        game.Update(.95f);
+        Assert.Equal(2, game.Waves[0].Spawned);
+        game.Update(.05f);
+        Assert.Equal(3, game.Waves[0].Spawned); // C keeps its original deadline.
+    }
+
+    [Fact]
+    public void MultipleBlockedPositionsWaitIndependently()
+    {
+        var game = Battle(new ZombieGroup { Count = 3 }, interval: 1, seed: 1);
+        var slots = Slots(game);
+        var first = Get<Cell?>(slots[0], "Cell")!.Value;
+        var second = Get<Cell?>(slots[1], "Cell")!.Value;
+        Assert.True((bool)Invoke(game.World, "RestoreTerrainPlacement", first, Material.Dirt)!);
+        Assert.True((bool)Invoke(game.World, "RestoreTerrainPlacement", second, Material.Dirt)!);
+
+        game.Update(2.01f);
+        Assert.Equal(1, game.Waves[0].Spawned);
+        Assert.Equal(Get<Cell?>(slots[2], "Cell"), Assert.Single(game.Zombies).Cell);
+        Assert.True((bool)Invoke(game.World, "Dig", second)!);
+        game.Update(.01f);
+        Assert.Equal(2, game.Waves[0].Spawned);
+        Assert.DoesNotContain(game.Zombies, zombie => zombie.Cell == first);
+        Assert.True((bool)Invoke(game.World, "Dig", first)!);
+        game.Update(.01f);
+        Assert.Equal(3, game.Waves[0].Spawned);
+        Assert.Contains(game.Zombies, zombie => zombie.Cell == first);
+    }
+
+    [Fact]
+    public void DueSlotsAtTheSamePositionKeepTheirStackOrder()
+    {
+        var game = Battle(new ZombieGroup { Count = 2 }, interval: 1);
+        var slots = Slots(game);
+        var cell = Get<Cell?>(slots[0], "Cell")!.Value;
+        Assert.Equal(cell, Get<Cell?>(slots[1], "Cell"));
+        Assert.True((bool)Invoke(game.World, "RestoreTerrainPlacement", cell, Material.Dirt)!);
+        game.Update(1.01f);
+        Assert.Equal(0, game.Waves[0].Spawned);
+
+        Assert.True((bool)Invoke(game.World, "Dig", cell)!);
+        game.Update(.01f);
+        Assert.Equal(2, game.Waves[0].Spawned);
+        Assert.Equal([1, 2], game.Zombies.Select(zombie => zombie.Id).ToArray());
+        Assert.All(game.Zombies, zombie => Assert.Equal(cell, zombie.Cell));
+    }
+
+    [Fact]
+    public void DeadDueSlotStillSeparatesAnOnTimeArrivalBehindABlockedSlot()
+    {
+        var game = Battle(new ZombieGroup { Count = 3 }, interval: 1, seed: 1);
+        var slots = Slots(game);
+        var blocked = Get<Cell?>(slots[0], "Cell")!.Value;
+        Assert.True((bool)Invoke(game.World, "RestoreTerrainPlacement", blocked, Material.Dirt)!);
+        Fire(game, slots[1], 1000000);
+        game.Update(.01f);
+        Assert.Equal(0, game.Waves[0].Spawned);
+        game.Update(.99f);
+        Assert.Equal(1, game.Waves[0].Spawned); // B's empty time slot.
+        Assert.Empty(game.Zombies);
+        game.Update(1f);
+        Assert.Equal(2, game.Waves[0].Spawned); // C arrives while A still waits.
+        Assert.Equal(1, game.LivingStandbyCount);
+        Assert.Equal(GamePhase.Combat, game.Phase);
+    }
+
+    [Fact]
     public void DeadScheduledSlotsKeepTheirIntervalsAndLivingTailPreventsEarlyClear()
     {
         var game = Battle(new ZombieGroup { Count = 4 }, interval: 1, seed: 1);
@@ -126,7 +217,7 @@ public sealed class StandbySpawnTests
     }
 
     [Fact]
-    public void ArmoredGiantNeedsLaterBulletsForEachRemainingShieldAndItsBody()
+    public void ArmoredGiantBlockConsumesItsHitThenWearableArmorUsesOrdinaryDamageRules()
     {
         var game = Battle(new ZombieGroup { Count = 1, Kind = ZombieKind.Armored,
             Tier = GearTier.Iron, Size = ZombieSize.Kilo, IsBoss = true });
@@ -134,14 +225,25 @@ public sealed class StandbySpawnTests
         float original = Hp(slot);
         Fire(game, slot, 1000000); // Carried iron block.
         Assert.Equal(original, Hp(slot));
-        for (int piece = 0; piece < 4; piece++)
-        {
-            Fire(game, slot, 1000000);
-            Assert.Equal(original - (piece + 1) * Balance.GearHp(GearTier.Iron) * 4, Hp(slot));
-        }
-        Assert.Equal(40, Hp(slot));
-        Fire(game, slot, 1);
-        Assert.Equal(39, Hp(slot));
+        Fire(game, slot, Balance.GearHp(GearTier.Iron) * 4 + 1);
+        Assert.Equal(original - 201, Hp(slot)); // Shield breaks; one point reaches the chestplate.
+        Fire(game, slot, 1000000);
+        Assert.Equal(0, Hp(slot)); // Ordinary armor can pass remaining damage to the body.
+    }
+
+    [Fact]
+    public void ArmoredGiantActivatesWithItsDamagedWearableArmorAfterCoverBreaks()
+    {
+        var game = Battle(new ZombieGroup { Count = 1, Kind = ZombieKind.Armored,
+            Tier = GearTier.Iron, Size = ZombieSize.Kilo, IsBoss = true });
+        var slot = Assert.Single(Slots(game));
+        Fire(game, slot, 1000000); // Break only the carried block.
+        Fire(game, slot, 3);
+        Assert.True((bool)Invoke(game, "Spawn", game.Waves[0])!);
+        var giant = Assert.Single(game.Zombies);
+        Assert.Equal(40, giant.BodyHp);
+        Assert.Equal(197, giant.ArmorPieces.Single(piece => piece.Slot == ArmorSlot.Shield).Hp);
+        Assert.Equal(0, giant.CarriedBlocks);
     }
 
     [Fact]
@@ -197,6 +299,40 @@ public sealed class StandbySpawnTests
         Fire(game, first, 1);
         Assert.True(game.ProjectileDiagnostics!.StandbyStackQueries < 1000);
         Assert.Equal(10000, game.LivingStandbyCount);
+    }
+
+    [Fact]
+    public void CachedProjectileForecastIsReevaluatedWhenQueueTargetOrCoverChanges()
+    {
+        var death = Battle(new ZombieGroup { Count = 1 });
+        var deadSlot = Assert.Single(Slots(death));
+        AssertForecastInvalidated(death, deadSlot, () => Invoke(death, "DamageStandby", deadSlot,
+            1000000f, DamageKind.Chemical, ShotKind.Pellet, Vector3.UnitX));
+
+        var activation = Battle(new ZombieGroup { Count = 1 });
+        var arriving = Assert.Single(Slots(activation));
+        AssertForecastInvalidated(activation, arriving, () => Invoke(activation, "Spawn", activation.Waves[0]));
+
+        var cover = Battle(new ZombieGroup { Count = 1, Size = ZombieSize.Kilo, IsBoss = true });
+        var shielded = Assert.Single(Slots(cover));
+        AssertForecastInvalidated(cover, shielded, () => Invoke(cover, "DamageStandby", shielded,
+            1000000f, DamageKind.Pierce, ShotKind.Pellet, Vector3.UnitX));
+    }
+
+    private static void AssertForecastInvalidated(GameSession game, object slot, Action change)
+    {
+        var shot = new Projectile { Origin = Origin(slot), Target = Position(slot), Damage = 1,
+            Kind = ShotKind.Pellet, Duration = .05f };
+        game.Projectiles.Add(shot);
+        Invoke(game, "BeginMegaInterceptionFrame", .05f);
+        Invoke(game, "NextMegaInterceptionTime", shot, .05f);
+        long evaluations = game.ProjectileDiagnostics!.ForecastEvaluations;
+        Invoke(game, "NextMegaInterceptionTime", shot, .05f);
+        Assert.Equal(evaluations, game.ProjectileDiagnostics.ForecastEvaluations);
+        change();
+        Invoke(game, "NextMegaInterceptionTime", shot, .05f);
+        Assert.Equal(evaluations + 1, game.ProjectileDiagnostics.ForecastEvaluations);
+        Invoke(game, "EndMegaInterceptionFrame");
     }
 
     private static GameSession Battle(ZombieGroup group, float interval = 10, int seed = 12345)

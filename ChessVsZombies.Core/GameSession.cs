@@ -572,11 +572,16 @@ public sealed partial class GameSession
 
         foreach (var wave in Waves)
         {
-            if (!wave.Started || wave.Spawned >= wave.TotalCount) continue;
+            if (!wave.Started) continue;
+            RetryWaitingStandby(wave);
+            if (wave.Spawned >= wave.TotalCount) continue;
             wave.SpawnTimer -= dt;
             while (wave.SpawnTimer <= 0 && wave.Spawned < wave.TotalCount)
             {
-                if (!Spawn(wave)) { wave.SpawnTimer = .1f; break; }
+                if (TrySpawnReinforcement(wave, out bool reinforcementPending))
+                    _internalWaveSpawned[wave.Index]++;
+                else if (reinforcementPending) { wave.SpawnTimer = .1f; break; }
+                else if (!ScheduleNextStandby(wave)) break;
                 wave.SpawnTimer += Level.Waves[wave.Index].SpawnInterval;
             }
         }
@@ -672,20 +677,34 @@ public sealed partial class GameSession
         ReconcileExternallySkippedSpawns();
         if (_spawnWorldRevision != World.Revision || _spawnTopologyRevision != _topologyRevision || _spawnLiquidRevision != Liquids.Revision)
             RefreshSpawnCells();
-        if (TrySpawnReinforcement(wave, out bool reinforcementPending)) return true;
-        if (reinforcementPending) return false;
-        var slot = _standbyWaves[wave.Index][wave.Spawned - wave.ReinforcementsSpawned];
-        var group = slot.Group;
-        if (slot.BodyHp <= 0)
+        if (TrySpawnReinforcement(wave, out bool reinforcementPending))
         {
-            slot.Consumed = true;
-            wave.Spawned++;
-            _processedNormalSlots[wave.Index]++;
+            _internalWaveSpawned[wave.Index]++;
             return true;
         }
+        if (reinforcementPending) return false;
+        var waiting = _waitingStandby[wave.Index];
+        if (waiting.Count > 0) return TryActivateStandby(waiting[0], wave);
+        AdvanceScheduledCursor(wave.Index);
+        var slots = _standbyWaves[wave.Index];
+        if (_scheduledNormalSlots[wave.Index] >= slots.Length) return false;
+        var slot = slots[_scheduledNormalSlots[wave.Index]];
+        if (slot.BodyHp > 0 && !TryActivateStandby(slot, wave)) return false;
+        _scheduledNormalSlots[wave.Index]++;
+        slot.Due = true;
+        if (!slot.Consumed) CompleteStandbySlot(slot, wave);
+        return true;
+    }
+
+    private bool TryActivateStandby(StandbySpawn slot, WaveState wave)
+    {
+        if (slot.Consumed || slot.BodyHp <= 0) return false;
+        var group = slot.Group;
         var shape = new Zombie { Size = group.Size };
         if (!slot.Cell.HasValue)
         {
+            if (_spawnWorldRevision != World.Revision || _spawnTopologyRevision != _topologyRevision || _spawnLiquidRevision != Liquids.Revision)
+                RefreshSpawnCells();
             var available = FindSizedSpawnCells(shape).Where(cell => IsEmpty(cell) && HasZombieSupport(cell, shape) &&
                 IsBodyClear(shape.StandAt(cell), shape)).ToArray();
             if (available.Length == 0) return false;
@@ -694,6 +713,7 @@ public sealed partial class GameSession
             InvalidateProjectileColliders();
         }
         var cell = slot.Cell.Value;
+        if (!ReferenceEquals(_standbyStacks[shape.StandAt(cell)].Front, slot)) return false;
         if (!IsEmpty(cell) || !HasZombieSupport(cell, shape) || !IsBodyClear(shape.StandAt(cell), shape)) return false;
         var hp = LevelCatalog.ZombieMaxHp(group.Kind, group.Tier, group.Size);
         var zombie = new Zombie
@@ -708,7 +728,8 @@ public sealed partial class GameSession
             Hp = hp,
             MaxHp = hp,
             Attack = LevelCatalog.ZombieAttack(group.Kind, group.Tier, group.Size),
-            CarriesBucket = shape.IsGiant || wave.Spawned % Balance.BucketCarrierInterval == 0 && NeedsBucketCarrier(cell, shape),
+            CarriesBucket = shape.IsGiant || (slot.Slot + wave.ReinforcementsSpawned) % Balance.BucketCarrierInterval == 0 &&
+                NeedsBucketCarrier(cell, shape),
             OriginalBudgetCost = WaveSpawnPlan.BudgetCost(group),
             Lane = cell.X == 0 ? 0 : cell.X + shape.GridFootprint == WorldGrid.Size ? 1 : cell.Z == 0 ? 2 : 3
         };
@@ -725,11 +746,8 @@ public sealed partial class GameSession
             }
         }
         Zombies.Add(zombie);
-        slot.Consumed = true;
         _livingStandbyCount--;
-        AdvanceStandby(slot);
-        wave.Spawned++;
-        _processedNormalSlots[wave.Index]++;
+        CompleteStandbySlot(slot, wave);
         wave.BudgetSpent += WaveSpawnPlan.BudgetCost(group);
         return true;
     }

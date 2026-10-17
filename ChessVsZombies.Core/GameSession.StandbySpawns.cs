@@ -24,6 +24,7 @@ public sealed partial class GameSession
         public float? CoverHp { get; set; }
         public bool CoverWasHit { get; set; }
         public bool Consumed { get; set; }
+        public bool Due { get; set; }
         public float Hp => BodyHp <= 0 ? 0 : BodyHp + (Armor == null
             ? (Group.Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(Group.Tier) *
                 (Group.Size == ZombieSize.Micro ? .25f : Group.Size == ZombieSize.Milli ? .5f :
@@ -44,7 +45,9 @@ public sealed partial class GameSession
     private readonly Dictionary<Cell, List<StandbyStack>> _standbyByCell = [];
     private Random _spawnRandom;
     private int _livingStandbyCount;
-    private int[] _processedNormalSlots = [];
+    private int[] _scheduledNormalSlots = [];
+    private int[] _internalWaveSpawned = [];
+    private readonly List<List<StandbySpawn>> _waitingStandby = [];
 
     public int LivingStandbyCount => _livingStandbyCount;
 
@@ -60,18 +63,22 @@ public sealed partial class GameSession
         _standbyStacks.Clear();
         _standbyByCell.Clear();
         _livingStandbyCount = 0;
-        _processedNormalSlots = [];
+        _scheduledNormalSlots = [];
+        _internalWaveSpawned = [];
+        _waitingStandby.Clear();
         InvalidateProjectileColliders();
     }
 
     private void PrepareStandbySpawns(IReadOnlyList<WaveSpawnPlan> plans)
     {
         ClearStandbySpawns();
-        _processedNormalSlots = new int[plans.Count];
+        _scheduledNormalSlots = new int[plans.Count];
+        _internalWaveSpawned = new int[plans.Count];
         var candidates = new Dictionary<ZombieSize, Cell[]>();
         var shapes = new Dictionary<ZombieSize, Zombie>();
         for (int waveIndex = 0; waveIndex < plans.Count; waveIndex++)
         {
+            _waitingStandby.Add([]);
             var slots = new StandbySpawn[plans[waveIndex].SpawnCount];
             for (int index = 0; index < slots.Length; index++)
             {
@@ -103,22 +110,67 @@ public sealed partial class GameSession
     }
 
     // WaveState is publicly mutable and older scenario drivers advance Spawned
-    // to skip setup slots. Treat such explicit advances as consumed slots so
-    // collision and completion remain consistent with the advertised cursor.
+    // to skip setup slots. Internal arrivals may now occur out of roster order,
+    // so compare against our own count before reconciling external advances.
     private void ReconcileExternallySkippedSpawns()
     {
         for (int waveIndex = 0; waveIndex < _standbyWaves.Count; waveIndex++)
         {
-            int cursor = Math.Min(_standbyWaves[waveIndex].Length,
-                Waves[waveIndex].Spawned - Waves[waveIndex].ReinforcementsSpawned);
-            while (_processedNormalSlots[waveIndex] < cursor)
+            int skipped = Waves[waveIndex].Spawned - _internalWaveSpawned[waveIndex];
+            if (skipped <= 0) continue;
+            foreach (var slot in _standbyWaves[waveIndex])
             {
-                var slot = _standbyWaves[waveIndex][_processedNormalSlots[waveIndex]++];
+                if (skipped == 0) break;
                 if (slot.Consumed) continue;
                 slot.Consumed = true;
                 if (slot.BodyHp > 0) _livingStandbyCount--;
+                _waitingStandby[waveIndex].Remove(slot);
                 AdvanceStandby(slot);
+                skipped--;
             }
+            _internalWaveSpawned[waveIndex] = Waves[waveIndex].Spawned;
+        }
+    }
+
+    private void AdvanceScheduledCursor(int waveIndex)
+    {
+        var slots = _standbyWaves[waveIndex];
+        while (_scheduledNormalSlots[waveIndex] < slots.Length && slots[_scheduledNormalSlots[waveIndex]].Consumed)
+            _scheduledNormalSlots[waveIndex]++;
+    }
+
+    private void CompleteStandbySlot(StandbySpawn slot, WaveState wave)
+    {
+        if (slot.Consumed) return;
+        slot.Consumed = true;
+        wave.Spawned++;
+        _internalWaveSpawned[wave.Index]++;
+        _waitingStandby[wave.Index].Remove(slot);
+        AdvanceStandby(slot);
+    }
+
+    private bool ScheduleNextStandby(WaveState wave)
+    {
+        AdvanceScheduledCursor(wave.Index);
+        var slots = _standbyWaves[wave.Index];
+        if (_scheduledNormalSlots[wave.Index] >= slots.Length) return false;
+        var slot = slots[_scheduledNormalSlots[wave.Index]++];
+        slot.Due = true;
+        if (slot.BodyHp <= 0) CompleteStandbySlot(slot, wave);
+        else if (!TryActivateStandby(slot, wave)) _waitingStandby[wave.Index].Add(slot);
+        return true;
+    }
+
+    private void RetryWaitingStandby(WaveState wave)
+    {
+        var waiting = _waitingStandby[wave.Index];
+        for (int index = 0; index < waiting.Count;)
+        {
+            var slot = waiting[index];
+            if (slot.Consumed) { waiting.RemoveAt(index); continue; }
+            if (slot.BodyHp <= 0) { CompleteStandbySlot(slot, wave); continue; }
+            if (TryActivateStandby(slot, wave)) continue;
+            index++;
         }
     }
 
@@ -208,19 +260,9 @@ public sealed partial class GameSession
         zombie.FaceToward(new Vector3(16, zombie.Position.Y, 16) - zombie.Position);
         zombie.RestoreBodyAndArmor(slot.BodyHp, slot.Armor ?? zombie.ArmorPieces);
         float before = zombie.Hp;
-        // Standby Giant armor is exposed in stable slot order, one piece per
-        // projectile. The shot that breaks the last piece cannot hit its body.
-        if (zombie.IsGiant && zombie.ArmorPieces.Count > 0)
-        {
-            var armor = zombie.ArmorPieces[0];
-            armor.Hp = Math.Max(0, armor.Hp - damage);
-            if (armor.Hp <= 0)
-            {
-                ((List<ArmorPiece>)zombie.ArmorPieces).RemoveAt(0);
-                InvalidateProjectileColliders();
-            }
-        }
-        else zombie.ApplyDamage(damage, kind, shot, incoming);
+        // Once the physical block is gone, wearable armor follows the same
+        // directional coverage and within-hit damage rules as active zombies.
+        zombie.ApplyDamage(damage, kind, shot, incoming);
         slot.BodyHp = zombie.BodyHp;
         slot.Armor = zombie.ArmorPieces.ToList();
         var wave = Waves[slot.WaveIndex];
@@ -228,7 +270,8 @@ public sealed partial class GameSession
         if (slot.BodyHp <= 0)
         {
             _livingStandbyCount--;
-            AdvanceStandby(slot);
+            if (slot.Due) CompleteStandbySlot(slot, wave);
+            else AdvanceStandby(slot);
         }
     }
 }
