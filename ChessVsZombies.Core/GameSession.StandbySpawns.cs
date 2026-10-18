@@ -179,6 +179,7 @@ public sealed partial class GameSession
         slot.Consumed = true;
         wave.Spawned++;
         _internalWaveSpawned[wave.Index]++;
+        DeathToll.RecordProcessedQueueSlots(1, slot.BodyHp <= 0);
         if (_largeStandbyWaves[wave.Index] is { } large) large.Completed.Add(slot.Slot);
         else _waitingStandby[wave.Index].Remove(slot);
         AdvanceStandby(slot);
@@ -296,15 +297,16 @@ public sealed partial class GameSession
         }
     }
 
-    private void DamageStandby(StandbySpawn slot, float damage, DamageKind kind, ShotKind shot, Vector3 incoming)
+    private float DamageStandby(StandbySpawn slot, float damage, DamageKind kind, ShotKind shot, Vector3 incoming)
     {
-        if (slot.Consumed || slot.BodyHp <= 0 || !float.IsFinite(damage) || damage <= 0) return;
+        if (slot.Consumed || slot.BodyHp <= 0 || !float.IsFinite(damage) || damage <= 0) return 0;
         if (slot.CoverHp is > 0)
         {
+            DeathToll.RecordQueuedProjectileHit(0);
             slot.CoverWasHit = true;
             slot.CoverHp = Math.Max(0, slot.CoverHp.Value - damage);
             if (slot.CoverHp == 0) InvalidateProjectileColliders();
-            return; // The breaking bullet ends on this block.
+            return 0; // The breaking bullet ends on this block.
         }
         var group = slot.Group;
         var zombie = new Zombie
@@ -322,11 +324,13 @@ public sealed partial class GameSession
         slot.Armor = zombie.ArmorPieces.ToList();
         var wave = Waves[slot.WaveIndex];
         float actual = before - zombie.Hp;
+        DeathToll.RecordQueuedProjectileHit(actual);
         wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + actual);
         if (_largeStandbyWaves[slot.WaveIndex] is { } damagedWave)
             damagedWave.ExactDamageTaken = Math.Min(damagedWave.ExactTotalHp, damagedWave.ExactDamageTaken + actual);
         if (slot.BodyHp <= 0)
         {
+            DeathToll.RecordQueueDeath();
             _livingStandbyCount--;
             if (_largeStandbyWaves[slot.WaveIndex] is { } large)
             {
@@ -336,5 +340,6 @@ public sealed partial class GameSession
             if (slot.Due) CompleteStandbySlot(slot, wave);
             else AdvanceStandby(slot);
         }
+        return actual;
     }
 }

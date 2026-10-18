@@ -75,6 +75,7 @@ public sealed class DefenseGame : Game
     private readonly List<double> hordeDrawTimes = [], hordeHudTimes = [];
     private long previousHordeFrame;
     private readonly CombatOverlayPerformance overlayPerformance = new();
+    private bool showDeathToll;
     private long previousOverlayFrame;
     private bool previousOverlayFrameActive;
     private int reducedOverlayFrames;
@@ -131,6 +132,7 @@ public sealed class DefenseGame : Game
         smoke = smoke || args.Contains("--smoke-micro");
         smoke = smoke || args.Contains("--smoke-bottom-layer");
         smokeCombat = args.Contains("--smoke-combat");
+        showDeathToll = args.Contains("--smoke-death-toll");
         smokePanel = args.Contains("--smoke-gacha") ? "gacha" : args.Contains("--smoke-jump") ? "jump" : args.Contains("--smoke-template") ? "template" : args.Contains("--smoke-terrain") ? "terrain" : args.Contains("--smoke-liquids") ? "liquids" : args.Contains("--smoke-armor") ? "armor" : args.Contains("--smoke-falls") ? "falls" : args.Contains("--smoke-bridges") ? "bridges" : args.Contains("--smoke-buckets") ? "buckets" : args.Contains("--smoke-sizes") ? "sizes" : args.Contains("--smoke-megas") ? "megas" : args.Contains("--smoke-merged") ? "merged" : "";
         if (args.Contains("--smoke-all-in-one")) smokePanel = "all-in-one";
         if (args.Contains("--smoke-liquid-turrets")) smokePanel = "liquid-turrets";
@@ -987,6 +989,7 @@ public sealed class DefenseGame : Game
         uiScale = Math.Max(.4f, uiScale); width = Window.ClientBounds.Width / uiScale; height = Window.ClientBounds.Height / uiScale;
         if (IsActive && !smoke && !resynchronizing)
         {
+            if (Pressed(keys, Keys.F2)) showDeathToll = !showDeathToll;
             if (templateField.HasValue && panel == 2 && !captured) HandleTemplateFieldInput(keys, mouse);
             else if (panel == 3) HandleJumpEditorInput(keys, mouse);
             else
@@ -1518,6 +1521,7 @@ public sealed class DefenseGame : Game
             if (!overlayPerformance.ReducedDetail)
                 CombatOverlay.Draw(session, batch, pixel, font, GraphicsDevice.Viewport, view, projection, uiScale);
             DrawHud();
+            if (showDeathToll) DrawDeathTollOverlay();
         }
         batch.End();
         if (smokeHorde)
@@ -1558,6 +1562,31 @@ public sealed class DefenseGame : Game
     private void Fill(float x, float y, float w, float h, Color color) => batch.Draw(pixel, new Rectangle((int)x, (int)y, (int)w, (int)h), color);
     private void Text(string text, float x, float y, float size = 18, Color? color = null) => font.Draw(batch, text, new Vector2(x, y), color ?? TextColor, size);
     private void Rule(float x, float y, float w) => Fill(x, y, w, 1, new Color(49, 64, 76));
+    private void DrawDeathTollOverlay()
+    {
+        var toll = session.DeathToll;
+        float x = Math.Max(16, (width - 744) / 2), y = 103, w = Math.Min(744, width - 32);
+        Fill(x, y, w, 252, new Color(17, 28, 36, 242));
+        Fill(x, y, w, 3, Teal);
+        Text("DEATH TOLL / F2", x + 18, y + 12, 18, Teal);
+        Text(session.DeathTollStartedFromCheckpoint ? "THIS SESSION / FROM CHECKPOINT" : "THIS SESSION / NEW GAME",
+            x + 320, y + 16, 12, Muted);
+        Rule(x + 18, y + 43, w - 36);
+        Text($"PHYSICAL SPAWNS  {toll.PhysicalSpawns:N0}", x + 18, y + 53, 14);
+        Text($"FIELD DEATHS  {toll.FieldDeaths:N0}", x + 370, y + 53, 14);
+        Text($"QUEUE DEATHS BEFORE SPAWN  {toll.PreSpawnQueueDeaths:N0}", x + 18, y + 77, 14);
+        Text($"TOTAL DEATHS  {toll.TotalDeaths:N0}", x + 370, y + 77, 14, Red);
+        Text($"PROCESSED QUEUE SLOTS  {toll.ProcessedQueuedSlots:N0}", x + 18, y + 101, 14);
+        Text($"DEAD SLOTS PROCESSED  {toll.DeadScheduledSlotsProcessed:N0}", x + 370, y + 101, 14);
+        Text($"UNPROCESSED QUEUE ENTRIES (INCLUDING DEAD)  {session.UnprocessedQueueEntries:N0}", x + 18, y + 125, 14);
+        Text($"QUEUED PROJECTILE HITS  {toll.QueuedProjectileHits:N0}", x + 18, y + 149, 14);
+        Text($"QUEUED HP + ARMOR DAMAGE  {toll.QueuedDamage:N0}", x + 370, y + 149, 14);
+        Text($"BOUNDARY IMPACTS WITHOUT QUEUED DAMAGE  {toll.BoundaryImpactsWithoutQueuedDamage:N0}", x + 18, y + 173, 14);
+        Rule(x + 18, y + 201, w - 36);
+        Text($"LAST 60 SIM S  /  QUEUE {toll.QueueProcessingPerSecond:N1}/s  /  KILLS {toll.KillsPerSecond:N1}/s",
+            x + 18, y + 210, 14, Gold);
+        Text($"{toll.CombatSeconds:N1} combat s elapsed; first window uses elapsed time", x + 18, y + 232, 11, Muted);
+    }
     private void Button(string label, float x, float y, float w, float h, Action action, bool active = false, bool enabled = true, Color? accent = null, float textSize = 18)
     {
         var mouse = Mouse.GetState(); var bounds = new Rectangle((int)x, (int)y, (int)w, (int)h);

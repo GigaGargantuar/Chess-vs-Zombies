@@ -98,13 +98,16 @@ public sealed partial class GameSession
                     float coverBefore = standby?.CoverHp ?? 0;
                     var previousAge = startAge + dt * (sample - 1) / steps;
                     var hitAge = previousAge + (endAge - previousAge) * fraction;
+                    float queuedDamage = 0;
                     if (zombie != null)
                         DamageZombie(zombie, projectile.Damage, projectile.DamageKind, projectile.Kind, projectile.GetTravelDirection(hitAge));
                     else if (standby != null)
-                        DamageStandby(standby, projectile.Damage, projectile.DamageKind, projectile.Kind,
+                        queuedDamage = DamageStandby(standby, projectile.Damage, projectile.DamageKind, projectile.Kind,
                             projectile.GetTravelDirection(hitAge));
                     else if (terrain.HasValue)
                         DamageProjectileTerrain(terrain.Value, projectile.Damage, crustFace);
+                    if (zombie == null && !terrain.HasValue && queuedDamage <= 0)
+                        DeathToll.RecordBoundaryImpactWithoutQueuedDamage();
                     ProjectileDiagnostics?.Contact(projectile, hitAge, zombie != null ? "body" : standby != null
                         ? coverBefore > 0 ? "standby-cover" : "standby-body" : terrain.HasValue ? "terrain" : "boundary",
                         zombie?.Id ?? -1, standby?.Slot ?? -1, terrain, crustFace, coverBefore > 0 ? coverBefore : hpBefore,

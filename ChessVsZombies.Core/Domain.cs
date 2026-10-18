@@ -145,6 +145,7 @@ public sealed class ZombieBucketLoad
 
 public sealed class Zombie
 {
+    internal bool DeathCounted { get; set; }
     private List<ArmorPiece>? _armor;
     private float _bodyHp = Balance.ZombieHp;
     private float? _maximumHp;

@@ -120,6 +120,7 @@ public sealed partial class GameSession
             { Offset = new Vector3(block.OffsetX, block.OffsetY, block.OffsetZ) }).ToList();
         zombie.FaceToward(new Vector3(16, zombie.Position.Y, 16) - zombie.Position);
         Zombies.Add(zombie);
+        DeathToll.RecordPhysicalSpawn();
         _nextId = Math.Max(_nextId, zombie.Id + 1);
         _returningZombies.Remove(saved);
         wave.Spawned++;

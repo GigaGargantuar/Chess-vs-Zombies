@@ -129,9 +129,25 @@ The [benchmark guide](ChessVsZombies.Benchmarks/README.md) explains scenarios, t
 | P | Pause |
 | V | Toggle volume guides |
 | F1 | Open the field manual |
+| F2 | Toggle the death-toll and spawn-queue diagnostic overlay |
 | R | Retry the saved preparation after defeat |
 
 Losing window focus releases and shows the mouse cursor. Returning focus leaves the cursor free until Tab or an explicit camera-return action; held clicks are ignored until released.
+
+### Death-toll diagnostics
+
+F2 shows a separate diagnostic panel; it is hidden by default. Its counters cover the current `GameSession`, including later waves and levels. A new game or `Reset()` clears them. Loading a preparation checkpoint starts a new observation with zero counters and zero combat time; historical kills are not saved in checkpoints. The panel says whether this session began from a checkpoint.
+For a captured smoke frame, add `--smoke-death-toll` to an existing smoke command to show the panel without keyboard input.
+
+**Physical spawns** counts each zombie actually added by the scheduled queue or a returning reinforcement. **Field deaths** counts a physical zombie once when its body dies, including liquid, fall, and other non-projectile damage. **Queue deaths before spawn** counts a queued zombie once when its body dies at the boundary. **Total deaths** is the sum of those two death counts; a dead queued slot is not killed again when its scheduled time arrives. Retreat is not a death. A returning zombie increments physical spawns again when it appears again.
+
+**Processed queue slots** counts normal scheduled slots that have either activated or been consumed dead. **Dead slots processed** is the dead subset. These are separate from kills: a queued kill can precede processing by many spawn intervals. **Unprocessed queue entries** is the sum of `TotalCount - Spawned` over the encounter's waves, including dead slots whose time has not been consumed and pending returning reinforcements. It does not enumerate or materialize the queue. After combat clears the queue, this figure retains the number of scheduled entries that were never processed; they are no longer active queue objects. Externally modified `WaveState.Spawned` values used by scenario drivers affect this derived count but do not create diagnostic spawn or processing events.
+
+**Queued projectile hits** counts positive-damage shots that make contact with a live queued target at the outer wall, including nonlethal hits and shots absorbed by giant cover or wearable armor. **Queued HP + armor damage** sums the actual reduction of the target's surviving HP and armor pool; giant carried-block damage is excluded. As in wave HP accounting, killing a body discards its remaining armor from this pool. **Boundary impacts without queued damage** counts shots stopped at an arena boundary that reduce no queued HP or armor, including empty or top-face boundary contacts, cover-only shots, and fully blocked queued hits. Terrain and active-zombie collisions before the wall do not enter this count.
+
+The two rates divide events in the trailing 60 seconds of **combat simulation time** by 60. Queue processing uses processed normal slots; kills use field plus pre-spawn deaths. Before 60 combat seconds have elapsed, they divide by elapsed combat time; at time zero the rates display zero. Events during a combat substep are stamped at its end; direct calls outside an update use the current simulation time. The fixed history consists of 600 ten-hertz bins, so events at the window edge have at most 0.1 second of rounding. Pausing or losing focus stops `GameSession.Update` in the desktop game and does not advance these rates. Preparation time and time after defeat are excluded. Rates and counters carry across wave and level transitions within one session.
+
+The normal HUD's `SPAWNED` figure is `sum(WaveState.Spawned)`, a count of **processed slots**. It advances for actual activations, returning reinforcements, and dead queued slots when their scheduled time is processed. It is therefore not a count of physical zombies seen or deaths. Use the F2 physical-spawns and death counters to distinguish those events.
 
 The flight camera represents its orientation with a normalized quaternion and supports looking exactly straight up or straight down. Mouse panning keeps the same horizontal yaw, vertical pitch, sensitivity, and direction, with no roll. WASD movement remains horizontal at every viewing angle; Space and Shift move along world vertical. The view uses the orientation's rotated up vector so it remains stable at either vertical limit.
 

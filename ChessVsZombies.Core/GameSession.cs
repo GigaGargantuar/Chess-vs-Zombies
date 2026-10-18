@@ -41,6 +41,17 @@ public sealed partial class GameSession
     public BlockInventory Inventory { get; } = new();
     public FallAnimations Falls { get; } = new();
     public CombatFeedback Feedback { get; } = new();
+    public DeathTollDiagnostics DeathToll { get; private set; } = new();
+    public bool DeathTollStartedFromCheckpoint { get; private set; }
+    public long UnprocessedQueueEntries
+    {
+        get
+        {
+            long count = 0;
+            foreach (var wave in Waves) count += (long)wave.TotalCount - wave.Spawned;
+            return count;
+        }
+    }
     public SimulationProfile? Profile { get; set; }
     public UpgradeTemplate UpgradeTemplate { get; private set; } = new();
     public List<Turret> Turrets { get; } = [];
@@ -82,6 +93,8 @@ public sealed partial class GameSession
 
     public void Reset()
     {
+        DeathToll = new DeathTollDiagnostics();
+        DeathTollStartedFromCheckpoint = false;
         World = new WorldGrid();
         Liquids = new LiquidSystem(World) { IsTurretCell = cell => TrySelectTurret(cell) != null };
         foreach (var kind in Enum.GetValues<LiquidKind>()) _liquidInventory[kind] = 0;
@@ -236,6 +249,7 @@ public sealed partial class GameSession
     internal void RestoreCheckpoint(CampaignState state)
     {
         Reset();
+        DeathTollStartedFromCheckpoint = true;
         Economy.ImportState(state.Economy);
         UpgradeTemplate = state.UpgradeTemplate!.ToTemplate();
         QueuedUpgradeBatch = CopyUpgradeBatch(state.QueuedUpgradeBatch);
@@ -493,6 +507,7 @@ public sealed partial class GameSession
         while (deltaSeconds > 0 && Phase != GamePhase.Defeat)
         {
             var step = Math.Min(deltaSeconds, .05f);
+            if (Phase == GamePhase.Combat) DeathToll.Advance(step);
             using (Profile?.Measure("Feedback")) Feedback.Update(step);
             using (Profile?.Measure("Falls")) Falls.Update(step, World, Turrets);
             using (Profile?.Measure("Settlement")) SettleDefenses();
@@ -522,6 +537,13 @@ public sealed partial class GameSession
         ApplyZombieDamage(zombie, damage, kind, shot, incomingDirection);
     }
 
+    private void RecordFieldDeath(Zombie zombie)
+    {
+        if (zombie.DeathCounted) return;
+        zombie.DeathCounted = true;
+        DeathToll.RecordFieldDeath();
+    }
+
     private void ApplyZombieDamage(Zombie zombie, float damage, DamageKind kind,
         ShotKind? shot = null, Vector3? incomingDirection = null)
     {
@@ -532,7 +554,11 @@ public sealed partial class GameSession
         var sankInLava = zombie.SinksIn(LiquidKind.Lava);
         var sankInMercury = zombie.SinksIn(LiquidKind.Mercury);
         zombie.ApplyDamage(damage, kind, shot, incomingDirection);
-        if (bodyBefore > 0 && zombie.BodyHp <= 0) InvalidateProjectileColliders();
+        if (bodyBefore > 0 && zombie.BodyHp <= 0)
+        {
+            RecordFieldDeath(zombie);
+            InvalidateProjectileColliders();
+        }
         var durabilityLost = (bodyBefore - zombie.BodyHp) + (armorBefore - zombie.ArmorPieces.Sum(piece => piece.Hp));
         Feedback.Record(zombie.Id, zombie.Position, durabilityLost, kind);
         if (durabilityLost > 0)
@@ -625,6 +651,7 @@ public sealed partial class GameSession
         foreach (var zombie in Zombies)
             if (zombie.BodyHp <= 0)
             {
+                RecordFieldDeath(zombie);
                 QueueDeathBlock(zombie);
                 SpillZombieBucket(zombie);
                 HandleKiloDeath(zombie);
@@ -760,6 +787,7 @@ public sealed partial class GameSession
             }
         }
         Zombies.Add(zombie);
+        DeathToll.RecordPhysicalSpawn();
         _livingStandbyCount--;
         if (_largeStandbyWaves[wave.Index] is { } large) large.LivingCount--;
         CompleteStandbySlot(slot, wave);

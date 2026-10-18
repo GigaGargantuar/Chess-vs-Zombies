@@ -279,6 +279,7 @@ public sealed partial class GameSession
                 large.Completed.Add(index);
                 wave.Spawned++;
                 _internalWaveSpawned[wave.Index]++;
+                DeathToll.RecordProcessedQueueSlots(1, dead: true);
             }
         }
         else if (large.Fronts.TryGetValue(index, out var front))
@@ -307,6 +308,7 @@ public sealed partial class GameSession
             if (front.Slot < end) front.Due = true;
         wave.Spawned += deadDue;
         _internalWaveSpawned[wave.Index] += deadDue;
+        if (deadDue > 0) DeathToll.RecordProcessedQueueSlots(deadDue, dead: true);
         wave.SpawnTimer = (float)((double)wave.SpawnTimer + (double)dueCount * interval);
         RetryLargeStandby(large, wave);
         return true;
@@ -347,6 +349,7 @@ public sealed partial class GameSession
             large.Completed.Add(index);
             wave.Spawned++;
             _internalWaveSpawned[wave.Index]++;
+            DeathToll.RecordProcessedQueueSlots(1, dead: true);
             return true;
         }
         if (!large.Fronts.TryGetValue(index, out var front) || !TryActivateStandby(front, wave)) return false;
