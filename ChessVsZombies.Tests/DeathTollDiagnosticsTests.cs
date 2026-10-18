@@ -98,6 +98,17 @@ public sealed class DeathTollDiagnosticsTests
     }
 
     [Fact]
+    public void LethalQueuedHitDoesNotClaimUndamagedArmorAsProjectileDamage()
+    {
+        var game = Battle(1, kind: ZombieKind.Armored, tier: GearTier.Iron);
+        Fire(game, Assert.Single(Fronts(game)), 110);
+        Assert.Equal(1, game.DeathToll.QueuedProjectileHits);
+        Assert.Equal(110, game.DeathToll.QueuedDamage);
+        Assert.Equal(1, game.DeathToll.PreSpawnQueueDeaths);
+        Assert.Equal(210, game.Waves[0].DamageTaken); // Existing wave HP-pool accounting is preserved.
+    }
+
+    [Fact]
     public void RatesUseCombatTimeAndResetWithSession()
     {
         var game = Battle(2);
@@ -191,6 +202,7 @@ public sealed class DeathTollDiagnosticsTests
     public void HugeLazyRosterKeepsDiagnosticStateBounded(int count)
     {
         var game = Battle(count);
+        Assert.InRange(Fronts(game).Length, 1, 512);
         GC.Collect();
         long before = GC.GetAllocatedBytesForCurrentThread();
         long total = 0;

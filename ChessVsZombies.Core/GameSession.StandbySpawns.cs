@@ -317,17 +317,28 @@ public sealed partial class GameSession
         zombie.FaceToward(new Vector3(16, zombie.Position.Y, 16) - zombie.Position);
         zombie.RestoreBodyAndArmor(slot.BodyHp, slot.Armor ?? zombie.ArmorPieces);
         float before = zombie.Hp;
+        float bodyBefore = zombie.BodyHp;
+        float armorBefore = 0;
+        var armorPieces = zombie.ArmorPieces;
+        for (int index = 0; index < armorPieces.Count; index++) armorBefore += armorPieces[index].Hp;
         // Once the physical block is gone, wearable armor follows the same
         // directional coverage and within-hit damage rules as active zombies.
         zombie.ApplyDamage(damage, kind, shot, incoming);
         slot.BodyHp = zombie.BodyHp;
-        slot.Armor = zombie.ArmorPieces.ToList();
+        var remainingArmor = zombie.ArmorPieces.ToList();
+        slot.Armor = remainingArmor;
         var wave = Waves[slot.WaveIndex];
-        float actual = before - zombie.Hp;
-        DeathToll.RecordQueuedProjectileHit(actual);
-        wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + actual);
+        float poolReduction = before - zombie.Hp;
+        float armorAfter = 0;
+        foreach (var piece in remainingArmor) armorAfter += piece.Hp;
+        float actualDamage = Math.Max(0, bodyBefore - zombie.BodyHp +
+            armorBefore - armorAfter);
+        // Wave progress also removes undamaged armor when the body dies. The
+        // diagnostic reports only body/armor durability actually lost on impact.
+        DeathToll.RecordQueuedProjectileHit(actualDamage);
+        wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + poolReduction);
         if (_largeStandbyWaves[slot.WaveIndex] is { } damagedWave)
-            damagedWave.ExactDamageTaken = Math.Min(damagedWave.ExactTotalHp, damagedWave.ExactDamageTaken + actual);
+            damagedWave.ExactDamageTaken = Math.Min(damagedWave.ExactTotalHp, damagedWave.ExactDamageTaken + poolReduction);
         if (slot.BodyHp <= 0)
         {
             DeathToll.RecordQueueDeath();
@@ -340,6 +351,6 @@ public sealed partial class GameSession
             if (slot.Due) CompleteStandbySlot(slot, wave);
             else AdvanceStandby(slot);
         }
-        return actual;
+        return actualDamage;
     }
 }
