@@ -47,7 +47,7 @@ public static class CombatOverlay
             var position = WorldRenderer.ToXna(zombie.Position);
             if (!Project(position + Vector3.Up * (.65f * zombie.BodyScale), out var anchor) ||
                 !Visible(position + Vector3.Up * (.35f * zombie.BodyScale))) continue;
-            int rows = 2 + zombie.ArmorPieces.Count + (zombie.AirRemaining < Balance.AirSeconds ? 1 : 0);
+            int rows = 2 + zombie.ArmorPieces.Count + (zombie.IsGiga ? 2 : 0) + (zombie.AirRemaining < Balance.AirSeconds ? 1 : 0);
             var x = anchor.X - 52;
             var y = anchor.Y - rows * 12;
             var name = zombie.Size switch
@@ -56,12 +56,26 @@ public static class CombatOverlay
                 ZombieSize.Milli => "MILLI",
                 ZombieSize.Kilo => "KILO",
                 ZombieSize.Mega => "MEGA",
+                ZombieSize.Giga => "GIGA",
                 _ => "STANDARD"
             };
             Fill(x - 2, y, 108, 12, new Color(10, 16, 23, 220));
             font.Draw(batch, name, new Vector2(x + 1, y - 1), new Color(105, 225, 191), 9);
             y += 12;
             Bar("HP", zombie.BodyHp, zombie.MaxBodyHp, new Color(242, 134, 115), x, ref y);
+            if (zombie.Giga is { } giga)
+            {
+                foreach (var (label, value, color) in new[] {
+                    ("RES", giga.Resistance, new Color(134, 218, 235)),
+                    ("ATK", giga.AttackDamage, new Color(255, 162, 92)) })
+                {
+                    Fill(x - 2, y, 108, 12, new Color(10, 16, 23, 220));
+                    font.Draw(batch, label, new Vector2(x + 1, y - 1), color, 9);
+                    string number = value.ToString(value >= 100_000 ? "0.##e+0" : "0.##", CultureInfo.InvariantCulture);
+                    font.Draw(batch, number, new Vector2(x + 37, y - 1), color, 9);
+                    y += 12;
+                }
+            }
             foreach (var slot in new[] { ArmorSlot.Helmet, ArmorSlot.Chestplate, ArmorSlot.Shield, ArmorSlot.Boots })
             {
                 var piece = zombie.ArmorPieces.FirstOrDefault(p => p.Slot == slot);
@@ -85,7 +99,7 @@ public static class CombatOverlay
             var color = hit.Kind == DamageKind.Chemical ? new Color(178, 244, 139) :
                 hit.Kind == DamageKind.Thermal ? new Color(255, 185, 106) : Color.White;
             float opacity = Math.Clamp((CombatFeedback.NumberDuration - hit.Age) / .3f, 0, 1);
-            int statusRows = target is null ? 1 : 2 + target.ArmorPieces.Count + (target.AirRemaining < Balance.AirSeconds ? 1 : 0);
+            int statusRows = target is null ? 1 : 2 + target.ArmorPieces.Count + (target.IsGiga ? 2 : 0) + (target.AirRemaining < Balance.AirSeconds ? 1 : 0);
             var position = anchor + new Vector2((hit.Id % 3 - 1) * 30 - font.Measure(amount, 18) * .5f, -12 - statusRows * 12);
             // This pass uses straight alpha; fading RGB too would darken the label twice.
             font.Draw(batch, amount, position + Vector2.One, new Color(8, 12, 18, (int)(255 * opacity)), 18);

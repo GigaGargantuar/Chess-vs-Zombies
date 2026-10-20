@@ -542,8 +542,8 @@ public static class SaveStore
             if (zombie is null || zombie.Id <= 0 || zombie.Id == int.MaxValue || !usedIds.Add(zombie.Id) ||
                 zombie.TargetLevel != state.LevelNumber || zombie.TargetWaveIndex != 0 ||
                 !Enum.IsDefined(zombie.Kind) || !Enum.IsDefined(zombie.Tier) || !Enum.IsDefined(zombie.Size) ||
-                zombie.IsBoss && zombie.Size is not (ZombieSize.Kilo or ZombieSize.Mega) || zombie.RetreatReturns is < 0 or > 3 ||
-                zombie.OriginalBudgetCost <= 0 || zombie.IsBoss && zombie.OriginalBudgetCost != (zombie.Size == ZombieSize.Mega ? 15 : Balance.ZombieHp) ||
+                zombie.IsBoss && zombie.Size is not (ZombieSize.Kilo or ZombieSize.Mega or ZombieSize.Giga) || zombie.RetreatReturns is < 0 or > 3 ||
+                zombie.OriginalBudgetCost <= 0 || zombie.IsBoss && zombie.Size != ZombieSize.Giga && zombie.OriginalBudgetCost != (zombie.Size == ZombieSize.Mega ? 15 : Balance.ZombieHp) ||
                 zombie.Armor is null || zombie.Buckets is null || zombie.HeldBlocks is null)
                 throw new InvalidDataException("A returning zombie has invalid identity, wave, or equipment data.");
 
@@ -551,6 +551,14 @@ public static class SaveStore
             int blockCapacity = zombie.Size == ZombieSize.Mega ? 4 : zombie.Size == ZombieSize.Kilo ? 2 : 1;
             float offsetLimit = zombie.Size == ZombieSize.Mega ? 1 : .5f;
             var shape = new Zombie { Size = zombie.Size };
+            if (zombie.Size == ZombieSize.Giga)
+            {
+                ValidateReturningGiga(zombie);
+                var giga = zombie.Giga!;
+                shape.RestoreGigaState(giga.InitialCounter, giga.HpCounter, giga.ResCounter, giga.AttackCounter, giga.RecoverySeconds);
+            }
+            else if (zombie.Giga != null)
+                throw new InvalidDataException("Only a returning Giga can carry Giga progression data.");
             if (!float.IsFinite(zombie.BodyHp) || zombie.BodyHp <= 0 || zombie.BodyHp > shape.MaxBodyHp)
                 throw new InvalidDataException("A returning zombie has invalid body HP.");
 
@@ -594,6 +602,24 @@ public static class SaveStore
                     throw new InvalidDataException("A returning Kilo's independent blocks overlap.");
             }
         }
+    }
+
+    private static void ValidateReturningGiga(SavedReturningZombie zombie)
+    {
+        var giga = zombie.Giga;
+        if (giga == null || giga.InitialCounter < GigaRules.MinimumInitialCounter || giga.HpCounter < giga.InitialCounter ||
+            giga.HpCounter == int.MaxValue || giga.ResCounter is < 1 or int.MaxValue || giga.AttackCounter < 1 || !double.IsFinite(giga.RecoverySeconds) ||
+            giga.RecoverySeconds is < 0 or >= 1 ||
+            giga.LockedTargetId is { } targetId && (targetId <= 0 || targetId == int.MaxValue || targetId == zombie.Id) ||
+            zombie.CarriesBucket || zombie.CarriedBlocks != 0 ||
+            zombie.Armor.Count != 0 || zombie.Buckets.Count != 0 || zombie.HeldBlocks.Count != 0)
+            throw new InvalidDataException("A returning Giga has invalid progression or equipment data.");
+        double initialHp = GigaRules.MaximumHp(giga.InitialCounter);
+        double maximumHp = GigaRules.MaximumHp(giga.HpCounter);
+        double attack = Math.Pow(GigaRules.GoldenRatio, giga.AttackCounter);
+        if (initialHp > int.MaxValue || !float.IsFinite((float)maximumHp) || !float.IsFinite((float)attack) ||
+            zombie.OriginalBudgetCost != (long)Math.Ceiling(initialHp))
+            throw new InvalidDataException("A returning Giga has invalid derived stats or original spawn cost.");
     }
 
     private static bool IsValidTurretCell(Cell cell, int version) => version >= 6

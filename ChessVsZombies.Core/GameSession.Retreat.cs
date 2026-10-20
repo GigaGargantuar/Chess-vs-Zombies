@@ -27,7 +27,7 @@ public sealed partial class GameSession
 
     private void FaceKiloTowardShot(Zombie zombie, Vector3 incomingDirection)
     {
-        if (zombie.BodyHp <= 0 || !zombie.IsGiant) return;
+        if (zombie.BodyHp <= 0 || !zombie.IsGiant || zombie.IsGiga) return;
         zombie.SetGuardFacing(zombie.Size == ZombieSize.Mega
             ? ObserveMegaIncomingFire(zombie, incomingDirection) : -incomingDirection);
         _guardedKilos.Add(zombie);
@@ -110,7 +110,9 @@ public sealed partial class GameSession
 
     private bool CanZombieOpenCoreRoute(Zombie zombie)
     {
-        if (zombie.Attack <= 0) return false;
+        if (zombie.IsGiga && Turrets.Any(turret => turret.Hp > 0 && Vector3.DistanceSquared(turret.Cell.Center,
+            Vector3.Clamp(turret.Cell.Center, zombie.Position - zombie.BodyHalfExtents, zombie.Position + zombie.BodyHalfExtents)) <= GigaRange * GigaRange)) return true;
+        if (zombie.AttackDamage <= 0) return false;
         if (zombie.CarriesBucket && HasReachableBucketWork(zombie)) return true;
 
         var visited = new HashSet<Cell>();
@@ -236,6 +238,7 @@ public sealed partial class GameSession
 
     private void UpgradeRetreatArmor(Zombie zombie)
     {
+        if (zombie.IsGiga) return;
         var available = BestAvailableArmorTier(zombie.WaveIndex);
         bool alreadyArmored = zombie.Kind is ZombieKind.Armored or ZombieKind.ArmedArmored;
         if (!available.HasValue && !alreadyArmored) return;

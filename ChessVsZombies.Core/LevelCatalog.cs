@@ -70,8 +70,9 @@ public sealed class LevelCatalog
                 throw new InvalidDataException("BossBudgetFraction must be between 0.01 and 0.05.");
             foreach (var group in wave.Groups)
                 if (group == null || group.Count <= 0 || !Enum.IsDefined(group.Kind) || !Enum.IsDefined(group.Tier) ||
-                    !Enum.IsDefined(group.Size) || group.IsBoss && group.Size is not (ZombieSize.Kilo or ZombieSize.Mega))
-                    throw new InvalidDataException("Groups need positive Count and valid Kind, Tier, and Size values; bosses must be Kilos or Megas.");
+                    !Enum.IsDefined(group.Size) || group.Size == ZombieSize.Giga ||
+                    group.IsBoss && group.Size is not (ZombieSize.Kilo or ZombieSize.Mega))
+                    throw new InvalidDataException("Groups need positive Count and valid Kind, Tier, and Size values; bosses must be Kilos or Megas. EnableGiga reserves Gigas separately.");
             if (wave.HpBudget.HasValue && !wave.Groups.Any(group => !group.IsBoss))
                 throw new InvalidDataException("A budgeted wave needs at least one normal spawn type.");
             if (!wave.HpBudget.HasValue && wave.Groups.Sum(group => (long)group.Count) > int.MaxValue)
@@ -90,6 +91,7 @@ public sealed class LevelCatalog
             ZombieSize.Standard => standard,
             ZombieSize.Kilo => standard * 4,
             ZombieSize.Mega => standard * 9,
+            ZombieSize.Giga => checked((int)Math.Ceiling(GigaRules.MaximumHp(GigaRules.MinimumInitialCounter))),
             _ => throw new ArgumentOutOfRangeException(nameof(size))
         };
     }
@@ -170,7 +172,7 @@ public sealed class LevelCatalog
             Number = number,
             Name = number == 1 ? "First contact" : $"{tier} siege {number}",
             Waves = [new WaveDefinition { SpawnInterval = Math.Max(.3f, 1.4f - number * .025f), Groups = groups,
-                HpBudget = hpBudget, BossBudgetFraction = bossFraction }]
+                HpBudget = hpBudget, BossBudgetFraction = bossFraction, EnableGiga = true }]
         };
     }
 
@@ -183,6 +185,7 @@ public sealed class LevelCatalog
             SpawnInterval = wave.SpawnInterval,
             HpBudget = wave.HpBudget,
             BossBudgetFraction = wave.BossBudgetFraction,
+            EnableGiga = wave.EnableGiga,
             Groups = wave.Groups.Select(group => new ZombieGroup { Kind = group.Kind, Tier = group.Tier, Count = group.Count,
                 Size = group.Size, IsBoss = group.IsBoss }).ToList()
         }).ToList()

@@ -31,13 +31,14 @@ public sealed partial class GameSession
             if (ProjectileDiagnostics is { } diagnostics) diagnostics.Slices++;
             BeginMegaInterceptionFrame(remaining);
             float slice = remaining;
-            if (_megaInterceptionSweeps.Count > 0)
+            if (_megaInterceptionSweeps.Count > 0 || GigaProjectiles.Count > 0)
             {
                 float next = remaining;
                 foreach (var sweeps in _megaInterceptionSweeps.Values)
                     foreach (var sweep in sweeps)
                         if (sweep.EndsAtImpact) next = Math.Min(next, sweep.End);
                 foreach (var shot in Projectiles) next = Math.Min(next, NextMegaInterceptionTime(shot, remaining));
+                foreach (var shot in GigaProjectiles) next = Math.Min(next, NextGigaImpactTime(shot, remaining));
                 // Include a small positive tolerance at a predicted boundary:
                 // resampling a parabola must not repeatedly stop just short.
                 slice = Math.Min(remaining, Math.Max(.000001f, next + .000001f));
@@ -48,6 +49,7 @@ public sealed partial class GameSession
             // Commit this contact before forecasting later bullet contacts.
             // A tower already pierced cannot retroactively survive a later shot.
             UpdateMegaProjectiles(slice);
+            UpdateGigaProjectiles(slice);
             remaining -= slice;
         }
     }

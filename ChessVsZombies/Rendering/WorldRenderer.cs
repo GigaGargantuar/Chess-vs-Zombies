@@ -223,6 +223,16 @@ public sealed class WorldRenderer : IDisposable
                 dynamic.Line(position, tail, .02f, color);
             }
         }
+        foreach (var projectile in session.GigaProjectiles)
+        {
+            var position = ToXna(projectile.Position);
+            var color = new Color(255, 162, 92);
+            dynamic.Box(position - new Vector3(.13f), position + new Vector3(.13f), color);
+            dynamic.Outline(position - new Vector3(.18f), position + new Vector3(.18f), new Color(255, 219, 163), .018f);
+            var direction = ToXna(projectile.Target - projectile.Origin);
+            if (direction.LengthSquared() > .0001f)
+                dynamic.Line(position, position - Vector3.Normalize(direction) * .6f, .035f, color);
+        }
         foreach (var block in session.MegaProjectiles)
         {
             var center = (block.Min + block.Max) * .5f;
@@ -616,6 +626,11 @@ public sealed class WorldRenderer : IDisposable
     }
     private void DrawZombie(Zombie zombie, double time, float flash, bool kiloUsingBuckets)
     {
+        if (zombie.IsGiga)
+        {
+            DrawGiga(zombie, time, flash);
+            return;
+        }
         int firstVertex = dynamic.Vertices.Count;
         var p = ZombieFeet(zombie);
         bool micro = zombie.Size == ZombieSize.Micro;
@@ -693,6 +708,35 @@ public sealed class WorldRenderer : IDisposable
         // equipped item aligned at the actor's size, anchored to its actual feet.
         TransformVertices(firstVertex, Matrix.CreateTranslation(-p) * Matrix.CreateScale(ZombieMeshScale(zombie)) *
             ZombieRotation(zombie) * Matrix.CreateTranslation(p), flash);
+    }
+
+    private void DrawGiga(Zombie zombie, double time, float flash)
+    {
+        int firstVertex = dynamic.Vertices.Count;
+        var feet = ZombieFeet(zombie);
+        var skin = new Color(105, 105, 146);
+        var dark = new Color(38, 38, 64);
+        var resistance = new Color(134, 218, 235);
+        var shot = new Color(255, 162, 92);
+        // The four-cell collision volume stays axis aligned. The broad body
+        // follows that volume while only its ranged weapon turns toward a target.
+        float stride = MathF.Sin((float)time * 2.8f + zombie.Id) * .055f;
+        dynamic.Box(feet + new Vector3(-1.7f, .03f, -1.45f), feet + new Vector3(-.35f, .96f + stride, 1.45f), dark);
+        dynamic.Box(feet + new Vector3(.35f, .03f, -1.45f), feet + new Vector3(1.7f, .96f - stride, 1.45f), dark);
+        dynamic.Box(feet + new Vector3(-1.75f, .85f, -1.55f), feet + new Vector3(1.75f, 2.8f, 1.55f), skin);
+        dynamic.Box(feet + new Vector3(-1.96f, 1.22f, -1.35f), feet + new Vector3(-1.63f, 2.63f, 1.35f), dark);
+        dynamic.Box(feet + new Vector3(1.63f, 1.22f, -1.35f), feet + new Vector3(1.96f, 2.63f, 1.35f), dark);
+        dynamic.Box(feet + new Vector3(-1.18f, 2.8f, -1.12f), feet + new Vector3(1.18f, 3.97f, 1.12f), skin);
+        dynamic.Outline(feet + new Vector3(-1.78f, 1.05f, -1.58f), feet + new Vector3(1.78f, 2.78f, 1.58f), resistance, .035f);
+        foreach (float z in new[] { -1.135f, 1.135f })
+            dynamic.Box(feet + new Vector3(-.78f, 3.35f, z - .012f), feet + new Vector3(.78f, 3.53f, z + .012f), shot);
+        TransformVertices(firstVertex, Matrix.Identity, flash);
+
+        int weaponVertex = dynamic.Vertices.Count;
+        dynamic.Box(feet + new Vector3(-.45f, 1.77f, .65f), feet + new Vector3(.45f, 2.67f, 1.63f), dark);
+        dynamic.Box(feet + new Vector3(-.30f, 1.92f, 1.63f), feet + new Vector3(.30f, 2.52f, 1.96f), shot);
+        dynamic.Box(feet + new Vector3(-.17f, 2.05f, 1.965f), feet + new Vector3(.17f, 2.39f, 1.975f), dark);
+        TransformVertices(weaponVertex, Matrix.CreateTranslation(-feet) * ZombieRotation(zombie) * Matrix.CreateTranslation(feet), flash);
     }
 
     private void DrawStowedKiloCover(Zombie zombie, KiloCover cover)

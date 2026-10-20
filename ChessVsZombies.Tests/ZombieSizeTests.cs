@@ -10,6 +10,7 @@ public sealed class ZombieSizeTests
     public static IEnumerable<object[]> SizesAndKinds()
     {
         foreach (var size in Enum.GetValues<ZombieSize>())
+            if (size != ZombieSize.Giga)
             foreach (var kind in Enum.GetValues<ZombieKind>()) yield return [size, kind];
     }
 

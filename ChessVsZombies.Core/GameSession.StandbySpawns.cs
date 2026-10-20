@@ -138,6 +138,7 @@ public sealed partial class GameSession
         {
             int skipped = Waves[waveIndex].Spawned - _internalWaveSpawned[waveIndex];
             if (skipped <= 0) continue;
+            skipped = ReconcileSkippedGigaSpawns(waveIndex, skipped);
             if (_largeStandbyWaves[waveIndex] is { } large)
             {
                 ReconcileLargeSkippedSpawns(large, Waves[waveIndex], skipped);

@@ -130,6 +130,7 @@ public sealed class DefenseGame : Game
         smoke = smoke || args.Contains("--smoke-camera-up") || args.Contains("--smoke-camera-down");
         smoke = smoke || args.Contains("--smoke-jump-cost");
         smoke = smoke || args.Contains("--smoke-micro");
+        smoke = smoke || args.Contains("--smoke-giga");
         smoke = smoke || args.Contains("--smoke-bottom-layer");
         smokeCombat = args.Contains("--smoke-combat");
         showDeathToll = args.Contains("--smoke-death-toll");
@@ -146,6 +147,7 @@ public sealed class DefenseGame : Game
         if (args.Contains("--smoke-camera-up") || args.Contains("--smoke-camera-down")) smokePanel = args.Contains("--smoke-camera-up") ? "camera-up" : "camera-down";
         if (args.Contains("--smoke-jump-cost")) smokePanel = "jump-cost";
         if (args.Contains("--smoke-micro")) smokePanel = "micro";
+        if (args.Contains("--smoke-giga")) smokePanel = "giga";
         if (args.Contains("--smoke-bottom-layer")) smokePanel = "bottom-layer";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
@@ -158,6 +160,7 @@ public sealed class DefenseGame : Game
         if (smokePanel == "buckets") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 20.5f, 12), .26f, -.35f);
         if (smokePanel == "sizes") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 31), MathF.PI, -.35f);
         if (smokePanel == "micro") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 33), MathF.PI, -.38f);
+        if (smokePanel == "giga") cameraControl = new FlyCamera(new System.Numerics.Vector3(31, 27, 39), -2.55f, -.45f);
         if (smokePanel == "megas") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 26, 42), MathF.PI, -.34f);
         if (smokeThrownCover) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 25, 32), MathF.PI, -.3f);
         if (smokeTowerPenetration) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 34), MathF.PI, -.54f);
@@ -284,6 +287,7 @@ public sealed class DefenseGame : Game
             if (smokePanel == "buckets") PrepareBucketSmoke();
             if (smokePanel == "sizes") PrepareSizeSmoke();
             if (smokePanel == "micro") PrepareMicroSmoke();
+            if (smokePanel == "giga") PrepareGigaSmoke();
             if (smokePanel == "megas") PrepareMegaSmoke();
             if (smokeThrownCover) PrepareThrownCoverSmoke();
             if (smokeTowerPenetration) PrepareTowerPenetrationSmoke();
@@ -310,6 +314,7 @@ public sealed class DefenseGame : Game
                 smokePanel == "megas" ? "Mega / 3 x 3 x 3. Two hands, two real blocks per hand. Stick left / chunky throw right." :
                 smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
                 smokePanel == "micro" ? "Micro flankers / quarter size / 2 HP / 3x speed / incoming-fire dodges and moving turret attacks." :
+                smokePanel == "giga" ? "Giga / 4 x 4 x 4 / 0.2x speed / recovering RES / growing HP and focused ranged blast attacks." :
                 smokePanel == "liquid-turrets" ? "Liquid sharing / wet tower left / obsidian shell at crosshair / one unit of room for pouring." :
                 smokePanel == "formation" ? "Saved formation / ghost towers mark missing positions / auto restore constructs one tower at a time." :
                 smokePanel is "batch-select" or "batch-spend" ? "Batch selection / two 3D corners, one added tower and one excluded tower / upgrade only the cyan group." :
@@ -804,6 +809,32 @@ public sealed class DefenseGame : Game
         }
         selected = null;
         paused = true;
+    }
+    private void PrepareGigaSmoke()
+    {
+        var levels = new LevelCatalog();
+        levels.Set(new LevelDefinition
+        {
+            Number = 1, Name = "Giga ranged fighter demonstration",
+            Waves = [new WaveDefinition { SpawnInterval = 1000, Groups = [new ZombieGroup { Kind = ZombieKind.Basic }] }]
+        });
+        session = new GameSession(levels: levels);
+        foreach (var cell in new[] { new Cell(20, 16, 20), new Cell(21, 16, 20), new Cell(20, 16, 21) })
+            if (!session.Deploy(PieceKind.Rook, cell))
+                throw new InvalidOperationException("Could not prepare the Giga demonstration targets.");
+        session.StartLevel();
+        session.Waves[0].Spawned = session.Waves[0].TotalCount;
+        var giga = new Zombie { Id = 100, WaveIndex = -1, Size = ZombieSize.Giga, IsBoss = true, Cooldown = .25f };
+        giga.InitializeGiga(10_000);
+        giga.Position = giga.StandAt(new Cell(19, 16, 27));
+        giga.FaceToward(-System.Numerics.Vector3.UnitZ);
+        session.Zombies.Add(giga);
+        var comparison = new Zombie { Id = 101, WaveIndex = -1, Kind = ZombieKind.Basic };
+        comparison.Position = comparison.StandAt(new Cell(25, 16, 27));
+        session.Zombies.Add(comparison);
+        selected = null;
+        showZones = false;
+        paused = false;
     }
     private void PrepareMicroSmoke()
     {
@@ -1693,7 +1724,7 @@ public sealed class DefenseGame : Game
         else
         {
             Text("Build. Equip. Hold the center.", left, 180, 16, Muted);
-            Text($"Next {LevelRange}: {session.PreparedWaves.Sum(w => w.SpawnCount) + session.PendingReinforcementCount} zombies / {session.PreparedWaves.Count} wave(s)", left, 206, 15, Muted);
+            Text($"Next {LevelRange}: {session.PreparedWaves.Sum(w => w.EncounterSpawnCount) + session.PendingReinforcementCount} zombies / {session.PreparedWaves.Count} wave(s)", left, 206, 15, Muted);
             Text($"HP budget {session.PreparedWaves.Sum(w => w.HpBudget) + session.PendingReinforcementBudget:N0} / boss reserve {session.PreparedWaves.Sum(w => w.BossBudget) + session.PendingBossReinforcementBudget:N0}", left, 232, 13, Muted);
             Text($"Victory / {session.SurvivorRewardPerTower} currency per surviving tower{(session.AllInOne ? " / 7.5x bonus" : "")}", left, 254, 13, Gold);
             if (session.AllInOne)

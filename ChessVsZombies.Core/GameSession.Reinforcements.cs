@@ -32,8 +32,14 @@ public sealed partial class GameSession
             TargetLevel = targetLevel, TargetWaveIndex = targetWave,
             Id = zombie.Id, Kind = zombie.Kind, Tier = zombie.Tier, Size = zombie.Size, IsBoss = zombie.IsBoss,
             BodyHp = zombie.BodyHp, RetreatReturns = zombie.RetreatReturns,
-            OriginalBudgetCost = zombie.OriginalBudgetCost > 0 ? zombie.OriginalBudgetCost : WaveSpawnPlan.BudgetCost(
+            OriginalBudgetCost = zombie.OriginalBudgetCost > 0 ? zombie.OriginalBudgetCost : zombie.IsGiga ? checked((int)zombie.Giga!.SpawnCost) : WaveSpawnPlan.BudgetCost(
                 new ZombieGroup { Kind = zombie.Kind, Tier = zombie.Tier, Size = zombie.Size, IsBoss = zombie.IsBoss }),
+            Giga = zombie.Giga is { } giga ? new SavedGigaState
+            {
+                InitialCounter = giga.InitialCounter, HpCounter = giga.HpCounter, ResCounter = giga.ResCounter,
+                AttackCounter = giga.AttackCounter, RecoverySeconds = giga.RecoverySeconds,
+                LockedTargetId = _gigaTargets.TryGetValue(zombie.Id, out var targetId) ? targetId : null
+            } : null,
             CarriesBucket = zombie.CarriesBucket, CarriedBlocks = zombie.CarriedBlocks,
             Armor = zombie.ArmorPieces.Select(piece => new SavedZombieArmor
             {
@@ -63,6 +69,7 @@ public sealed partial class GameSession
         _megaActionCooldowns.Remove(zombie.Id);
         _megaGuardMemory.Remove(zombie.Id);
         _microStates.Remove(zombie.Id);
+        _gigaTargets.Remove(zombie.Id);
         zombie.MicroDashRemaining = 0;
         _hurledAllies.Remove(zombie.Id);
         _fallStartHeights.Remove(zombie.Id);
@@ -91,6 +98,7 @@ public sealed partial class GameSession
         var saved = _returningZombies.FirstOrDefault(zombie => zombie.TargetLevel == LevelNumber && zombie.TargetWaveIndex == wave.Index);
         pending = saved != null;
         if (saved == null) return false;
+        if (saved.Size == ZombieSize.Giga && Zombies.Any(zombie => zombie.IsGiga && zombie.Hp > 0)) return false;
         var shape = new Zombie { Size = saved.Size };
         var available = FindSizedSpawnCells(shape).Where(cell => IsEmpty(cell) && HasZombieSupport(cell, shape) &&
             IsBodyClear(shape.StandAt(cell), shape)).ToArray();
@@ -105,6 +113,11 @@ public sealed partial class GameSession
             OriginalBudgetCost = saved.OriginalBudgetCost, RetreatReturns = 0,
             Lane = cell.X == 0 ? 0 : cell.X + shape.GridFootprint == WorldGrid.Size ? 1 : cell.Z == 0 ? 2 : 3
         };
+        if (saved.Giga is { } giga)
+        {
+            zombie.RestoreGigaState(giga.InitialCounter, giga.HpCounter, giga.ResCounter, giga.AttackCounter, giga.RecoverySeconds);
+            if (giga.LockedTargetId is { } lockedTargetId) _gigaTargets[zombie.Id] = lockedTargetId;
+        }
         zombie.RestoreBodyAndArmor(saved.BodyHp, saved.Armor.Select(piece => new ArmorPiece
         {
             Slot = piece.Slot, Tier = piece.Tier, Hp = piece.Hp, HeatProtectionRemaining = piece.HeatProtectionRemaining,

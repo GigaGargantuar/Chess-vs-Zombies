@@ -19,6 +19,7 @@ public sealed class SavedReturningZombie
     [JsonRequired] public List<SavedZombieArmor> Armor { get; set; } = [];
     [JsonRequired] public List<SavedZombieBucket> Buckets { get; set; } = [];
     [JsonRequired] public List<SavedKiloBlock> HeldBlocks { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public SavedGigaState? Giga { get; set; }
 
     internal SavedReturningZombie Copy() => new()
     {
@@ -26,6 +27,7 @@ public sealed class SavedReturningZombie
         Kind = Kind, Tier = Tier, Size = Size, IsBoss = IsBoss, BodyHp = BodyHp,
         RetreatReturns = RetreatReturns, OriginalBudgetCost = OriginalBudgetCost,
         CarriesBucket = (Size is ZombieSize.Kilo or ZombieSize.Mega) || CarriesBucket, CarriedBlocks = CarriedBlocks,
+        Giga = Giga?.Copy(),
         Armor = Armor.Select(piece => new SavedZombieArmor
         { Slot = piece.Slot, Tier = piece.Tier, Hp = piece.Hp, HeatProtectionRemaining = piece.HeatProtectionRemaining }).ToList(),
         // Earlier Kilos exchanged their entire block loadout for buckets. Give
@@ -39,6 +41,22 @@ public sealed class SavedReturningZombie
             BlockIndex = block.BlockIndex, Material = block.Material, Hp = block.Hp, WasBarrier = block.WasBarrier,
             OffsetX = block.OffsetX, OffsetY = block.OffsetY, OffsetZ = block.OffsetZ
         }).ToList()
+    };
+}
+
+public sealed class SavedGigaState
+{
+    [JsonRequired] public int InitialCounter { get; set; }
+    [JsonRequired] public int HpCounter { get; set; }
+    [JsonRequired] public int ResCounter { get; set; }
+    [JsonRequired] public int AttackCounter { get; set; }
+    [JsonRequired] public double RecoverySeconds { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? LockedTargetId { get; set; }
+
+    internal SavedGigaState Copy() => new()
+    {
+        InitialCounter = InitialCounter, HpCounter = HpCounter, ResCounter = ResCounter,
+        AttackCounter = AttackCounter, RecoverySeconds = RecoverySeconds, LockedTargetId = LockedTargetId
     };
 }
 

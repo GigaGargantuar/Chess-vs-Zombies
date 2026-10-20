@@ -149,7 +149,11 @@ public class WaveBudgetTests
     [InlineData(35, GearTier.Osmium)]
     public void StrongestArmorRemainsMostCommonWhileEveryEarlierArmorTierStillAppears(int level, GearTier strongest)
     {
-        var groups = WaveSpawnPlanner.Plan(new LevelCatalog().Get(level).Waves[0]).Groups
+        var wave = new LevelCatalog().Get(level).Waves[0];
+        // This is the campaign's conventional gear-composition contract. A
+        // Giga reservation can legitimately leave no ordinary purchases.
+        wave.EnableGiga = false;
+        var groups = WaveSpawnPlanner.Plan(wave).Groups
             .Where(group => !group.IsBoss && group.Kind is ZombieKind.Armored or ZombieKind.ArmedArmored).ToArray();
         int strongestCount = groups.Where(group => group.Tier == strongest).Sum(group => group.Count);
         for (int tier = 0; tier < (int)strongest; tier++)

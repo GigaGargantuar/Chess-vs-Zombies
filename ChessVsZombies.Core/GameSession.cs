@@ -129,6 +129,8 @@ public sealed partial class GameSession
         ResetBucketBehavior();
         ResetKilos();
         ResetMegas();
+        ResetGigas();
+        ClearGigaSpawns();
         ResetSizeRoutes();
         ResetRetreatBehavior();
         _returningZombies.Clear();
@@ -437,7 +439,7 @@ public sealed partial class GameSession
             LevelCatalog.Validate(Level);
             nextEncounter = PrepareEncounter(checked(LevelNumber + LevelSpan), merged: false);
             plans = AllInOne ? [_allInOnePlan!] : Level.Waves.Select(WaveSpawnPlanner.Plan).ToArray();
-            if (plans.Sum(plan => (long)plan.SpawnCount) > int.MaxValue)
+            if (plans.Sum(plan => (long)plan.EncounterSpawnCount) > int.MaxValue)
                 throw new InvalidDataException("The combined standby roster exceeds the supported integer range.");
             for (var i = 0; i < plans.Length; i++)
             {
@@ -471,6 +473,7 @@ public sealed partial class GameSession
         _nextEncounter = nextEncounter.Level;
         _nextSourceLevelNumbers = nextEncounter.SourceLevels;
         PrepareStandbySpawns(plans);
+        InitializeGigaSpawns(plans);
         Phase = GamePhase.Combat;
         Message = MergeFiveLevels
             ? $"Levels {LevelNumber}–{EndLevelNumber}: {Level.Name}. Defend the core!"
@@ -531,7 +534,7 @@ public sealed partial class GameSession
     public void DamageZombie(Zombie zombie, float damage, DamageKind kind = DamageKind.Blunt,
         ShotKind? shot = null, Vector3? incomingDirection = null)
     {
-        if (damage <= 0 || !float.IsFinite(damage) || !Enum.IsDefined(kind) || shot.HasValue && !Enum.IsDefined(shot.Value) || zombie.BodyHp <= 0) return;
+        if (damage < 0 || damage == 0 && !zombie.IsGiga || !float.IsFinite(damage) || !Enum.IsDefined(kind) || shot.HasValue && !Enum.IsDefined(shot.Value) || zombie.BodyHp <= 0) return;
         if (kind == DamageKind.Thermal)
             damage = zombie.ConsumeHeatProtection(damage / Balance.LavaDamagePerSecond) * Balance.LavaDamagePerSecond;
         ApplyZombieDamage(zombie, damage, kind, shot, incomingDirection);
@@ -547,9 +550,10 @@ public sealed partial class GameSession
     private void ApplyZombieDamage(Zombie zombie, float damage, DamageKind kind,
         ShotKind? shot = null, Vector3? incomingDirection = null)
     {
-        if (damage <= 0 || zombie.BodyHp <= 0) return;
+        if (damage < 0 || damage == 0 && !zombie.IsGiga || zombie.BodyHp <= 0) return;
         var before = zombie.Hp;
         var bodyBefore = zombie.BodyHp;
+        var gigaDamage = zombie.Giga is { } giga && damage > giga.Resistance ? Math.Min(bodyBefore, damage) : 0;
         var armorBefore = zombie.ArmorPieces.Sum(piece => piece.Hp);
         var sankInLava = zombie.SinksIn(LiquidKind.Lava);
         var sankInMercury = zombie.SinksIn(LiquidKind.Mercury);
@@ -559,7 +563,7 @@ public sealed partial class GameSession
             RecordFieldDeath(zombie);
             InvalidateProjectileColliders();
         }
-        var durabilityLost = (bodyBefore - zombie.BodyHp) + (armorBefore - zombie.ArmorPieces.Sum(piece => piece.Hp));
+        var durabilityLost = zombie.IsGiga ? gigaDamage : (bodyBefore - zombie.BodyHp) + (armorBefore - zombie.ArmorPieces.Sum(piece => piece.Hp));
         Feedback.Record(zombie.Id, zombie.Position, durabilityLost, kind);
         if (durabilityLost > 0)
         {
@@ -570,14 +574,20 @@ public sealed partial class GameSession
         if (zombie.BodyHp > 0 && (sankInLava != zombie.SinksIn(LiquidKind.Lava) || sankInMercury != zombie.SinksIn(LiquidKind.Mercury)))
             ClearZombieMovement(zombie);
         // Body death discards any remaining armor from the wave's live HP pool.
-        var actual = before - zombie.Hp;
+        var actual = zombie.IsGiga ? gigaDamage : before - zombie.Hp;
         if (zombie.BodyHp <= 0) { QueueDeathBlock(zombie); SpillZombieBucket(zombie); HandleKiloDeath(zombie); }
         if (zombie.WaveIndex >= 0 && zombie.WaveIndex < Waves.Count)
         {
             var wave = Waves[zombie.WaveIndex];
+            // Growth adds surviving combat HP, never spawn purchases or negative damage.
+            var growth = zombie.IsGiga ? zombie.Hp - (before - gigaDamage) : 0;
+            wave.TotalHp += growth;
             wave.DamageTaken = Math.Min(wave.TotalHp, wave.DamageTaken + actual);
             if (_largeStandbyWaves.Count > zombie.WaveIndex && _largeStandbyWaves[zombie.WaveIndex] is { } large)
+            {
+                large.ExactTotalHp += growth;
                 large.ExactDamageTaken = Math.Min(large.ExactTotalHp, large.ExactDamageTaken + actual);
+            }
         }
         zombie.DamageSinceLaneSwitch += actual;
         var threshold = zombie.MaxHp * Balance.LaneThreshold(GetSourceLevelNumber(zombie.WaveIndex));
@@ -608,6 +618,7 @@ public sealed partial class GameSession
             wave.SpawnTimer -= dt;
             while (wave.SpawnTimer <= 0 && wave.Spawned < wave.TotalCount)
             {
+                if (TrySpawnGiga(wave)) { wave.SpawnTimer += Level.Waves[wave.Index].SpawnInterval; continue; }
                 if (_largeStandbyWaves[wave.Index] is { } large &&
                     !_returningZombies.Any(zombie => zombie.TargetLevel == LevelNumber && zombie.TargetWaveIndex == wave.Index) &&
                     ScheduleLargeDueBatch(large, wave, Level.Waves[wave.Index].SpawnInterval))
@@ -621,6 +632,8 @@ public sealed partial class GameSession
         }
 
         if (_navigationRevision != _topologyRevision || _navigationWorldRevision != World.Revision) RebuildNavigation();
+        foreach (var zombie in Zombies)
+            if (zombie.BodyHp > 0) zombie.Giga?.AdvanceRecovery(dt);
         using (Profile?.Measure("Turrets")) UpdateTurrets(dt);
         // Micros see newly launched bullets before those bullets advance. Other
         // zombies retain the existing projectile-before-movement ordering.
@@ -684,10 +697,11 @@ public sealed partial class GameSession
             }
             Phase = GamePhase.Defeat;
             ClearStandbySpawns();
+            ClearGigaSpawns();
             Message = $"The core fell on level {LevelNumber}. Start a new defense to try again.";
             return;
         }
-        if (Zombies.Count == 0 && _livingStandbyCount == 0 &&
+        if (Zombies.Count == 0 && _livingStandbyCount == 0 && PendingGigaSpawnCount == 0 &&
             !_returningZombies.Any(zombie => zombie.TargetLevel == LevelNumber))
         {
             var reward = checked(SurvivorRewardPerTower * Turrets.Count(turret => turret.Hp > 0));
@@ -703,6 +717,7 @@ public sealed partial class GameSession
             _previewLevel = null;
             Phase = GamePhase.Building;
             ClearStandbySpawns();
+            ClearGigaSpawns();
             Message = $"Level complete! {reward} currency from surviving pieces. Prepare level {LevelNumber}.";
         }
     }
@@ -723,6 +738,7 @@ public sealed partial class GameSession
             return true;
         }
         if (reinforcementPending) return false;
+        if (TrySpawnGiga(wave)) return true;
         if (_largeStandbyWaves[wave.Index] is { } large) return SpawnLargeManually(large, wave);
         var waiting = _waitingStandby[wave.Index];
         if (waiting.Count > 0) return TryActivateStandby(waiting[0], wave);
@@ -870,6 +886,8 @@ public sealed partial class GameSession
         if (TryUpdatePillarDeparture(zombie, dt)) return;
         if (IsZombieRetreating(zombie) && TryCompleteRetreat(zombie, dt)) return;
         if (zombie.Size == ZombieSize.Micro && TryUpdateMicro(zombie, dt)) return;
+        // Shooting never suspends a fall, jump, or ongoing physical step.
+        if (!zombie.NextCell.HasValue && HasSolidFooting(zombie.Position, zombie) && TryGigaRangedAttack(zombie)) return;
         if (zombie.NextCell is { } movingTo)
         {
             if (!_stepOrigins.TryGetValue(zombie.Id, out var movingFrom))
@@ -994,8 +1012,9 @@ public sealed partial class GameSession
         {
             if (zombie.Cooldown <= 0)
             {
-                CoreHp -= zombie.Attack;
-                if (zombie.Attack > 0) RecordZombieProgress(zombie);
+                CoreHp -= zombie.AttackDamage;
+                zombie.Giga?.RecordSuccessfulAttack(false);
+                if (zombie.AttackDamage > 0) RecordZombieProgress(zombie);
                 zombie.Cooldown = 1f;
             }
             return;
@@ -1205,8 +1224,9 @@ public sealed partial class GameSession
         {
             if (zombie.Cooldown <= 0)
             {
-                CoreHp -= zombie.Attack;
-                if (zombie.Attack > 0) RecordZombieProgress(zombie);
+                CoreHp -= zombie.AttackDamage;
+                zombie.Giga?.RecordSuccessfulAttack(false);
+                if (zombie.AttackDamage > 0) RecordZombieProgress(zombie);
                 zombie.Cooldown = 1;
             }
             return true;
@@ -1587,10 +1607,11 @@ public sealed partial class GameSession
         zombie.FaceToward(cell.Center - zombie.Position);
         if (zombie.Cooldown > 0) return true;
         zombie.Cooldown = 1f;
-        if (zombie.Attack > 0) RecordZombieProgress(zombie);
+        var damage = zombie.AttackDamage;
+        if (damage > 0) RecordZombieProgress(zombie);
         if (barrier != null)
         {
-            barrier.Hp -= zombie.Attack;
+            barrier.Hp -= damage;
             if (barrier.Hp <= 0)
             {
                 World.RemoveBarrier(cell);
@@ -1601,7 +1622,7 @@ public sealed partial class GameSession
         {
             var face = shell.Parts.MinBy(part => Vector3.DistanceSquared(contactPosition ?? zombie.Position,
                 Vector3.Clamp(contactPosition ?? zombie.Position, part.Min, part.Max)))!.Face;
-            if (World.DamageObsidianPart(cell, face, zombie.Attack))
+            if (World.DamageObsidianPart(cell, face, damage))
             {
                 ShatterObsidian(cell);
                 SettleDefenses();
@@ -1609,7 +1630,7 @@ public sealed partial class GameSession
         }
         else if (turret != null)
         {
-            turret.Hp -= zombie.Attack;
+            turret.Hp -= damage;
             if (turret.Hp <= 0)
             {
                 Turrets.Remove(turret);
@@ -1618,15 +1639,21 @@ public sealed partial class GameSession
                 SettleDefenses();
             }
         }
-        else if (breakableTerrain && World.DamageTerrain(cell, zombie.Attack))
+        else if (breakableTerrain && World.DamageTerrain(cell, damage))
             SettleDefenses();
         else if (obsidian && World.DamageObsidianPart(cell, World.GetObsidian(cell)!.Parts
                      .MinBy(part => Vector3.DistanceSquared(contactPosition ?? zombie.Position,
                          Vector3.Clamp(contactPosition ?? zombie.Position, part.Min, part.Max)))!.Face,
-                     zombie.Attack))
+                     damage))
         {
             ShatterObsidian(cell);
             SettleDefenses();
+        }
+        if (zombie.Giga is { } giga && damage > 0)
+        {
+            bool killedLocked = turret is { Hp: <= 0 } && _gigaTargets.GetValueOrDefault(zombie.Id) == turret.Id;
+            giga.RecordSuccessfulAttack(killedLocked);
+            if (killedLocked) _gigaTargets.Remove(zombie.Id);
         }
         return true;
     }

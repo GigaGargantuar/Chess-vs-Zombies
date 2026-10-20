@@ -86,7 +86,7 @@ public sealed partial class GameSession
         combined.Waves = [new WaveDefinition
         {
             SpawnInterval = finalWave.SpawnInterval / 5,
-            Groups = plan.Groups.Select(group => new ZombieGroup
+            Groups = (plan.Groups.Count > 0 ? plan.Groups : finalWave.Groups).Select(group => new ZombieGroup
             {
                 Kind = group.Kind, Tier = group.Tier, Count = group.Count, Size = group.Size, IsBoss = group.IsBoss
             }).ToList()

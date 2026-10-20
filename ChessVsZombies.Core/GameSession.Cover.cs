@@ -34,7 +34,7 @@ public sealed partial class GameSession
     public bool IsZombieHiding(Zombie zombie) => zombie.BodyHp > 0 && CanGatherBehindCover(zombie) && !zombie.NextCell.HasValue &&
         HasSolidFooting(zombie.Position, zombie) && _coverWaiting.ContainsKey(zombie.Id);
 
-    private bool CanGatherBehindCover(Zombie zombie) => zombie.Size != ZombieSize.Micro && !IsZombieRetreating(zombie) &&
+    private bool CanGatherBehindCover(Zombie zombie) => !zombie.IsGiga && zombie.Size != ZombieSize.Micro && !IsZombieRetreating(zombie) &&
         !(zombie.IsGiant && GetKiloConstructionBlocks(zombie) > 0);
 
     private void ResetCoverBehavior()

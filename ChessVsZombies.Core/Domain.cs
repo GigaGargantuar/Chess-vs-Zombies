@@ -18,7 +18,7 @@ public enum ToolKind { Shovel, Pickaxe }
 public enum PieceKind { Pawn, Knight, Bishop, Rook }
 public enum UpgradeKind { HP, ATK, Orthogonal, PlaneDiagonal, SpaceDiagonal, Jump }
 public enum ZombieKind { Basic, Armed, Armored, ArmedArmored }
-public enum ZombieSize { Standard, Milli, Kilo, Mega, Micro }
+public enum ZombieSize { Standard, Milli, Kilo, Mega, Micro, Giga }
 public enum KiloEquipmentMode { Covers, Buckets }
 public enum GearTier { Wood, Stone, Copper, Iron, Gold, Diamond, Osmium }
 public enum GamePhase { Building, Combat, Defeat }
@@ -165,40 +165,43 @@ public sealed class Zombie
         {
             if (!Enum.IsDefined(value)) throw new ArgumentOutOfRangeException(nameof(value));
             _size = value;
+            Giga = value == ZombieSize.Giga ? new GigaState() : null;
             _bodyHp = MaxBodyHp;
             _armor = null;
         }
     }
     public bool IsBoss { get; init; }
-    public bool IsGiant => Size is ZombieSize.Kilo or ZombieSize.Mega;
-    public float BodyScale => Size switch { ZombieSize.Micro => .25f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
+    public bool IsGiga => Size == ZombieSize.Giga;
+    public GigaState? Giga { get; private set; }
+    public bool IsGiant => Size is ZombieSize.Kilo or ZombieSize.Mega or ZombieSize.Giga;
+    public float BodyScale => Size switch { ZombieSize.Micro => .25f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 2, ZombieSize.Mega => 3, ZombieSize.Giga => 4, _ => 1 };
     public float HealthMultiplier => Size switch { ZombieSize.Micro => .2f, ZombieSize.Milli => .5f, ZombieSize.Kilo => 4, ZombieSize.Mega => 9, _ => 1 };
-    public float ArmorDurabilityMultiplier => Size == ZombieSize.Micro ? .25f : HealthMultiplier;
-    public float MaxBodyHp => Balance.ZombieHp * HealthMultiplier;
+    public float ArmorDurabilityMultiplier => IsGiga ? 0 : Size == ZombieSize.Micro ? .25f : HealthMultiplier;
+    public float MaxBodyHp => Giga?.MaxHp ?? Balance.ZombieHp * HealthMultiplier;
     public Vector3 BodyHalfExtents => IsGiant ? new Vector3(BodyScale * .5f) : new Vector3(.2f, .39f, .2f) * BodyScale;
-    public int GridFootprint => Size switch { ZombieSize.Kilo => 2, ZombieSize.Mega => 3, _ => 1 };
+    public int GridFootprint => Size switch { ZombieSize.Kilo => 2, ZombieSize.Mega => 3, ZombieSize.Giga => 4, _ => 1 };
     public float StandingHeight => .5f * BodyScale;
-    public bool HasWeapon => Kind is ZombieKind.Armed or ZombieKind.ArmedArmored;
+    public bool HasWeapon => !IsGiga && Kind is ZombieKind.Armed or ZombieKind.ArmedArmored;
     public float MicroDashRemaining { get; internal set; }
-    public float MovementSpeed => NavigationCosts.WalkTilesPerSecond * (HasWeapon ? 1 : 1.5f) *
+    public float MovementSpeed => IsGiga ? NavigationCosts.WalkTilesPerSecond * 1.5f * .2f : NavigationCosts.WalkTilesPerSecond * (HasWeapon ? 1 : 1.5f) *
         (Size switch { ZombieSize.Micro => 3, ZombieSize.Milli => 2, ZombieSize.Kilo => .75f, ZombieSize.Mega => .5f, _ => 1 }) *
         (Size == ZombieSize.Micro && MicroDashRemaining > 0 ? 2 : 1);
     public Vector3 StandAt(Cell cell) => cell.Center + new Vector3((GridFootprint - 1) * .5f, StandingHeight - .5f, (GridFootprint - 1) * .5f);
     public Vector3 Position { get; set; }
     public Vector3 Facing { get; private set; } = Vector3.UnitZ;
     private bool _carriesBucket;
-    public bool CarriesBucket { get => IsGiant || _carriesBucket; set => _carriesBucket = value; }
+    public bool CarriesBucket { get => !IsGiga && (IsGiant || _carriesBucket); set => _carriesBucket = value; }
     public KiloEquipmentMode KiloEquipmentMode { get; internal set; } = KiloEquipmentMode.Covers;
     public float KiloBucketActionRemaining { get; internal set; }
     private readonly ZombieBucketLoad[] _bucketLoads = [new(), new()];
-    public int BucketCount => IsGiant ? 2 : 1;
+    public int BucketCount => IsGiga ? 0 : IsGiant ? 2 : 1;
     public int BucketCapacity => Size == ZombieSize.Mega ? 15 : Balance.BucketCapacity;
     public IReadOnlyList<ZombieBucketLoad> BucketLoads => _bucketLoads;
     public int HeldBucketUnits => _bucketLoads[0].Units + _bucketLoads[1].Units;
     // Preserve the original one-bucket API for existing callers and checkpoints.
     public int BucketUnits { get => _bucketLoads[0].Units; internal set => _bucketLoads[0].Units = value; }
     public LiquidKind? BucketKind { get => _bucketLoads[0].Kind; internal set => _bucketLoads[0].Kind = value; }
-    public int CarriedBlocks { get => CarriesBucket && !IsGiant ? 0 : _carriedBlocks; internal set => _carriedBlocks = value; }
+    public int CarriedBlocks { get => IsGiga || CarriesBucket && !IsGiant ? 0 : _carriedBlocks; internal set => _carriedBlocks = value; }
     public Material CarriedBlockMaterial => Kind == ZombieKind.Basic ? Material.Dirt : Tier switch
     {
         GearTier.Wood => Material.Wood,
@@ -240,7 +243,7 @@ public sealed class Zombie
             }
         }
     }
-    public float MaxHp { get => _maximumHp ?? MaxBodyHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(Tier) * ArmorDurabilityMultiplier : 0); init => _maximumHp = value; }
+    public float MaxHp { get => Giga?.MaxHp ?? _maximumHp ?? MaxBodyHp + (Kind is ZombieKind.Armored or ZombieKind.ArmedArmored ? 4 * Balance.GearHp(Tier) * ArmorDurabilityMultiplier : 0); init => _maximumHp = value; }
     public float AirRemaining { get; internal set; } = Balance.AirSeconds;
     public bool SinksIn(LiquidKind liquid) => liquid switch
     {
@@ -250,6 +253,7 @@ public sealed class Zombie
         _ => throw new ArgumentOutOfRangeException(nameof(liquid))
     };
     public int Attack { get; set; }
+    public float AttackDamage => Giga?.AttackDamage ?? Attack;
     public float MoveProgress { get; set; }
     public float Cooldown { get; set; }
     public float DamageSinceLaneSwitch { get; set; }
@@ -258,6 +262,25 @@ public sealed class Zombie
     public Cell Cell => CellAt(Position);
     public Cell CellAt(Vector3 position) => new((int)MathF.Floor(position.X - (GridFootprint - 1) * .5f),
         (int)MathF.Floor(position.Y - StandingHeight + .5f), (int)MathF.Floor(position.Z - (GridFootprint - 1) * .5f));
+
+    public void InitializeGiga(double originalWaveHp) => InitializeGigaCounter(GigaRules.SelectInitialCounter(originalWaveHp));
+
+    public void InitializeGigaCounter(int initialCounter)
+    {
+        if (!IsGiga) throw new InvalidOperationException("Only a Giga has progression counters.");
+        Giga = new GigaState(initialCounter);
+        _bodyHp = Giga.MaxHp;
+        _maximumHp = null;
+        _armor = [];
+    }
+
+    public void RestoreGigaState(int initialCounter, int hpCounter, int resCounter, int attackCounter, double recoverySeconds)
+    {
+        if (!IsGiga) throw new InvalidOperationException("Only a Giga has progression counters.");
+        Giga = GigaState.Restore(initialCounter, hpCounter, resCounter, attackCounter, recoverySeconds);
+        _maximumHp = null;
+        _armor = [];
+    }
 
     /// <summary>Faces a travel or attack direction while keeping the body upright.</summary>
     public void FaceToward(Vector3 direction)
@@ -284,6 +307,7 @@ public sealed class Zombie
     {
         if (_armor != null) return;
         _armor = [];
+        if (IsGiga) return;
         if (Kind is not (ZombieKind.Armored or ZombieKind.ArmedArmored)) return;
         // Stable slot order also defines compatibility HP assignment and heat-budget consumption.
         foreach (var slot in Enum.GetValues<ArmorSlot>())
@@ -297,6 +321,7 @@ public sealed class Zombie
 
     internal float ReequipArmor(GearTier? tier)
     {
+        if (IsGiga) return 0;
         float before = Hp;
         if (tier.HasValue)
         {
@@ -313,14 +338,20 @@ public sealed class Zombie
     internal void RestoreBodyAndArmor(float bodyHp, IEnumerable<ArmorPiece> armor)
     {
         _bodyHp = bodyHp;
-        _armor = armor.ToList();
+        _armor = IsGiga ? [] : armor.ToList();
         _maximumHp = null;
     }
 
     internal void ApplyDamage(float damage, DamageKind kind, ShotKind? shot = null, Vector3? incomingDirection = null)
     {
-        if (!float.IsFinite(damage) || damage <= 0 || _bodyHp <= 0 || !Enum.IsDefined(kind) ||
+        if (!float.IsFinite(damage) || damage < 0 || _bodyHp <= 0 || !Enum.IsDefined(kind) ||
             (shot.HasValue && !Enum.IsDefined(shot.Value))) return;
+        if (Giga is { } giga)
+        {
+            giga.ApplyHit(damage, ref _bodyHp);
+            return;
+        }
+        if (damage == 0) return;
         EnsureArmor();
         if (kind is DamageKind.Pierce or DamageKind.Blunt)
         {
@@ -438,6 +469,7 @@ public sealed class WaveDefinition
     public List<ZombieGroup> Groups { get; set; } = [];
     public int? HpBudget { get; set; }
     public float BossBudgetFraction { get; set; } = .03f;
+    public bool EnableGiga { get; set; }
 }
 public sealed class LevelDefinition
 {

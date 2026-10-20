@@ -8,11 +8,12 @@ namespace ChessVsZombies.Tests;
 
 public sealed class BottomLayerZombieTests
 {
-    public static IEnumerable<object[]> Sizes() => Enum.GetValues<ZombieSize>().Select(size => new object[] { size });
+    public static IEnumerable<object[]> Sizes() => Enum.GetValues<ZombieSize>().Where(size => size != ZombieSize.Giga).Select(size => new object[] { size });
 
     public static IEnumerable<object[]> SpawnCases()
     {
         foreach (var size in Enum.GetValues<ZombieSize>())
+            if (size != ZombieSize.Giga)
             foreach (bool returning in new[] { false, true }) yield return [size, returning];
     }
 
