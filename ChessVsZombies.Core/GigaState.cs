@@ -1,38 +1,14 @@
 namespace ChessVsZombies.Core;
 
 /// <summary>Wave initialization and the three independent constant-based Giga progressions.</summary>
-public static class GigaRules
+public static partial class GigaRules
 {
-    public const int MinimumInitialCounter = 10;
     public static readonly double GoldenRatio = (1 + Math.Sqrt(5)) / 2;
-
-    /// <summary>Choose the closest HP to half the original wave pool; exact ties choose the lower counter.</summary>
-    public static int SelectInitialCounter(double originalWaveHp)
-    {
-        if (!double.IsFinite(originalWaveHp) || originalWaveHp < 0) throw new ArgumentOutOfRangeException(nameof(originalWaveHp));
-        double target = originalWaveHp / 2;
-        double root = Math.Pow(target, 1 / Math.E);
-        if (root >= int.MaxValue) throw new ArgumentOutOfRangeException(nameof(originalWaveHp));
-        int lower = Math.Max(MinimumInitialCounter, (int)Math.Floor(root));
-        if (lower == int.MaxValue) return lower;
-        int upper = lower + 1;
-        double midpoint = (MaximumHp(lower) + MaximumHp(upper)) / 2;
-        return target > midpoint ? upper : lower;
-    }
 
     public static double MaximumHp(int counter)
     {
         if (counter < 1) throw new ArgumentOutOfRangeException(nameof(counter));
         return Math.Pow(counter, Math.E);
-    }
-
-    /// <summary>Integral wave budgets charge the ceiling once, without rounding the combat HP.</summary>
-    public static long SpawnCost(int initialCounter)
-    {
-        if (initialCounter < MinimumInitialCounter) throw new ArgumentOutOfRangeException(nameof(initialCounter));
-        double cost = Math.Ceiling(MaximumHp(initialCounter));
-        if (cost >= long.MaxValue) throw new ArgumentOutOfRangeException(nameof(initialCounter));
-        return (long)cost;
     }
 }
 
