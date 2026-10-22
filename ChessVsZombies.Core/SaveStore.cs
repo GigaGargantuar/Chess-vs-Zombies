@@ -608,7 +608,7 @@ public static class SaveStore
     {
         var giga = zombie.Giga;
         if (giga == null || giga.InitialCounter < GigaRules.MinimumInitialCounter || giga.HpCounter < giga.InitialCounter ||
-            giga.HpCounter == int.MaxValue || giga.ResCounter is < 1 or int.MaxValue || giga.AttackCounter < 1 || !double.IsFinite(giga.RecoverySeconds) ||
+            giga.HpCounter == int.MaxValue || giga.ResCounter is < 1 or int.MaxValue || giga.AttackCounter is < 1 or int.MaxValue || !double.IsFinite(giga.RecoverySeconds) ||
             giga.RecoverySeconds is < 0 or >= 1 ||
             giga.LockedTargetId is { } targetId && (targetId <= 0 || targetId == int.MaxValue || targetId == zombie.Id) ||
             zombie.CarriesBucket || zombie.CarriedBlocks != 0 ||
@@ -616,8 +616,9 @@ public static class SaveStore
             throw new InvalidDataException("A returning Giga has invalid progression or equipment data.");
         double initialHp = GigaRules.MaximumHp(giga.InitialCounter);
         double maximumHp = GigaRules.MaximumHp(giga.HpCounter);
-        double attack = Math.Pow(GigaRules.GoldenRatio, giga.AttackCounter);
-        if (initialHp > int.MaxValue || !float.IsFinite((float)maximumHp) || !float.IsFinite((float)attack) ||
+        // ATK is derived from its exact saved counter. A legitimate high counter
+        // can exceed float or double range without making the progression invalid.
+        if (initialHp > int.MaxValue || !float.IsFinite((float)maximumHp) ||
             zombie.OriginalBudgetCost != (long)Math.Ceiling(initialHp))
             throw new InvalidDataException("A returning Giga has invalid derived stats or original spawn cost.");
     }

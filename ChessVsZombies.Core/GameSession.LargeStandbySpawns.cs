@@ -353,7 +353,7 @@ public sealed partial class GameSession
             return true;
         }
         if (!large.Fronts.TryGetValue(index, out var front) || !TryActivateStandby(front, wave)) return false;
-        _scheduledNormalSlots[wave.Index]++;
+        _scheduledNormalSlots[wave.Index] = Math.Min(large.Plan.SpawnCount, _scheduledNormalSlots[wave.Index] + 1);
         return true;
     }
 

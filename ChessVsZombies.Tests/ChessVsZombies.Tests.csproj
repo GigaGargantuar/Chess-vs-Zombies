@@ -15,5 +15,6 @@
     </PackageReference>
     <ProjectReference Include="../ChessVsZombies.Core/ChessVsZombies.Core.csproj" />
     <Compile Include="../ChessVsZombies/Rendering/TurretVisualCache.cs" Link="Rendering/TurretVisualCache.cs" />
+    <Compile Include="../ChessVsZombies/InputFocusState.cs" Link="InputFocusState.cs" />
   </ItemGroup>
 </Project>

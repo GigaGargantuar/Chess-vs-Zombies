@@ -46,6 +46,11 @@ public sealed class NaturalKiloArmorTests
     public void NaturalSpawnCreatesFourRealScaledArmorPieces(int level, GearTier tier)
     {
         var catalog = new LevelCatalog();
+        var definition = catalog.Get(level);
+        // Isolate the ordinary boss armor path while retaining the generated
+        // composition and budget; periodic Giga purchases have separate coverage.
+        foreach (var wave in definition.Waves) wave.EnableGiga = false;
+        catalog.Set(definition);
         var game = new GameSession(levels: catalog);
         var state = game.ExportState();
         state.LevelNumber = level;

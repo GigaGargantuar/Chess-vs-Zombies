@@ -4,6 +4,8 @@ namespace ChessVsZombies.Core;
 public static partial class GigaRules
 {
     public static readonly double GoldenRatio = (1 + Math.Sqrt(5)) / 2;
+    public const int BlastSize = 3;
+    public const float BlastHalfExtent = BlastSize / 2f;
 
     public static double MaximumHp(int counter)
     {
@@ -24,15 +26,14 @@ public sealed class GigaState
     public float MaxHp => (float)GigaRules.MaximumHp(HpCounter);
     public float Resistance => (float)_resistance;
     public float AttackDamage => (float)Math.Pow(GigaRules.GoldenRatio, AttackCounter);
-    // Algebraically equal to log10(ATK), and remains usable even when the float ATK overflows.
-    public float BlastRadius => (float)(AttackCounter * Math.Log10(GigaRules.GoldenRatio));
+    // Compatibility half-extent: the blast is a fixed cube, independent of ATK.
+    public float BlastRadius => GigaRules.BlastHalfExtent;
     public long SpawnCost => GigaRules.SpawnCost(InitialCounter);
 
     public GigaState(int initialCounter = GigaRules.MinimumInitialCounter)
     {
         if (initialCounter < GigaRules.MinimumInitialCounter) throw new ArgumentOutOfRangeException(nameof(initialCounter));
-        InitialCounter = HpCounter = ResCounter = initialCounter;
-        AttackCounter = 1;
+        InitialCounter = HpCounter = ResCounter = AttackCounter = initialCounter;
         RecomputeResistance();
     }
 
@@ -82,10 +83,10 @@ public sealed class GigaState
         }
     }
 
-    /// <summary>Call once for a damaging projectile impact; a kill of its locked target resets ATK.</summary>
-    public void RecordSuccessfulAttack(bool killedLockedTarget)
+    /// <summary>Call once for a successful attack; killing anything resets ATK to 1.</summary>
+    public void RecordSuccessfulAttack(bool killedAnything)
     {
-        AttackCounter = killedLockedTarget ? 1 : checked(AttackCounter + 1);
+        AttackCounter = killedAnything ? 1 : checked(AttackCounter + 1);
     }
 
     private void RecomputeResistance()

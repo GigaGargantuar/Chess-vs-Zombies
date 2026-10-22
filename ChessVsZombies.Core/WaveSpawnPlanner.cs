@@ -1,6 +1,6 @@
 namespace ChessVsZombies.Core;
 
-/// <summary>Independent purchases use one immutable snapshot of the original wave's combat HP.</summary>
+/// <summary>An initial price estimate; recurring purchases are quoted again from the live remaining pool.</summary>
 public sealed record GigaSpawnPlan(int InitialCounter, long SpawnCost, int Count, double OriginalWaveHp)
 {
     public float InitialHp => (float)GigaRules.MaximumHp(InitialCounter);
@@ -18,14 +18,16 @@ public sealed class WaveSpawnPlan
     public long NormalBudget { get; }
     public long BossBudget { get; }
     public long BudgetSpent { get; }
+    public bool GigaEnabled { get; }
+    // Preview only: these bodies are neither reserved nor part of the fixed ordinary roster.
     public GigaSpawnPlan? GigaSpawns { get; }
     public int GigaCount => GigaSpawns?.Count ?? 0;
     public float GigaTotalHp => (float)(GigaSpawns is { } giga ? giga.ExactInitialHp * giga.Count : 0);
-    public int EncounterSpawnCount => checked(SpawnCount + GigaCount);
-    public float EncounterTotalHp => (float)EncounterExactTotalHp;
-    public double EncounterExactTotalHp => ExactTotalHp + (GigaSpawns is { } giga ? giga.ExactInitialHp * giga.Count : 0);
+    public int EncounterSpawnCount => SpawnCount;
+    public float EncounterTotalHp => TotalHp;
+    public double EncounterExactTotalHp => ExactTotalHp;
 
-    internal WaveSpawnPlan(List<ZombieGroup> groups, long hpBudget, long normalBudget, long bossBudget, GigaSpawnPlan? gigaSpawns = null)
+    internal WaveSpawnPlan(List<ZombieGroup> groups, long hpBudget, long normalBudget, long bossBudget, bool gigaEnabled = false)
     {
         Groups = groups.AsReadOnly();
         SpawnCount = checked((int)groups.Sum(group => (long)group.Count));
@@ -34,13 +36,20 @@ public sealed class WaveSpawnPlan
         HpBudget = hpBudget;
         NormalBudget = normalBudget;
         BossBudget = bossBudget;
-        GigaSpawns = gigaSpawns;
-        BudgetSpent = checked(groups.Sum(group => (long)group.Count * BudgetCost(group)) +
-            (gigaSpawns is { } giga ? giga.SpawnCost * giga.Count : 0));
+        GigaEnabled = gigaEnabled;
+        if (gigaEnabled)
+        {
+            int counter = GigaRules.SelectInitialCounter(hpBudget);
+            long cost = GigaRules.SpawnCost(counter);
+            if (cost <= hpBudget)
+                GigaSpawns = new(counter, cost, checked((int)(hpBudget / cost)), hpBudget);
+        }
+        BudgetSpent = groups.Sum(group => (long)group.Count * BudgetCost(group));
     }
 
-    public static int BudgetCost(ZombieGroup group) => group.IsBoss ?
-        group.Size == ZombieSize.Mega ? Balance.ZombieHp * 3 / 2 : Balance.ZombieHp :
+    // Only Kilo/Mega boss purchases receive the existing fixed-price discount.
+    public static int BudgetCost(ZombieGroup group) => group.IsBoss && group.Size == ZombieSize.Kilo ? Balance.ZombieHp :
+        group.IsBoss && group.Size == ZombieSize.Mega ? Balance.ZombieHp * 3 / 2 :
         LevelCatalog.ZombieMaxHp(group.Kind, group.Tier, group.Size);
 }
 
@@ -52,7 +61,7 @@ public static class WaveSpawnPlanner
         ArgumentNullException.ThrowIfNull(wave);
         LevelCatalog.Validate(new LevelDefinition { Waves = [wave] });
         var original = PlanOrdinary(wave);
-        return wave.EnableGiga ? ReserveGigas(original) : original;
+        return wave.EnableGiga ? EnableRecurringGigas(original) : original;
     }
 
     private static WaveSpawnPlan PlanOrdinary(WaveDefinition wave)
@@ -93,8 +102,8 @@ public static class WaveSpawnPlanner
     public static WaveSpawnPlan Combine(IReadOnlyList<WaveDefinition> waves)
     {
         if (waves.Count == 0) throw new ArgumentException("At least one wave is required.", nameof(waves));
-        // Compose the original purchases first. Reserving per input wave and
-        // then again after merging would lose budget and use the wrong W.
+        // Compose ordinary candidates and the shared wallet before estimating
+        // a Giga price from the combined starting pool.
         foreach (var wave in waves) LevelCatalog.Validate(new LevelDefinition { Waves = [wave] });
         var plans = waves.Select(PlanOrdinary).ToArray();
         long normalBudget = plans.Sum(plan => plan.NormalBudget);
@@ -117,28 +126,11 @@ public static class WaveSpawnPlanner
         var groups = Allocate(normalTypes, normalBudget);
         groups.AddRange(Allocate(bossTypes, bossBudget));
         var original = new WaveSpawnPlan(groups, checked(normalBudget + bossBudget), normalBudget, bossBudget);
-        return waves.Any(wave => wave.EnableGiga) ? ReserveGigas(original) : original;
+        return waves.Any(wave => wave.EnableGiga) ? EnableRecurringGigas(original) : original;
     }
 
-    private static WaveSpawnPlan ReserveGigas(WaveSpawnPlan original)
-    {
-        int counter = GigaRules.SelectInitialCounter(original.ExactTotalHp);
-        long cost = GigaRules.SpawnCost(counter);
-        long count = original.HpBudget / cost;
-        if (count == 0) return original;
-        // Returning-zombie identity currently persists its original purchase
-        // cost as Int32. Reject unsupported authored budgets consistently with
-        // the existing roster-count overflow contract instead of truncating it.
-        if (cost > int.MaxValue) throw new OverflowException("A Giga's spawn cost exceeds the supported integer range.");
-        int gigaCount = checked((int)count);
-        long remaining = original.HpBudget - cost * gigaCount;
-        long bossBudget = Math.Min(original.BossBudget, remaining);
-        long normalBudget = remaining - bossBudget;
-        var groups = Allocate(original.Groups.Where(group => !group.IsBoss).ToList(), normalBudget);
-        groups.AddRange(Allocate(original.Groups.Where(group => group.IsBoss).ToList(), bossBudget));
-        return new(groups, original.HpBudget, original.NormalBudget, original.BossBudget,
-            new GigaSpawnPlan(counter, cost, gigaCount, original.ExactTotalHp));
-    }
+    private static WaveSpawnPlan EnableRecurringGigas(WaveSpawnPlan original) =>
+        new(original.Groups.Select(Copy).ToList(), original.HpBudget, original.NormalBudget, original.BossBudget, gigaEnabled: true);
 
     private static List<ZombieGroup> Allocate(IReadOnlyList<ZombieGroup> choices, long budget)
     {

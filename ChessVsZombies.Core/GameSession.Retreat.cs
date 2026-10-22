@@ -247,9 +247,11 @@ public sealed partial class GameSession
             ? zombie.Tier : available!.Value;
         var tier = zombie.RetreatReturns >= 2 ? best : alreadyArmored
             ? (GearTier)Math.Min((int)best, (int)zombie.Tier + 1) : GearTier.Wood;
+        float previousMaximum = zombie.MaxHp;
         float addedHp = zombie.ReequipArmor(tier);
         if (zombie.WaveIndex >= 0 && zombie.WaveIndex < Waves.Count)
         {
+            RecordCombatHealthMaximumChange(zombie, Waves[zombie.WaveIndex], previousMaximum, zombie.MaxHp);
             Waves[zombie.WaveIndex].TotalHp += addedHp;
             if (_largeStandbyWaves.Count > zombie.WaveIndex && _largeStandbyWaves[zombie.WaveIndex] is { } large)
                 large.ExactTotalHp += addedHp;

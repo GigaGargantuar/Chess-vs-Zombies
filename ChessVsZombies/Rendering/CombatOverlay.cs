@@ -65,14 +65,14 @@ public static class CombatOverlay
             Bar("HP", zombie.BodyHp, zombie.MaxBodyHp, new Color(242, 134, 115), x, ref y);
             if (zombie.Giga is { } giga)
             {
-                foreach (var (label, value, color) in new[] {
-                    ("RES", giga.Resistance, new Color(134, 218, 235)),
-                    ("ATK", giga.AttackDamage, new Color(255, 162, 92)) })
+                foreach (var (label, number, color) in new[] {
+                    ("RES", giga.Resistance.ToString(giga.Resistance >= 100_000 ? "0.##e+0" : "0.##", CultureInfo.InvariantCulture), new Color(134, 218, 235)),
+                    ("ATK", GigaAttackLabel(giga.AttackCounter), new Color(255, 162, 92)) })
                 {
                     Fill(x - 2, y, 108, 12, new Color(10, 16, 23, 220));
                     font.Draw(batch, label, new Vector2(x + 1, y - 1), color, 9);
-                    string number = value.ToString(value >= 100_000 ? "0.##e+0" : "0.##", CultureInfo.InvariantCulture);
-                    font.Draw(batch, number, new Vector2(x + 37, y - 1), color, 9);
+                    float numberSize = Math.Min(9, 9 * 65 / Math.Max(1, font.Measure(number, 9)));
+                    font.Draw(batch, number, new Vector2(x + 37, y - 1), color, numberSize);
                     y += 12;
                 }
             }
@@ -105,5 +105,17 @@ public static class CombatOverlay
             font.Draw(batch, amount, position + Vector2.One, new Color(8, 12, 18, (int)(255 * opacity)), 18);
             font.Draw(batch, amount, position, new Color(color.R, color.G, color.B, (byte)(255 * opacity)), 18);
         }
+    }
+
+    private static string GigaAttackLabel(int counter)
+    {
+        // Format from the exponent directly: a legitimate large ATK can exceed
+        // floating-point range while its logarithm remains finite.
+        double logarithm = counter * Math.Log10(GigaRules.GoldenRatio);
+        if (logarithm < 5) return Math.Pow(10, logarithm).ToString("0.##", CultureInfo.InvariantCulture);
+        long exponent = (long)Math.Floor(logarithm);
+        double mantissa = Math.Round(Math.Pow(10, logarithm - exponent), 2);
+        if (mantissa >= 10) { mantissa = 1; exponent++; }
+        return mantissa.ToString("0.##", CultureInfo.InvariantCulture) + "e+" + exponent.ToString(CultureInfo.InvariantCulture);
     }
 }

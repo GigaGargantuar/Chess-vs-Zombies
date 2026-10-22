@@ -8,7 +8,8 @@ public sealed partial class GameSession
 
     public int PendingReinforcementCount => _returningZombies.Count;
     public long PendingReinforcementBudget => _returningZombies.Sum(zombie => (long)zombie.OriginalBudgetCost);
-    public long PendingBossReinforcementBudget => _returningZombies.Where(zombie => zombie.IsBoss)
+    public long PendingBossReinforcementBudget => _returningZombies.Where(zombie => zombie.IsBoss &&
+        (zombie.Size is ZombieSize.Kilo or ZombieSize.Mega))
         .Sum(zombie => (long)zombie.OriginalBudgetCost);
 
     private GearTier? BestAvailableArmorTier(int waveIndex)
@@ -89,7 +90,7 @@ public sealed partial class GameSession
         if (_largeStandbyWaves.Count > wave.Index && _largeStandbyWaves[wave.Index] is { } large)
             large.ExactTotalHp += ReinforcementHp(zombie);
         wave.HpBudget += zombie.OriginalBudgetCost;
-        if (zombie.IsBoss) wave.BossBudget += zombie.OriginalBudgetCost;
+        if (zombie.IsBoss && (zombie.Size is ZombieSize.Kilo or ZombieSize.Mega)) wave.BossBudget += zombie.OriginalBudgetCost;
         else wave.NormalBudget += zombie.OriginalBudgetCost;
     }
 
@@ -139,6 +140,7 @@ public sealed partial class GameSession
         wave.Spawned++;
         wave.ReinforcementsSpawned++;
         wave.BudgetSpent += saved.OriginalBudgetCost;
+        RecordCombatHealthPurchase(zombie, wave);
         return true;
     }
 }

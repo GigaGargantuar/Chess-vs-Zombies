@@ -7,8 +7,9 @@ public static partial class GigaRules
     public const int MinimumInitialCounter = 10;
 
     /// <summary>
-    /// Choose the closest HP to half the original wave pool. RES inherits this
-    /// counter rather than selecting its own. Exact ties choose the lower counter.
+    /// Choose the closest HP to half the supplied spawn pool. Each live purchase
+    /// supplies its wave's remaining budget; RES inherits the same counter.
+    /// Exact ties choose the lower counter.
     /// </summary>
     public static int SelectInitialCounter(double originalWaveHp)
     {

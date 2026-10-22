@@ -21,10 +21,12 @@ public sealed class DefenseGame : Game
     private JumpEditorView jumpView = null!;
     private KeyboardState previousKeys;
     private MouseState previousMouse;
-    private bool wasActive, synchronizeInput = true, suppressMouseUntilReleased;
+    private readonly InputFocusState inputFocus = new();
+    private bool captured => inputFocus.Captured;
+    private bool suppressMouseUntilReleased => inputFocus.SuppressMouseUntilReleased;
     private readonly FlyCamera cameraControl = new();
     private Vector3 camera => WorldRenderer.ToXna(cameraControl.Position);
-    private bool captured = true, paused, showZones = true, saveBlocked, batchAllTurrets = true;
+    private bool paused, showZones = true, saveBlocked, batchAllTurrets = true;
     private readonly TowerBatchSelection batchSelection = new();
     private bool batchSelectMode, batchCornerDepthOverride;
     private float batchCornerDepth = 8;
@@ -92,7 +94,7 @@ public sealed class DefenseGame : Game
         Window.AllowUserResizing = true;
         Window.TextInput += (_, e) =>
         {
-            if (!IsActive || captured || panel != 2 || templateField is null) return;
+            if (!HasInputFocus || captured || panel != 2 || templateField is null) return;
             if (e.Character is >= '0' and <= '9')
             {
                 if (templateFieldSelected) templateFieldText = "";
@@ -108,6 +110,9 @@ public sealed class DefenseGame : Game
         IsMouseVisible = false;
         IsFixedTimeStep = true;
         TargetElapsedTime = TimeSpan.FromSeconds(1d / 60);
+        // Continue background simulation near the normal update cadence while
+        // yielding CPU time to the app the player is using.
+        InactiveSleepTime = TimeSpan.FromMilliseconds(16);
         smokeMegaGuard = args.Contains("--smoke-mega-guard");
         smokeGiantDeaths = args.Contains("--smoke-giant-deaths");
         smokeThrownCover = args.Contains("--smoke-thrown-cover");
@@ -131,6 +136,9 @@ public sealed class DefenseGame : Game
         smoke = smoke || args.Contains("--smoke-jump-cost");
         smoke = smoke || args.Contains("--smoke-micro");
         smoke = smoke || args.Contains("--smoke-giga");
+        smoke = smoke || args.Contains("--smoke-giga-facing");
+        smoke = smoke || args.Contains("--smoke-giga-aoe");
+        smoke = smoke || args.Contains("--smoke-wave-health");
         smoke = smoke || args.Contains("--smoke-bottom-layer");
         smokeCombat = args.Contains("--smoke-combat");
         showDeathToll = args.Contains("--smoke-death-toll");
@@ -148,6 +156,9 @@ public sealed class DefenseGame : Game
         if (args.Contains("--smoke-jump-cost")) smokePanel = "jump-cost";
         if (args.Contains("--smoke-micro")) smokePanel = "micro";
         if (args.Contains("--smoke-giga")) smokePanel = "giga";
+        if (args.Contains("--smoke-giga-facing")) smokePanel = "giga-facing";
+        if (args.Contains("--smoke-giga-aoe")) smokePanel = "giga-aoe";
+        if (args.Contains("--smoke-wave-health")) smokePanel = "wave-health";
         if (args.Contains("--smoke-bottom-layer")) smokePanel = "bottom-layer";
         // One deterministic update per captured frame; slow GPU/startup frames must
         // not replay demonstration triggers or skip the animation being inspected.
@@ -160,7 +171,8 @@ public sealed class DefenseGame : Game
         if (smokePanel == "buckets") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 20.5f, 12), .26f, -.35f);
         if (smokePanel == "sizes") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 31), MathF.PI, -.35f);
         if (smokePanel == "micro") cameraControl = new FlyCamera(new System.Numerics.Vector3(22.5f, 20, 33), MathF.PI, -.38f);
-        if (smokePanel == "giga") cameraControl = new FlyCamera(new System.Numerics.Vector3(31, 27, 39), -2.55f, -.45f);
+        if (smokePanel is "giga" or "giga-facing" or "wave-health") cameraControl = new FlyCamera(new System.Numerics.Vector3(31, 27, 39), -2.55f, -.45f);
+        if (smokePanel == "giga-aoe") cameraControl = new FlyCamera(new System.Numerics.Vector3(11, 25, 34), 2.227f, -.351f);
         if (smokePanel == "megas") cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 26, 42), MathF.PI, -.34f);
         if (smokeThrownCover) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 25, 32), MathF.PI, -.3f);
         if (smokeTowerPenetration) cameraControl = new FlyCamera(new System.Numerics.Vector3(17, 23, 34), MathF.PI, -.54f);
@@ -188,7 +200,7 @@ public sealed class DefenseGame : Game
         capturePath = captureIndex >= 0 && captureIndex + 1 < args.Length ? Path.GetFullPath(args[captureIndex + 1]) : null;
         int saveIndex = Array.IndexOf(args, "--save-path");
         if (saveIndex >= 0 && saveIndex + 1 < args.Length) savePath = Path.GetFullPath(args[saveIndex + 1]);
-        Activated += (_, _) => { synchronizeInput = true; suppressMouseUntilReleased = true; };
+        Activated += (_, _) => inputFocus.SynchronizeInput();
         Deactivated += (_, _) => ReleaseCursorForFocusLoss();
         Window.ClientSizeChanged += (_, _) => { if (captured) CenterMouse(); };
         Exiting += (_, _) => { CommitTemplateField(); SaveCheckpoint(); };
@@ -288,6 +300,9 @@ public sealed class DefenseGame : Game
             if (smokePanel == "sizes") PrepareSizeSmoke();
             if (smokePanel == "micro") PrepareMicroSmoke();
             if (smokePanel == "giga") PrepareGigaSmoke();
+            if (smokePanel == "giga-facing") PrepareGigaFacingSmoke();
+            if (smokePanel == "giga-aoe") PrepareGigaAoeSmoke();
+            if (smokePanel == "wave-health") PrepareWaveHealthSmoke();
             if (smokePanel == "megas") PrepareMegaSmoke();
             if (smokeThrownCover) PrepareThrownCoverSmoke();
             if (smokeTowerPenetration) PrepareTowerPenetrationSmoke();
@@ -315,6 +330,9 @@ public sealed class DefenseGame : Game
                 smokePanel == "sizes" ? "Milli / Standard / Kilo. Two independent hands within one 2 x 2 x 2 volume." :
                 smokePanel == "micro" ? "Micro flankers / quarter size / 2 HP / 3x speed / incoming-fire dodges and moving turret attacks." :
                 smokePanel == "giga" ? "Giga / 4 x 4 x 4 / 0.2x speed / recovering RES / growing HP and focused ranged blast attacks." :
+                smokePanel == "giga-facing" ? "Giga facing / whole body, eyes and cannon turn toward the locked turret / paused before impact." :
+                smokePanel == "giga-aoe" ? "Fixed 3 x 3 x 3 blast / real stone impact / 3 x 3 opening two layers deep / outer stone frame intact." :
+                smokePanel == "wave-health" ? "Wave health / frame 20 healthy / 45 damaged / 75 dead / 105 replacement / live spawn purchases." :
                 smokePanel == "liquid-turrets" ? "Liquid sharing / wet tower left / obsidian shell at crosshair / one unit of room for pouring." :
                 smokePanel == "formation" ? "Saved formation / ghost towers mark missing positions / auto restore constructs one tower at a time." :
                 smokePanel is "batch-select" or "batch-spend" ? "Batch selection / two 3D corners, one added tower and one excluded tower / upgrade only the cyan group." :
@@ -810,6 +828,133 @@ public sealed class DefenseGame : Game
         selected = null;
         paused = true;
     }
+    private void PrepareWaveHealthSmoke()
+    {
+        var levels = new LevelCatalog();
+        levels.Set(new LevelDefinition
+        {
+            Number = 1, Name = "Wave combat HP and spawn budget demonstration",
+            Waves = [new WaveDefinition { HpBudget = 10_000, EnableGiga = true,
+                Groups = [new ZombieGroup { Kind = ZombieKind.Basic }] }]
+        });
+        session = new GameSession(levels: levels);
+        if (!session.StartLevel())
+            throw new InvalidOperationException("Could not start the wave-health demonstration.");
+        session.Update(.001f);
+        StageWaveHealthGiga();
+        selected = null;
+        showZones = false;
+        paused = true;
+    }
+    private void StageWaveHealthGiga()
+    {
+        var giga = session.Zombies.Single(zombie => zombie.IsGiga && zombie.BodyHp > 0);
+        giga.Position = giga.StandAt(new Cell(20, 16, 24));
+        giga.NextCell = null;
+        giga.MoveProgress = 0;
+        giga.FaceToward(-System.Numerics.Vector3.UnitZ);
+    }
+    private void UpdateWaveHealthSmoke()
+    {
+        if (frameCount == 30)
+        {
+            var giga = session.Zombies.Single(zombie => zombie.IsGiga && zombie.BodyHp > 0);
+            session.DamageZombie(giga, giga.BodyHp * .25f);
+        }
+        else if (frameCount == 60)
+        {
+            var giga = session.Zombies.Single(zombie => zombie.IsGiga && zombie.BodyHp > 0);
+            session.DamageZombie(giga, giga.Hp + giga.MaxHp);
+            session.Update(.001f);
+        }
+        else if (frameCount == 90)
+        {
+            session.Update(session.Waves[0].SpawnTimer + .001f);
+            StageWaveHealthGiga();
+        }
+    }
+    private void PrepareGigaAoeSmoke()
+    {
+        var levels = new LevelCatalog();
+        levels.Set(new LevelDefinition
+        {
+            Number = 1, Name = "Giga fixed three-cell blast demonstration",
+            Waves = [new WaveDefinition { HpBudget = 10_000, EnableGiga = true, SpawnInterval = 1000,
+                Groups = [new ZombieGroup { Kind = ZombieKind.Basic }] }]
+        });
+        session = new GameSession(levels: levels);
+        session.Inventory.Add(Material.Stone, 153);
+        for (int y = 16; y <= 21; y++)
+            for (int x = 22; x <= 26; x++)
+                for (int z = 22; z <= 26; z++)
+                    if (!session.BuildBarrier(new Cell(x, y, z), Material.Stone))
+                        throw new InvalidOperationException("Could not construct the supported Giga blast lattice.");
+        for (int y = 16; y <= 18; y++)
+            if (!session.BuildBarrier(new Cell(28, y, 24), Material.Stone))
+                throw new InvalidOperationException("Could not support the Giga blast target.");
+        if (!session.StartLevel())
+            throw new InvalidOperationException("Could not start the Giga blast demonstration.");
+        session.Update(.001f);
+        var giga = session.Zombies.Single(zombie => zombie.IsGiga && zombie.BodyHp > 0);
+        giga.Position = giga.StandAt(new Cell(14, 16, 22));
+        giga.NextCell = null;
+        giga.MoveProgress = 0;
+        giga.Cooldown = 0;
+        if (!session.Deploy(PieceKind.Rook, new Cell(28, 19, 24)))
+            throw new InvalidOperationException("Could not deploy the Giga target behind the blast lattice.");
+        var turret = session.Turrets.Single();
+        turret.Hp = 1_000_000_000;
+        turret.Cooldown = 1000;
+        session.Update(.001f);
+        var shot = session.GigaProjectiles.Single(projectile => projectile.OwnerId == giga.Id);
+        session.Update(shot.Duration + .001f);
+        // The impact selects 27 cells, including the empty layer in front of
+        // the wall. Its other two layers remove exactly 18 real stone blocks.
+        for (int y = 17; y <= 21; y++)
+            for (int x = 22; x <= 26; x++)
+                for (int z = 22; z <= 26; z++)
+                {
+                    var cell = new Cell(x, y, z);
+                    bool blasted = x <= 23 && y <= 19 && z is >= 23 and <= 25;
+                    if (blasted ? session.World.GetMaterial(cell) != Material.Air : session.World.GetBarrier(cell)?.Content != Material.Stone)
+                        throw new InvalidOperationException($"The fixed Giga blast altered an unexpected lattice cell at {cell}.");
+                }
+        if (turret.Hp != 1_000_000_000 || session.GigaProjectiles.Count != 0)
+            throw new InvalidOperationException("The real Giga shot must stop at the stone lattice before reaching the turret.");
+        selected = null;
+        showZones = false;
+        paused = true;
+    }
+    private void PrepareGigaFacingSmoke()
+    {
+        var levels = new LevelCatalog();
+        levels.Set(new LevelDefinition
+        {
+            Number = 1, Name = "Giga whole-body firing direction demonstration",
+            Waves = [new WaveDefinition { HpBudget = 10_000, EnableGiga = true, SpawnInterval = 1000,
+                Groups = [new ZombieGroup { Kind = ZombieKind.Basic }] }]
+        });
+        session = new GameSession(levels: levels);
+        if (!session.StartLevel())
+            throw new InvalidOperationException("Could not start the Giga facing demonstration.");
+        session.Update(.001f);
+        var giga = session.Zombies.Single(zombie => zombie.IsGiga && zombie.BodyHp > 0);
+        giga.Position = giga.StandAt(new Cell(20, 16, 24));
+        giga.NextCell = null;
+        giga.MoveProgress = 0;
+        giga.Cooldown = 0;
+        if (!session.Deploy(PieceKind.Rook, new Cell(26, 16, 28)))
+            throw new InvalidOperationException("Could not prepare the diagonal Giga facing target.");
+        var turret = session.Turrets.Single();
+        turret.Hp = 1_000_000_000;
+        turret.Cooldown = 1000;
+        session.Update(.001f);
+        if (!session.GigaProjectiles.Any(shot => shot.OwnerId == giga.Id && shot.TargetId == turret.Id))
+            throw new InvalidOperationException("The Giga facing demonstration did not naturally acquire and fire at its target.");
+        selected = null;
+        showZones = false;
+        paused = true;
+    }
     private void PrepareGigaSmoke()
     {
         var levels = new LevelCatalog();
@@ -824,7 +969,7 @@ public sealed class DefenseGame : Game
                 throw new InvalidOperationException("Could not prepare the Giga demonstration targets.");
         session.StartLevel();
         session.Waves[0].Spawned = session.Waves[0].TotalCount;
-        var giga = new Zombie { Id = 100, WaveIndex = -1, Size = ZombieSize.Giga, IsBoss = true, Cooldown = .25f };
+        var giga = new Zombie { Id = 100, WaveIndex = -1, Size = ZombieSize.Giga, IsBoss = true };
         giga.InitializeGiga(10_000);
         giga.Position = giga.StandAt(new Cell(19, 16, 27));
         giga.FaceToward(-System.Numerics.Vector3.UnitZ);
@@ -832,9 +977,10 @@ public sealed class DefenseGame : Game
         var comparison = new Zombie { Id = 101, WaveIndex = -1, Kind = ZombieKind.Basic };
         comparison.Position = comparison.StandAt(new Cell(25, 16, 27));
         session.Zombies.Add(comparison);
+        session.Update(.001f);
         selected = null;
         showZones = false;
-        paused = false;
+        paused = true;
     }
     private void PrepareMicroSmoke()
     {
@@ -977,24 +1123,24 @@ public sealed class DefenseGame : Game
     }
     private Vector3 Forward => WorldRenderer.ToXna(cameraControl.Forward);
     private Matrix CameraView => Matrix.CreateLookAt(camera, camera + Forward, WorldRenderer.ToXna(cameraControl.Up));
+    private bool HasInputFocus => IsActive && DesktopWindow.HasInputFocus(Window);
     private void CenterMouse()
     {
-        if (!IsActive || !captured) return;
+        if (!HasInputFocus || !captured) return;
         Mouse.SetPosition(Window.ClientBounds.Width / 2, Window.ClientBounds.Height / 2);
         previousMouse = Mouse.GetState();
     }
     private void Capture(bool value)
     {
         CommitTemplateField();
-        captured = value && IsActive;
+        inputFocus.Capture(value, value && HasInputFocus);
         IsMouseVisible = !captured;
-        if (captured) { suppressMouseUntilReleased = true; CenterMouse(); }
+        if (captured) CenterMouse();
     }
     private void ReleaseCursorForFocusLoss()
     {
         Capture(false);
-        synchronizeInput = true;
-        suppressMouseUntilReleased = true;
+        inputFocus.LoseFocus();
     }
     private bool Pressed(KeyboardState keys, Keys key) => keys.IsKeyDown(key) && previousKeys.IsKeyUp(key);
     protected override void Update(GameTime gameTime)
@@ -1004,21 +1150,18 @@ public sealed class DefenseGame : Game
         var keys = Keyboard.GetState(); var mouse = Mouse.GetState();
         // Event handling releases immediately; the state check also covers a
         // missed transition. Returning focus never captures or warps the cursor.
-        if (!IsActive && (wasActive || captured)) ReleaseCursorForFocusLoss();
-        bool resynchronizing = synchronizeInput || IsActive != wasActive;
-        if (resynchronizing)
+        bool focused = HasInputFocus;
+        if (!focused && captured) ReleaseCursorForFocusLoss();
+        var focusFrame = inputFocus.Observe(focused, mouse.LeftButton == ButtonState.Pressed ||
+            mouse.RightButton == ButtonState.Pressed || mouse.MiddleButton == ButtonState.Pressed);
+        if (focusFrame.SynchronizeInput)
         {
             previousKeys = keys;
             previousMouse = mouse;
-            synchronizeInput = false;
         }
-        wasActive = IsActive;
-        if (suppressMouseUntilReleased && mouse.LeftButton == ButtonState.Released &&
-            mouse.RightButton == ButtonState.Released && mouse.MiddleButton == ButtonState.Released)
-            suppressMouseUntilReleased = false;
         uiScale = Math.Min(Window.ClientBounds.Width / 1440f, Window.ClientBounds.Height / 900f);
         uiScale = Math.Max(.4f, uiScale); width = Window.ClientBounds.Width / uiScale; height = Window.ClientBounds.Height / uiScale;
-        if (IsActive && !smoke && !resynchronizing)
+        if (focusFrame.CanProcessInput && !smoke)
         {
             if (Pressed(keys, Keys.F2)) showDeathToll = !showDeathToll;
             if (templateField.HasValue && panel == 2 && !captured) HandleTemplateFieldInput(keys, mouse);
@@ -1048,7 +1191,7 @@ public sealed class DefenseGame : Game
                 if (panel != 3 && Pressed(keys, Keys.D8)) { batchSelectMode = false; tool = 7; panel = 6; }
                 if (panel != 3 && Pressed(keys, Keys.D9)) { batchSelectMode = false; tool = 8; panel = 6; }
                 if (panel != 3 && Pressed(keys, Keys.D0)) { batchSelectMode = false; tool = 9; panel = 6; }
-                if (panel != 3 && captured)
+                if (panel != 3 && captured && HasInputFocus)
                 {
                     mouse = Mouse.GetState();
                     int cx = Window.ClientBounds.Width / 2, cy = Window.ClientBounds.Height / 2;
@@ -1101,12 +1244,13 @@ public sealed class DefenseGame : Game
         var oldPhase = session.Phase;
         if (smokeMegaGuard && frameCount > 0 && frameCount % 15 == 0) QueueMegaGuardSmokeVolley();
         if (smokePanel == "micro" && frameCount > 0 && frameCount % 20 == 0) QueueMicroSmokeVolley();
+        if (smokePanel == "wave-health") UpdateWaveHealthSmoke();
         if (smokeThrownCover && frameCount is 15 or 30) QueueThrownCoverSmokeShot(25);
         var queuedBeforeUpdate = session.QueuedUpgradeBatch;
         bool restoringFormation = session.IsAutoRestoringFormation;
         int towersBeforeUpdate = session.Turrets.Count;
         bool graceBeforeUpdate = queuedBeforeUpdate?.GraceRemaining.HasValue ?? false;
-        if (!paused && (IsActive || smoke))
+        if (inputFocus.ShouldSimulate(paused))
         {
             if (smokeHorde)
             {
@@ -1431,10 +1575,13 @@ public sealed class DefenseGame : Game
         if (Pressed(keys, Keys.PageUp)) jumpEditor.SetLayer(jumpEditor.Layer + 1, JumpEditorRadius());
         if (Pressed(keys, Keys.PageDown)) jumpEditor.SetLayer(jumpEditor.Layer - 1, JumpEditorRadius());
         if (Pressed(keys, Keys.P)) paused = !paused;
-        int wheel = mouse.ScrollWheelValue - previousMouse.ScrollWheelValue;
-        if (wheel != 0) jumpEditor.ZoomBy(Math.Sign(wheel) * Math.Max(1, Math.Abs(wheel) / 120));
-        if (mouse.MiddleButton == ButtonState.Pressed && previousMouse.MiddleButton == ButtonState.Pressed)
-            jumpEditor.Rotate(mouse.X - previousMouse.X, mouse.Y - previousMouse.Y);
+        if (!suppressMouseUntilReleased)
+        {
+            int wheel = mouse.ScrollWheelValue - previousMouse.ScrollWheelValue;
+            if (wheel != 0) jumpEditor.ZoomBy(Math.Sign(wheel) * Math.Max(1, Math.Abs(wheel) / 120));
+            if (mouse.MiddleButton == ButtonState.Pressed && previousMouse.MiddleButton == ButtonState.Pressed)
+                jumpEditor.Rotate(mouse.X - previousMouse.X, mouse.Y - previousMouse.Y);
+        }
 
         var point = new Point((int)(mouse.X / uiScale), (int)(mouse.Y / uiScale));
         if (!JumpSceneBounds.Contains(point)) { jumpPreview = null; }
@@ -1695,7 +1842,32 @@ public sealed class DefenseGame : Game
             Text($"WAVE {started}/{session.Waves.Count}     {session.Zombies.Count} ACTIVE     {spawned}/{total} SPAWNED", left, 180, 15, Teal);
             int resupplying = session.Zombies.Count(session.IsZombieRetreating);
             if (resupplying > 0) Text($"{resupplying} returning for supplies", left, 197, 12, Gold);
-            float y = 210;
+            float y = 217;
+            foreach (var wave in session.Waves)
+            {
+                string source = session.AllInOne ? $"L{LevelRange}" : $"L{session.GetSourceLevelNumber(wave.Index):00}";
+                var health = session.GetWaveHealth(wave.Index);
+                double combatHp = health.CombatHp;
+                long spawnHp = health.SpawnHp;
+                double combatFraction = health.CombatMaxHp > 0 ? Math.Clamp(combatHp / health.CombatMaxHp, 0, 1) : 0;
+                double spawnFraction = health.SpawnHpBudget > 0 ? Math.Clamp((double)spawnHp / health.SpawnHpBudget, 0, 1) : 0;
+                Text($"{wave.Index + 1:00}  {source}  {(wave.Started ? "HP LEFT" : "WAITING")}", left, y, 12, Muted);
+                Text($"LIVE COMBAT  {combatHp:N0} / {health.CombatMaxHp:N0}  ({combatFraction * 100:0.#}%)", left, y + 18, 12, Red);
+                Text($"SPAWN  {spawnHp:N0} / {health.SpawnHpBudget:N0}  ({spawnFraction * 100:0.#}%)", left, y + 36, 12, Gold);
+                // Adjacent segments share one scale; matching legends retain
+                // each pool's own totals and percentages.
+                const int barWidth = 280;
+                double combinedMaximum = health.BarMaximum;
+                int combatEnd = combinedMaximum > 0
+                    ? (int)Math.Clamp(Math.Round(barWidth * combatHp / combinedMaximum), 0, barWidth) : 0;
+                int spawnEnd = combinedMaximum > 0
+                    ? (int)Math.Clamp(Math.Round(barWidth * (combatHp + spawnHp) / combinedMaximum), combatEnd, barWidth) : 0;
+                Fill(left - 1, y + 57, barWidth + 2, 12, new Color(49, 64, 76));
+                Fill(left, y + 58, barWidth, 10, Raised);
+                Fill(left, y + 58, combatEnd, 10, Red);
+                Fill(left + combatEnd, y + 58, spawnEnd - combatEnd, 10, Gold);
+                y += 84;
+            }
             if (overlayPerformance.ReducedDetail)
             {
                 double hp = 0, maximum = 0;
@@ -1707,30 +1879,35 @@ public sealed class DefenseGame : Game
                 }
                 Text("ACTIVE ENEMY HP + ARMOR", left, y, 12, Muted);
                 Text($"{hp:N0} / {maximum:N0}", left, y + 21, 16, Red);
-                Fill(left, y + 47, 220, 7, Raised);
-                Fill(left, y + 47, 220 * (float)Math.Clamp(hp / Math.Max(1, maximum), 0, 1), 7, Red);
-                Text("PERFORMANCE MODE", left, y + 70, 12, Gold);
-                Text("Damage indicators disabled", left, y + 90, 12, Muted);
-            }
-            else foreach (var wave in session.Waves)
-            {
-                string source = session.AllInOne ? $"L{LevelRange}" : $"L{session.GetSourceLevelNumber(wave.Index):00}";
-                Text($"{wave.Index + 1:00}  {source}  {(wave.Started ? "HP REMAINING" : "WAITING")}", left, y, 12, Muted);
-                float remaining = wave.TotalHp > 0 ? Math.Clamp(1 - wave.DamageTaken / wave.TotalHp, 0, 1) : 0;
-                Fill(left, y + 23, 220, 5, Raised); Fill(left, y + 23, 220 * remaining, 5, wave.Started ? Red : Muted * .4f);
-                Fill(left + 110, y + 21, 1, 9, TextColor); y += 47;
+                Text("PERFORMANCE MODE", left, y + 47, 12, Gold);
+                Text("Damage indicators disabled", left, y + 67, 12, Muted);
             }
         }
         else
         {
             Text("Build. Equip. Hold the center.", left, 180, 16, Muted);
-            Text($"Next {LevelRange}: {session.PreparedWaves.Sum(w => w.EncounterSpawnCount) + session.PendingReinforcementCount} zombies / {session.PreparedWaves.Count} wave(s)", left, 206, 15, Muted);
-            Text($"HP budget {session.PreparedWaves.Sum(w => w.HpBudget) + session.PendingReinforcementBudget:N0} / boss reserve {session.PreparedWaves.Sum(w => w.BossBudget) + session.PendingBossReinforcementBudget:N0}", left, 232, 13, Muted);
-            Text($"Victory / {session.SurvivorRewardPerTower} currency per surviving tower{(session.AllInOne ? " / 7.5x bonus" : "")}", left, 254, 13, Gold);
+            Text($"Next {LevelRange}: {session.PreparedWaves.Sum(w => w.SpawnCount):N0} ordinary spawn candidates / {session.PreparedWaves.Count} wave(s)", left, 206, 15, Muted);
+            long totalSpawnHp = session.PreparedWaves.Sum(wave => wave.HpBudget) + session.PendingReinforcementBudget;
+            long initialGigaPrices = session.PreparedWaves.Sum(wave => wave.GigaEnabled && wave.GigaSpawns is { } giga ? giga.SpawnCost : 0);
+            Text($"HP budget {totalSpawnHp:N0} / boss reserve {session.PreparedWaves.Sum(w => w.BossBudget) + session.PendingBossReinforcementBudget:N0}", left, 232, 13, Muted);
+            float preparationY = 254;
+            if (initialGigaPrices > 0)
+            {
+                int quotedWaves = session.PreparedWaves.Count(wave => wave.GigaEnabled && wave.GigaSpawns is not null);
+                Text($"FIRST GIGA PRICE  {initialGigaPrices:N0} spawn HP / {quotedWaves} wave(s) / initial estimate", left, preparationY, 13, Gold);
+                preparationY += 22;
+                Text("Each Giga is repriced from the remaining spawn pool", left, preparationY, 13, Muted);
+                preparationY += 22;
+            }
+            Text($"Victory / {session.SurvivorRewardPerTower} currency per surviving tower{(session.AllInOne ? " / 7.5x bonus" : "")}", left, preparationY, 13, Gold);
+            preparationY += 22;
             if (session.AllInOne)
-                Text("5x spawn rate / final-wave equipment from the start", left, 276, 13, Gold);
+            {
+                Text("5x spawn rate / final-wave equipment from the start", left, preparationY, 13, Gold);
+                preparationY += 22;
+            }
             if (session.PendingReinforcementCount > 0)
-                Text($"Includes {session.PendingReinforcementCount} returning survivors", left, session.AllInOne ? 298 : 276, 13, Gold);
+                Text($"Includes {session.PendingReinforcementCount} returning survivors", left, preparationY, 13, Gold);
         }
         float px = width - 340, py = 112;
         Fill(px, py, 312, height - 248, Panel);

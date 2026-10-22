@@ -718,8 +718,6 @@ public sealed class WorldRenderer : IDisposable
         var dark = new Color(38, 38, 64);
         var resistance = new Color(134, 218, 235);
         var shot = new Color(255, 162, 92);
-        // The four-cell collision volume stays axis aligned. The broad body
-        // follows that volume while only its ranged weapon turns toward a target.
         float stride = MathF.Sin((float)time * 2.8f + zombie.Id) * .055f;
         dynamic.Box(feet + new Vector3(-1.7f, .03f, -1.45f), feet + new Vector3(-.35f, .96f + stride, 1.45f), dark);
         dynamic.Box(feet + new Vector3(.35f, .03f, -1.45f), feet + new Vector3(1.7f, .96f - stride, 1.45f), dark);
@@ -728,15 +726,24 @@ public sealed class WorldRenderer : IDisposable
         dynamic.Box(feet + new Vector3(1.63f, 1.22f, -1.35f), feet + new Vector3(1.96f, 2.63f, 1.35f), dark);
         dynamic.Box(feet + new Vector3(-1.18f, 2.8f, -1.12f), feet + new Vector3(1.18f, 3.97f, 1.12f), skin);
         dynamic.Outline(feet + new Vector3(-1.78f, 1.05f, -1.58f), feet + new Vector3(1.78f, 2.78f, 1.58f), resistance, .035f);
-        foreach (float z in new[] { -1.135f, 1.135f })
-            dynamic.Box(feet + new Vector3(-.78f, 3.35f, z - .012f), feet + new Vector3(.78f, 3.53f, z + .012f), shot);
-        TransformVertices(firstVertex, Matrix.Identity, flash);
-
-        int weaponVertex = dynamic.Vertices.Count;
+        dynamic.Box(feet + new Vector3(-.78f, 3.35f, 1.123f), feet + new Vector3(.78f, 3.53f, 1.147f), shot);
+        dynamic.Box(feet + new Vector3(-.17f, 2.95f, -1.147f), feet + new Vector3(.17f, 3.82f, -1.123f), dark);
         dynamic.Box(feet + new Vector3(-.45f, 1.77f, .65f), feet + new Vector3(.45f, 2.67f, 1.63f), dark);
         dynamic.Box(feet + new Vector3(-.30f, 1.92f, 1.63f), feet + new Vector3(.30f, 2.52f, 1.96f), shot);
         dynamic.Box(feet + new Vector3(-.17f, 2.05f, 1.965f), feet + new Vector3(.17f, 2.39f, 1.975f), dark);
-        TransformVertices(weaponVertex, Matrix.CreateTranslation(-feet) * ZombieRotation(zombie) * Matrix.CreateTranslation(feet), flash);
+        // Body, face and cannon turn together. Fit the actual rotated vertices
+        // horizontally inside the same four-cell collision cube at every yaw.
+        var rotation = ZombieRotation(zombie);
+        float horizontalExtent = 0;
+        foreach (var vertex in CollectionsMarshal.AsSpan(dynamic.Vertices)[firstVertex..])
+        {
+            var point = Vector3.Transform(vertex.Position - feet, rotation);
+            horizontalExtent = Math.Max(horizontalExtent, Math.Max(Math.Abs(point.X), Math.Abs(point.Z)));
+        }
+        float halfWidth = Math.Min(zombie.BodyHalfExtents.X, zombie.BodyHalfExtents.Z) - .001f;
+        float horizontalScale = horizontalExtent > halfWidth ? halfWidth / horizontalExtent : 1;
+        TransformVertices(firstVertex, Matrix.CreateTranslation(-feet) * Matrix.CreateScale(horizontalScale, 1, horizontalScale) *
+            rotation * Matrix.CreateTranslation(feet), flash);
     }
 
     private void DrawStowedKiloCover(Zombie zombie, KiloCover cover)

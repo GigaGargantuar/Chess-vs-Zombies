@@ -479,6 +479,7 @@ public sealed class LevelDefinition
 }
 public sealed class WaveState
 {
+    internal double CombatHpPremium { get; set; }
     public int Index { get; init; }
     public int TotalCount { get; set; }
     public int Spawned { get; set; }

@@ -8,7 +8,7 @@ namespace ChessVsZombies.Tests;
 public sealed class GigaDomainTests
 {
     [Fact]
-    public void InitializationUsesHalfTheOriginalPoolAndTheNearestEligibleIntegerCounter()
+    public void InitializationUsesHalfTheSuppliedPoolAndTheNearestEligibleIntegerCounter()
     {
         Assert.Equal(10, GigaRules.SelectInitialCounter(1));
         Assert.Equal(10, GigaRules.SelectInitialCounter(0));
@@ -24,10 +24,27 @@ public sealed class GigaDomainTests
         zombie.InitializeGiga(20_000);
         Assert.Equal(GigaRules.SelectInitialCounter(20_000), zombie.Giga!.InitialCounter);
         Assert.Equal(zombie.Giga.HpCounter, zombie.Giga.ResCounter);
-        Assert.Equal(1, zombie.Giga.AttackCounter);
+        Assert.Equal(zombie.Giga.HpCounter, zombie.Giga.AttackCounter);
         Assert.Equal(zombie.MaxHp, zombie.Hp);
         Assert.Equal((long)Math.Ceiling(GigaRules.MaximumHp(zombie.Giga.InitialCounter)), zombie.Giga.SpawnCost);
         Assert.Equal(523, GigaRules.SpawnCost(10));
+    }
+
+    [Theory]
+    [InlineData(10)]
+    [InlineData(23)]
+    [InlineData(185)]
+    [InlineData(2500)]
+    public void EveryNewGigaStartsAllThreeIndependentCountersAtTheSuppliedInitialCounter(int initialCounter)
+    {
+        var state = new GigaState(initialCounter);
+        Assert.Equal(initialCounter, state.InitialCounter);
+        Assert.Equal(initialCounter, state.HpCounter);
+        Assert.Equal(initialCounter, state.ResCounter);
+        Assert.Equal(initialCounter, state.AttackCounter);
+        Assert.Equal((float)Math.Pow(GigaRules.GoldenRatio, initialCounter), state.AttackDamage);
+        Assert.Equal(1.5f, state.BlastRadius);
+        Assert.Equal(3, GigaRules.BlastSize);
     }
 
     [Theory]
@@ -148,24 +165,26 @@ public sealed class GigaDomainTests
         Assert.Equal(.25, zombie.Giga.RecoverySeconds);
         Assert.Equal((float)Enumerable.Range(1, 13).Sum(k => Math.Log(k, Math.PI)), zombie.Giga.Resistance);
         Assert.Equal(10, zombie.Giga.HpCounter);
-        Assert.Equal(1, zombie.Giga.AttackCounter);
+        Assert.Equal(10, zombie.Giga.AttackCounter);
         Assert.Equal(maximum, zombie.MaxHp);
         Assert.Equal(maximum, zombie.Hp);
     }
 
     [Fact]
-    public void AttackProgressionUsesPhiAndItsLogarithmicBlastRadiusAndResetsAfterLockedTargetKill()
+    public void AttackProgressionStartsAtTheInitialCounterUsesPhiWithAFixedBlastAndResetsToOneAfterAnyKill()
     {
         var zombie = Giga();
-        for (int counter = 1; counter <= 8; counter++)
+        for (int counter = 10; counter <= 17; counter++)
         {
             Assert.Equal(counter, zombie.Giga!.AttackCounter);
             Assert.Equal((float)Math.Pow(GigaRules.GoldenRatio, counter), zombie.AttackDamage);
-            Assert.Equal(MathF.Log10(zombie.AttackDamage), zombie.Giga.BlastRadius, 6);
+            Assert.Equal(1.5f, zombie.Giga.BlastRadius);
             zombie.Giga.RecordSuccessfulAttack(false);
         }
         zombie.Giga!.RecordSuccessfulAttack(true);
         Assert.Equal(1, zombie.Giga.AttackCounter);
+        zombie.Giga.RecordSuccessfulAttack(false);
+        Assert.Equal(2, zombie.Giga.AttackCounter);
         Assert.Equal(10, zombie.Giga.HpCounter);
         Assert.Equal(10, zombie.Giga.ResCounter);
     }
@@ -188,7 +207,7 @@ public sealed class GigaDomainTests
     private static Zombie Giga(int resCounter = 10)
     {
         var zombie = new Zombie { Size = ZombieSize.Giga, Kind = ZombieKind.Armored };
-        if (resCounter != 10) zombie.RestoreGigaState(10, 10, resCounter, 1, 0);
+        if (resCounter != 10) zombie.RestoreGigaState(10, 10, resCounter, 10, 0);
         return zombie;
     }
 
